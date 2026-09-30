@@ -1,0 +1,872 @@
+{
+  "repo": "volcengine/OpenViking",
+  "commit": "2846bb6e76",
+  "system_type": "framework",
+  "system_type_reason": "Context database infrastructure that other agents build on; ships an optional bundled agent (Vikingbot).",
+  "repo_overview": {
+    "summary": "Context database for AI agents that manages memories, resources and skills through a filesystem paradigm (viking:// URIs) with three content tiers (L0 abstract, L1 overview, L2 full content), hierarchical retrieval and automatic long-term memory extraction from sessions. Contains two agentic loops: the ExtractLoop, a ReAct orchestrator in which an LLM reads the memory filesystem via tools and emits memory operations, and Vikingbot, a Nanobot-derived chat agent with shell/file/web/MCP/OpenViking tools and background subagents.",
+    "components": [
+      {
+        "path": "openviking/session/",
+        "purpose": "session management, compression, tool-result store/synopsis, memory extraction (ExtractLoop ReAct orchestrator), skill extraction and dedup"
+      },
+      {
+        "path": "openviking/retrieve/",
+        "purpose": "hierarchical retriever, intent analyzer, memory lifecycle"
+      },
+      {
+        "path": "openviking/models/",
+        "purpose": "VLM/LLM backends, embedders, rerankers, token usage accounting"
+      },
+      {
+        "path": "openviking/storage/",
+        "purpose": "VikingFS, vector DB adapters, queue FS for async processing, transactions"
+      },
+      {
+        "path": "openviking/parse/",
+        "purpose": "parsers that split documents, code and media into L0/L1/L2 content, partly LLM-based"
+      },
+      {
+        "path": "openviking/service/",
+        "purpose": "service layer: resource, search, session, relation and task services"
+      },
+      {
+        "path": "openviking/server/",
+        "purpose": "HTTP server with routers, auth, API keys, OAuth"
+      },
+      {
+        "path": "openviking/telemetry/, openviking/observability/, openviking/metrics/",
+        "purpose": "tracing, usage audit, metrics collection and export"
+      },
+      {
+        "path": "openviking_cli/",
+        "purpose": "Python client and config loading"
+      },
+      {
+        "path": "bot/vikingbot/",
+        "purpose": "Vikingbot agent: agent/ (AgentLoop, SubagentManager, tools), providers/ (LLM), sandbox/, channels/, hooks/, cron/, heartbeat/, session/"
+      },
+      {
+        "path": "crates/",
+        "purpose": "Rust: RAGFS filesystem, cache backends (redis, mooncake, yuanrong), ov CLI"
+      },
+      {
+        "path": "src/",
+        "purpose": "C++ vector index and store (native extension)"
+      },
+      {
+        "path": "web-studio/, sdk/, npm/, deploy/, docker/, benchmark/, examples/, tests/, docs/",
+        "purpose": "UI, SDKs, deployment, benchmarks, examples, tests and documentation"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "openviking/session/memory/extract_loop.py",
+        "lines": "205-207, 224-241, 270",
+        "snippet": "        while iteration < max_iterations:\n            iteration += 1\n            tracer.info(f\"ReAct iteration {iteration}/{max_iterations}\")\n...\n            tool_calls, operations = await self._call_llm(messages)\n\n            if tool_calls:\n                has_unknown_tool = await self._execute_tool_calls(messages, tool_calls, tools_used)\n                # If model called an unknown tool, disable tools in next iteration\n                if has_unknown_tool:\n                    self._disable_tools_for_iteration = True\n                    tracer.info(\"Unknown tool called, will disable tools in next iteration\")\n                # Allow one extra iteration for refetch\n                if iteration >= max_iterations:\n                    max_iterations += 1\n                    self._disable_tools_for_iteration = True\n                    tracer.info(f\"Extended max_iterations to {max_iterations} for tool call\")\n                continue\n\n            # If model returned final operations, check if refetch is needed\n            if operations is not None:\n                final_operations, raw_links = await self.resolve_operations(operations)\n...\n                break"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "ExtractLoop.run() calls _call_llm (extract_loop.py:224); returned tool calls (read/search/ls) are executed via _execute_tool_calls (extract_loop.py:226-227), final operations drive the memory writes.",
+      "consumes_feedback": "Tool results are appended to messages via add_tool_call_pair_to_messages (extract_loop.py:581-587) and feed the next _call_llm iteration.",
+      "multi_turn_until_termination": "while iteration < max_iterations (extract_loop.py:205) loops over tool rounds and breaks once valid final operations are produced (extract_loop.py:270)."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent",
+    "evidence": [
+      {
+        "file": "bot/vikingbot/agent/tools/spawn.py",
+        "lines": "51-59",
+        "snippet": "    async def execute(\n        self, tool_context: \"ToolContext\", task: str, label: str | None = None, **kwargs: Any\n    ) -> str:\n        \"\"\"Spawn a subagent to execute the given task.\"\"\"\n        return await self._manager.spawn(\n            task=task,\n            label=label,\n            session_key=tool_context.session_key,\n        )"
+      },
+      {
+        "file": "bot/vikingbot/agent/subagent.py",
+        "lines": "115-137, 178-180",
+        "snippet": "            # Build messages with subagent-specific prompt\n            system_prompt = self._build_subagent_prompt(task)\n            messages: list[dict[str, Any]] = [\n                {\"role\": \"system\", \"content\": system_prompt},\n                {\"role\": \"user\", \"content\": task_content},\n            ]\n\n            # Run agent loop (limited iterations)\n            max_iterations = 15\n            iteration = 0\n            final_result: str | None = None\n\n            while iteration < max_iterations:\n                iteration += 1\n\n                response = await self.provider.chat(\n                    messages=messages,\n                    tools=tools.get_definitions(),\n                    model=self.model,\n                    temperature=self.temperature,\n                )\n\n                if response.has_tool_calls:\n...\n                else:\n                    final_result = response.content\n                    break"
+      },
+      {
+        "file": "bot/vikingbot/agent/subagent.py",
+        "lines": "214-221",
+        "snippet": "        # Inject as system message to trigger main agent\n        msg = InboundMessage(\n            sender_id=\"subagent\",\n            session_key=session_key,\n            content=announce_content,\n        )\n\n        await self.bus.publish_inbound(msg)"
+      },
+      {
+        "file": "bot/vikingbot/agent/loop.py",
+        "lines": "1429-1442",
+        "snippet": "        # Run agent loop (no events published)\n        (\n            final_content,\n            final_reasoning_content,\n            tools_used,\n            token_usage,\n            iteration,\n        ) = await self._run_agent_loop(\n            messages=messages,\n            session_key=msg.session_key,\n            publish_events=False,\n            ov_tools_enable=ov_tools_enable,\n            memory_peer_ids=None,\n        )"
+      }
+    ],
+    "justification": "Vikingbot's main AgentLoop exposes a spawn tool (spawn.py:51-59) that starts a SubagentManager background task. Each subagent runs its own LLM loop with a dedicated system prompt, its own ToolRegistry, tool feedback and a stop condition (subagent.py:115-180, max 15 iterations). The result is published back as an InboundMessage (subagent.py:214-221) and the main agent processes it in a further _run_agent_loop (loop.py:1429-1442). A boss agent delegating to helper agents with their own loops counts as multi-agent. The ExtractLoop in openviking/session/memory/ is a separate single-agent ReAct loop.",
+    "verdict_raw": "multi-agent"
+  },
+  "resilience": [
+    {
+      "name": "iteration cap with forced final answer",
+      "what_it_is": "The memory ExtractLoop runs at most max_iterations ReAct rounds (default 3). On the last round a user message orders the model to stop calling tools and return the final JSON, including an empty-shape skeleton of all expected fields for the no-change case. If no operations result, a RuntimeError is raised.",
+      "function_in_system": "Bounds the memory extraction ReAct loop in ExtractLoop.run(). Caps LLM cost and latency per extraction and steers the model toward a usable final answer at the budget limit. Otherwise the model could keep exploring the memory filesystem via tools and the extraction would end with no operations.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/memory/extract_loop.py",
+          "lines": "209-219, 292-294, 744-750",
+          "snippet": "            # Check if this is the last iteration - force final result\n            is_last_iteration = iteration >= max_iterations\n\n            # If last iteration, add a message telling the model to return result directly\n            if is_last_iteration:\n                messages.append(\n                    {\n                        \"role\": \"user\",\n                        \"content\": self._build_final_operations_instruction(),\n                    }\n                )\n...\n        if final_operations is None:\n            if iteration >= max_iterations:\n                raise RuntimeError(f\"Reached {max_iterations} iterations without completion\")\n...\n        return (\n            \"You have reached the maximum number of tool call iterations. \"\n            \"Do not call any more tools. Return your final result now as ONLY a valid JSON object \"\n            \"matching the required schema. Do not include explanations or markdown. \"\n            \"If there are no memory changes, return this exact empty-shape JSON with all fields present:\\n\"\n            f\"{skeleton}\"\n        )"
+        }
+      ]
+    },
+    {
+      "name": "five-layer tolerant JSON parsing of LLM output",
+      "what_it_is": "parse_json_with_stability parses the model's final operations in five layers: (1) cut non-JSON text before and after the JSON, (2) json_repair, (3) structure tolerance (first element of a list, bare [] as no operations, unexpected fields dropped), (4) per-field type coercion (str/int/float/list), (5) Pydantic validation with strict=False where fields that still fail are dropped individually.",
+      "function_in_system": "Sits between the LLM response and the operations model in ExtractLoop._call_llm (extract_loop.py:673-677). Absorbs malformed or slightly off-schema model output locally, which saves a retry round. Otherwise minor formatting slips such as markdown fences, trailing prose or wrong value types would fail the whole extraction.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/memory/utils/json_parser.py",
+          "lines": "3-10",
+          "snippet": "\"\"\"\nJSON stable parsing - Five-Layer Fault Tolerance Architecture.\n\nLayer 1: JSON Cleanup    - extract_json_content()\nLayer 2: JSON Repair      - json_repair.loads() (handles markdown too)\nLayer 3: Structure Tolerance - list→object conversion + field filtering\nLayer 4: Value Tolerance  - value_fault_tolerance()\nLayer 5: Validation Tolerance - TypeAdapter(strict=False) + list item filtering"
+        },
+        {
+          "file": "openviking/session/memory/utils/json_parser.py",
+          "lines": "406-431, 460-482",
+          "snippet": "    # Layer 1: Extract JSON content (both leading and trailing)\n    try:\n        cleaned_content = extract_json_content(content)\n        if not cleaned_content:\n            return None, \"No JSON content found after cleanup\"\n    except Exception as e:\n        tracer.error(f\"Layer 1 cleanup failed: {e}\")\n        cleaned_content = content\n\n    # Layer 2: Parse with json_repair\n    parsed_data = None\n    try:\n        parsed_data = json_repair.loads(cleaned_content)\n    except Exception as e:\n        tracer.error(f\"Layer 2 json_repair failed: {e}\")\n        # Fallback: try regular json.loads\n        try:\n            parsed_data = json.loads(cleaned_content)\n        except Exception as e2:\n            return None, f\"JSON parsing failed: {e} (fallback also failed: {e2})\"\n\n    # Layer 3: Structure tolerance\n    # Handle case where model returns [{\"xxx\": ...}] instead of {\"xxx\": ...}\n    if isinstance(parsed_data, list) and len(parsed_data) > 0:\n        parsed_data = parsed_data[0]\n        tracer.info(\"Extracted first item from list response\")\n...\n    try:\n        # First try direct model validation\n        return model_class.model_validate(parsed_data, strict=False), None\n    except Exception as e:\n        tracer.info(f\"Direct model validation failed, trying parse_value_with_tolerance: {e}\")\n        tracer.info(f\"content={content}\")\n        # Fallback: Apply value fault tolerance to each field individually\n        try:\n            field_types = get_type_hints(model_class)\n            tolerant_data = {}\n            for field_name, field_value in parsed_data.items():\n                if field_name in field_types:\n                    try:\n                        tolerant_data[field_name] = parse_value_with_tolerance(\n                            field_value, field_types[field_name]\n                        )\n                    except Exception as field_e:\n                        tracer.error(f\"Field {field_name} parsing failed: {field_e}\")\n                        # Skip this field rather than failing the whole parse\n                        continue\n\n            # Now try validating with the tolerant data\n            return model_class.model_validate(tolerant_data, strict=False), None"
+        }
+      ]
+    },
+    {
+      "name": "format-error feedback retry",
+      "what_it_is": "If the LLM returns neither tool calls nor parsable operations, the loop appends one user message stating the output failed to parse as valid JSON, grants one extra iteration and disables tools for the next call. A second failure raises a RuntimeError.",
+      "function_in_system": "Sits after _call_llm inside the ExtractLoop iteration. Feeds the parse failure back to the model for one self-correction attempt. Per the code comment, the hard failure afterwards is intended so an unparseable response is never silently treated as 'no memory operations', which would drop the session's memories.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/memory/extract_loop.py",
+          "lines": "271-290, 724-728",
+          "snippet": "            # If no tool calls either, continue to next iteration (don't break!)\n            tracer.error(\n                f\"LLM returned neither tool calls nor operations (iteration {iteration}/{max_iterations})\"\n            )\n            # Add format error message if parse failed (max 1 retry)\n            if self._format_retry_count == 0:\n                self._format_retry_count += 1\n                max_iterations += 1\n                tracer.info(f\"Extended max_iterations to {max_iterations} for format retry\")\n                self._add_format_error_message(messages)\n\n            # If it's the last iteration, fail instead of silently treating an\n            # unparseable final response as \"no memory operations\".\n            if iteration >= max_iterations:\n                raise RuntimeError(\n                    \"Memory extraction final response could not be parsed as JSON operations\"\n                )\n\n            self._disable_tools_for_iteration = True\n            continue\n...\n                \"content\": (\n                    \"Your previous output could not be parsed as valid JSON. \"\n                    \"Please output ONLY a valid JSON object matching the required schema. \"\n                    \"Do not include any explanation, markdown formatting, or text outside the JSON.\"\n                ),"
+        }
+      ]
+    },
+    {
+      "name": "read-before-write enforcement via auto-refetch",
+      "what_it_is": "Before accepting final operations, the loop checks every target URI: if an existing memory file is written that the model has left unread, the system reads it, injects the content as a read tool result plus a note to consider the existing content, and runs another round (extending max_iterations by one if needed).",
+      "function_in_system": "Sits between operation resolution and acceptance in ExtractLoop.run(). Prevents the model from blindly overwriting existing memory files whose content it never saw. Otherwise stored long-term memories would be lost or clobbered by an uninformed write.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/memory/extract_loop.py",
+          "lines": "242-253, 840-843",
+          "snippet": "                # Check if any write_uris target existing files that weren't read\n                refetch_uris = await self._check_unread_existing_files(final_operations)\n                if refetch_uris:\n                    tracer.info(f\"Found unread existing files: {refetch_uris}, refetching...\")\n                    # Add refetch results to messages and continue loop\n                    await self._add_refetch_results_to_messages(messages, refetch_uris)\n                    # Allow one extra iteration for refetch\n                    if iteration >= max_iterations:\n                        max_iterations += 1\n                        tracer.info(f\"Extended max_iterations to {max_iterations} for refetch\")\n\n                    continue\n...\n            {\n                \"role\": \"user\",\n                \"content\": \"Note: The files above were automatically read because they exist and you didn't read them before deciding to write. Please consider the existing content when making write decisions. You can now output updated operations.\",\n            }"
+        },
+        {
+          "file": "openviking/session/memory/extract_loop.py",
+          "lines": "699-717",
+          "snippet": "    async def _check_unread_existing_files(self, operations: ResolvedOperations) -> Dict:\n        refetch_uris = {}\n        for operation in operations.upsert_operations:\n            for uri in operation.uris:\n                if uri in self.context_provider.read_file_contents:\n                    continue\n                try:\n                    content = await self.context_provider.execute_tool(\n                        ToolCall(id=\"\", name=\"read\", arguments={\"uri\": uri})\n                    )\n                    # 读取出错表示文件不存在（error dict 含 \"error\" key）\n                    if isinstance(content, Dict) and \"error\" in content:\n                        continue\n\n                    # execute_tool(MemoryReadTool) 已经返回 parsed dict，直接使用\n                    refetch_uris[uri] = content\n                except Exception as e:\n                    tracer.error(\"read tool execute fail\", e)\n        return refetch_uris"
+        }
+      ]
+    },
+    {
+      "name": "patch pre-validation with one repair round",
+      "what_it_is": "Each SEARCH/REPLACE patch in the final operations is dry-run against the bound memory file. A patch that leaves the content unchanged counts as failed; the errors (including other files where the SEARCH text was found, flagged as possible page_id mismatch) are sent back once as a repair instruction, with one extra iteration and tools disabled, asking for the complete regenerated operations JSON.",
+      "function_in_system": "Sits after refetch and before acceptance of the final operations in ExtractLoop.run(). Detects edits that would fail silently or target the wrong memory page and lets the model fix them. Otherwise memory updates would be lost unnoticed or land in the wrong file.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/memory/extract_loop.py",
+          "lines": "254-269, 808-815",
+          "snippet": "                patch_errors = self._validate_patch_operations(final_operations)\n                if patch_errors and patch_repair_count == 0:\n                    patch_repair_count += 1\n                    max_iterations += 1\n                    self._disable_tools_for_iteration = True\n                    messages.append(\n                        {\n                            \"role\": \"user\",\n                            \"content\": self._build_patch_repair_instruction(patch_errors),\n                        }\n                    )\n                    tracer.info(\n                        f\"Extended max_iterations to {max_iterations} for retry patch repair\",\n                        console=True,\n                    )\n                    continue\n...\n        details = json.dumps(patch_errors, ensure_ascii=False, indent=2)\n        return (\n            \"SEARCH/REPLACE patch could not be applied to the target memory file. \"\n            \"The SEARCH text must be copied exactly from the read result of the file bound to that operation's page_id. \"\n            \"Do not use SEARCH text from the conversation or from another page. \"\n            \"If you copy from numbered read output, exclude the `line_number<TAB>` prefix from SEARCH and REPLACE text. \"\n            \"If found_in_other_uris is non-empty, diagnose this as a possible page_id mismatch and choose the correct target page_id or rewrite the patch for the current page_id; do not silently move the patch. \"\n            \"Regenerate the complete operations JSON, including previous successful operations and fixed failed operations. \""
+        },
+        {
+          "file": "openviking/session/memory/extract_loop.py",
+          "lines": "778-783",
+          "snippet": "                try:\n                    applied_content = apply_str_patch(current_content, patch)\n                except Exception:\n                    applied_content = current_content\n                if applied_content != current_content:\n                    continue"
+        }
+      ]
+    },
+    {
+      "name": "fuzzy patch application fallback",
+      "what_it_is": "apply_str_patch first applies SEARCH/REPLACE blocks by exact string replace; if that fails it falls back to a line-based strategy with Levenshtein similarity matching (threshold 0.8, middle-out search) and aggressive stripping of line-number prefixes the model copied from read output.",
+      "function_in_system": "Sits in the merge step that applies model-written patches to memory files (also used by the patch pre-validation). Tolerates imprecise SEARCH blocks from the model such as small wording drift or copied line numbers. Otherwise many patches would fail to apply and the edits would be lost or require extra repair rounds.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/memory/merge_op/patch_handler.py",
+          "lines": "885-889",
+          "snippet": "    if all_applied:\n        return result_content\n\n    # Fall back to line-based approach for complex cases\n    strategy = MultiSearchReplaceDiffStrategy(fuzzy_threshold=0.8)"
+        },
+        {
+          "file": "openviking/session/memory/merge_op/patch_handler.py",
+          "lines": "603-610, 626-629",
+          "snippet": "                # Try exact match first\n                original_chunk = \"\\n\".join(result_lines[exact_start_index : exact_end_index + 1])\n                similarity = get_similarity(original_chunk, search_chunk)\n                if similarity >= self.fuzzy_threshold:\n                    match_index = exact_start_index\n                    best_match_score = similarity\n                    best_match_content = original_chunk\n                else:\n...\n            # Try aggressive line number stripping as a fallback\n            if match_index == -1 or best_match_score < self.fuzzy_threshold:\n                aggressive_search_content = strip_line_numbers(search_content, aggressive=True)\n                aggressive_replace_content = strip_line_numbers(replace_content, aggressive=True)"
+        }
+      ]
+    },
+    {
+      "name": "unknown-tool guard",
+      "what_it_is": "If any tool call returns an 'Unknown tool:' error, the next LLM call is made with tools disabled, so the model must return its final operations.",
+      "function_in_system": "Sits after tool execution in the ExtractLoop iteration and controls the tools passed to the next _call_llm. Stops the model from looping on hallucinated tools. Otherwise the loop would burn its iteration budget on invalid calls.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/memory/extract_loop.py",
+          "lines": "226-231, 566-567, 610-612",
+          "snippet": "            if tool_calls:\n                has_unknown_tool = await self._execute_tool_calls(messages, tool_calls, tools_used)\n                # If model called an unknown tool, disable tools in next iteration\n                if has_unknown_tool:\n                    self._disable_tools_for_iteration = True\n                    tracer.info(\"Unknown tool called, will disable tools in next iteration\")\n...\n            if isinstance(result, dict) and result.get(\"error\", \"\").startswith(\"Unknown tool:\"):\n                has_unknown_tool = True\n...\n        if not self._disable_tools_for_iteration and self._tool_schemas:\n            tools = self._tool_schemas\n            tool_choice = \"auto\""
+        }
+      ]
+    },
+    {
+      "name": "token-saving tool-result compaction",
+      "what_it_is": "Memory tool results are reduced before they enter the context: search results are cut to uri and score, .abstract.md/.overview.md files are filtered out and the list is capped at the requested limit (default 10); read results drop links/backlinks and support offset/limit paging; tool call pairs are serialized as one compact user message.",
+      "function_in_system": "Sits in the memory tools of the ExtractLoop (tools.py). Per the code comments, it reduces token consumption of the tool observations. Otherwise every search and read round would inflate the extraction prompt with metadata irrelevant to the memory decision.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/memory/tools.py",
+          "lines": "25-38",
+          "snippet": "def optimize_search_result(result: Any, limit: int = 10) -> Any:\n    \"\"\"优化搜索结果以减少 Token 消耗，并过滤掉抽象文件。\"\"\"\n    if isinstance(result, dict) and \"error\" in result:\n        return {\"error\": extract_error_summary(result[\"error\"])}\n    if isinstance(result, dict) and \"memories\" in result:\n        filtered = [\n            item\n            for item in result[\"memories\"]\n            if not (\n                item.get(\"uri\", \"\").endswith(\".abstract.md\")\n                or item.get(\"uri\", \"\").endswith(\".overview.md\")\n            )\n        ]\n        return [{\"uri\": item[\"uri\"], \"score\": item[\"score\"]} for item in filtered[:limit]]"
+        },
+        {
+          "file": "openviking/session/memory/tools.py",
+          "lines": "264-271",
+          "snippet": "            # 多搜索 10 个，过滤抽象文件后再截断\n            search_result = await ctx.viking_fs.search(\n                query,\n                target_uri=target_uri,\n                limit=limit + 10,\n                ctx=request_ctx,\n            )\n            return optimize_search_result(search_result.to_dict(), limit=limit)"
+        },
+        {
+          "file": "openviking/session/memory/tools.py",
+          "lines": "190-194",
+          "snippet": "            ctx.read_file_contents[uri] = mf\n            # Remove links/backlinks from LLM-visible output (not needed for extraction)\n            llm_result = mf.to_metadata()\n            llm_result.pop(\"links\", None)\n            llm_result.pop(\"backlinks\", None)"
+        },
+        {
+          "file": "openviking/session/memory/tools.py",
+          "lines": "72",
+          "snippet": "    \"\"\"Add a tool call pair with optimized format to save tokens.\"\"\""
+        }
+      ]
+    },
+    {
+      "name": "deterministic context prefetch",
+      "what_it_is": "Before the first LLM call, the context provider runs one batched search over the memory directories of multi-file schemas and reads all single-file schema files, injecting the results as ready-made tool call pairs; with the eager_prefetch config it additionally reads the top-N search hits.",
+      "function_in_system": "Sits before the ReAct loop (extract_loop.py:198-200). Supplies the context the model would otherwise gather via tool calls, so extraction often completes in a single LLM call. Otherwise each extraction would spend extra LLM rounds on exploration, raising cost and latency within a budget of only 3 iterations.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/memory/extract_loop.py",
+          "lines": "198-200",
+          "snippet": "        # Pre-fetch context via provider\n        tool_call_messages = await self.context_provider.prefetch()\n        messages.extend(tool_call_messages)"
+        },
+        {
+          "file": "openviking/session/memory/session_extract_context_provider.py",
+          "lines": "553-563, 576-581",
+          "snippet": "        # 批量 search：所有目录一次搜索\n        if ls_dirs:\n            dir_list = list(ls_dirs)\n            search_query = self._build_prefetch_search_query()\n            if not search_query:\n                search_query = \"conversation\"\n            search_uris = await self.search_files(\n                query=search_query,\n                search_uris=dir_list,\n            )\n            result_value = search_uris\n...\n        # 读取单文件 schema 的文件（只对非 add_only 模式）\n        for file_uri in read_files:\n            call_id_seq = await self._append_structured_read_result(\n                messages=pre_fetch_messages,\n                call_id=call_id_seq,\n                file_uri=file_uri,"
+        }
+      ]
+    },
+    {
+      "name": "per-operation error isolation on memory apply",
+      "what_it_is": "MemoryUpdater.apply_operations wraps every upsert and every delete in its own try/except and collects failures in a MemoryUpdateResult. In addition, a delete whose URI was upserted in the same batch is skipped, since the LLM expresses a replace as delete plus create of the same name.",
+      "function_in_system": "Sits after the ExtractLoop, where the model's operations are written to VikingFS. Contains a failing operation to its own URI so the rest of the batch still lands, and neutralizes a known LLM output pattern. Otherwise one bad operation would abort the whole memory update, and a replace would delete the just-written file.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/memory/memory_updater.py",
+          "lines": "754-776",
+          "snippet": "\n        # Apply unified operations - _apply_edit returns True if edited, False if written\n        for resolved_op in operations.upsert_operations:\n            try:\n                await self._apply_upsert(\n                    resolved_op,\n                    ctx,\n                    extract_context=extract_context,\n                )\n                # Add all uris to result (uris is List[str])\n                if resolved_op.is_edit():\n                    for uri in resolved_op.uris:\n                        result.add_edited(uri)\n                else:\n                    for uri in resolved_op.uris:\n                        result.add_written(uri)\n            except Exception as e:\n                tracer.error(\n                    f\"Failed to apply operation: op_type={type(resolved_op).__name__}, uris={resolved_op.uris}\",\n                    e,\n                )\n                for uri in resolved_op.uris:\n                    result.add_error(uri, e)"
+        },
+        {
+          "file": "openviking/session/memory/memory_updater.py",
+          "lines": "778-796",
+          "snippet": "        # Apply delete operations (delete_file_contents is List[MemoryFile])\n        # Skip deletes whose URI was just written in the same batch — this happens when the\n        # LLM issues a Replace with the same experience_name (delete old + create same-name new),\n        # which is semantically an Update. Executing the delete would remove the just-written file.\n        upserted_uris = set(result.written_uris + result.edited_uris)\n        for file_content in operations.delete_file_contents:\n            if file_content.uri in upserted_uris:\n                tracer.info(\n                    f\"[apply_operations] skipping delete for {file_content.uri}: \"\n                    \"URI was upserted in the same batch (Replace-with-same-name treated as Update)\"\n                )\n                continue\n            try:\n                await self._apply_delete(file_content.uri, ctx)\n                result.add_deleted(file_content.uri)\n            except Exception as e:\n                tracer.error(f\"Failed to delete memory {file_content.uri}\", e)\n                result.add_error(file_content.uri, e)\n"
+        }
+      ]
+    },
+    {
+      "name": "iteration cap with tool-free final answer (Vikingbot)",
+      "what_it_is": "The main AgentLoop runs at most max_iterations (default 50) LLM/tool rounds. When the cap is hit and the model has produced no final answer, a user message announces the limit and one extra LLM call with tools=[] forces a direct answer from the gathered results; if that stays empty, a fixed fallback text is returned. Subagents use a hard cap of 15 iterations with a fixed fallback result.",
+      "function_in_system": "Sits around the whole tool-calling loop in _run_agent_loop and SubagentManager._run_subagent. Bounds runaway tool-calling and its cost per user message, and still converts the partial work into an answer. Otherwise a model that keeps calling tools loops indefinitely or ends with an empty reply.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "697-698",
+          "snippet": "        while iteration < self.max_iterations:\n            iteration += 1"
+        },
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "860-882",
+          "snippet": "        if final_content is None or (isinstance(final_content, str) and not final_content.strip()):\n            if iteration >= self.max_iterations:\n                messages.append(\n                    {\n                        \"role\": \"user\",\n                        \"content\": (\n                            \"Tool-use iteration limit reached. Do not call any more tools. \"\n                            \"Answer the user's original request directly using only the \"\n                            \"conversation, tool calls, and tool results already available above. \"\n                            \"If the gathered information is incomplete, explain the best-known \"\n                            \"answer and clearly note what remains uncertain.\"\n                        ),\n                    }\n                )\n                response, _streamed_content, streamed_reasoning = await self._chat_with_stream_events(\n                    messages=messages,\n                    tools=[],\n                    session_key=session_key,\n                    publish_events=publish_events,\n                )\n                accumulate_token_usage(response)\n                final_content = response.content\n                final_reasoning_content = response.reasoning_content"
+        },
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "893-898",
+          "snippet": "        if final_content is None or (isinstance(final_content, str) and not final_content.strip()):\n            if iteration >= self.max_iterations:\n                final_content = (\n                    \"I reached the tool-use limit before completing every step, and the \"\n                    \"available tool results are not enough for a reliable final answer.\"\n                )"
+        },
+        {
+          "file": "bot/vikingbot/agent/subagent.py",
+          "lines": "123-127, 178-183",
+          "snippet": "            max_iterations = 15\n            iteration = 0\n            final_result: str | None = None\n\n            while iteration < max_iterations:\n...\n                else:\n                    final_result = response.content\n                    break\n\n            if final_result is None:\n                final_result = \"Task completed but no final response was generated.\""
+        }
+      ]
+    },
+    {
+      "name": "tool-call error containment as observation",
+      "what_it_is": "ToolRegistry.execute maps an unknown tool name to an 'Error: Tool ... not found' string and catches every exception raised by a tool, returning 'Error executing <name>: ...' as the tool result. The individual tools (shell, filesystem) follow the same pattern and return error strings.",
+      "function_in_system": "Sits at the single tool dispatch point used by the main loop and subagents. Tool failures become tool messages that the LLM reads in the next iteration and can react to. Otherwise one failing or hallucinated tool call aborts the whole message processing.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/agent/tools/registry.py",
+          "lines": "169-171",
+          "snippet": "        tool = self._tools.get(name)\n        if not tool:\n            return f\"Error: Tool '{name}' not found\""
+        },
+        {
+          "file": "bot/vikingbot/agent/tools/registry.py",
+          "lines": "198-205",
+          "snippet": "            errors = tool.validate_params(params)\n            if errors:\n                result = f\"Error: Invalid parameters for tool '{name}': \" + \"; \".join(errors)\n            else:\n                result = await tool.execute(tool_context, **params)\n        except Exception as e:\n            result = e\n            logger.exception(\"Tool call fail: \", e)"
+        },
+        {
+          "file": "bot/vikingbot/agent/tools/registry.py",
+          "lines": "240-244",
+          "snippet": "        result = hook_result.get(\"result\")\n        if isinstance(result, Exception):\n            return f\"Error executing {name}: {str(result)}\"\n        else:\n            return result"
+        },
+        {
+          "file": "bot/vikingbot/agent/tools/shell.py",
+          "lines": "47-55",
+          "snippet": "        try:\n            sandbox = await tool_context.sandbox_manager.get_sandbox(tool_context.session_key)\n\n            if command.strip() == \"pwd\":\n                return sandbox.sandbox_cwd\n\n            return await sandbox.execute(command, timeout=self.timeout)\n        except Exception as e:\n            return f\"Error executing: {str(e)}\""
+        }
+      ]
+    },
+    {
+      "name": "JSON-schema validation of tool arguments",
+      "what_it_is": "Before execution, Tool.validate_params recursively checks the LLM-supplied arguments against the tool's JSON schema (types, enum, minimum/maximum, minLength/maxLength, required keys, array items). On any error the tool is skipped and an 'Error: Invalid parameters for tool ...' message listing all violations is returned. Tool arguments that fail JSON parsing are wrapped as {'raw': ...}, so the required-key check rejects them with the same error feedback.",
+      "function_in_system": "Sits in ToolRegistry.execute between the LLM's tool call and the tool implementation. Catches malformed arguments deterministically and feeds precise violations back to the model for correction. Otherwise malformed arguments reach the tool code and fail with opaque exceptions or act on wrong values.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/agent/tools/base.py",
+          "lines": "169-172",
+          "snippet": "        schema = self.parameters or {}\n        if schema.get(\"type\", \"object\") != \"object\":\n            raise ValueError(f\"Schema must be object type, got {schema.get('type')!r}\")\n        return self._validate(params, {**schema, \"type\": \"object\"}, \"\")"
+        },
+        {
+          "file": "bot/vikingbot/agent/tools/base.py",
+          "lines": "195-197, 212-216",
+          "snippet": "        t, label = schema.get(\"type\"), path or \"parameter\"\n        if t in self._TYPE_MAP and not isinstance(val, self._TYPE_MAP[t]):\n            return [f\"{label} should be {t}\"]\n...\n        if t == \"object\":\n            props = schema.get(\"properties\", {})\n            for k in schema.get(\"required\", []):\n                if k not in val:\n                    errors.append(f\"missing required {path + '.' + k if path else k}\")"
+        },
+        {
+          "file": "bot/vikingbot/agent/tools/registry.py",
+          "lines": "198-202",
+          "snippet": "            errors = tool.validate_params(params)\n            if errors:\n                result = f\"Error: Invalid parameters for tool '{name}': \" + \"; \".join(errors)\n            else:\n                result = await tool.execute(tool_context, **params)"
+        },
+        {
+          "file": "bot/vikingbot/providers/litellm_provider.py",
+          "lines": "471-476",
+          "snippet": "                if isinstance(args, str):\n                    try:\n                        tokens += cal_str_tokens(args, text_type=\"mixed\")\n                        args = json.loads(args)\n                    except json.JSONDecodeError:\n                        args = {\"raw\": args}"
+        },
+        {
+          "file": "bot/vikingbot/providers/base.py",
+          "lines": "92-96",
+          "snippet": "            try:\n                parsed_arguments = json.loads(raw_arguments)\n                arguments = parsed_arguments if isinstance(parsed_arguments, dict) else {}\n            except json.JSONDecodeError:\n                arguments = {\"raw\": raw_arguments}"
+        }
+      ]
+    },
+    {
+      "name": "MCP tool-call timeout and cancellation isolation",
+      "what_it_is": "Every MCP tool call is wrapped in asyncio.wait_for with tool_timeout (default 30 s). Timeouts, SDK-internal cancellations and other exceptions are converted into result strings; a CancelledError is re-raised only when the agent task itself is being cancelled.",
+      "function_in_system": "Sits in MCPToolWrapper.execute, the adapter between the agent loop and external MCP servers. Keeps a hanging or crashing external server from blocking or cancelling the agent's turn and reports the failure to the model. Otherwise a stuck MCP server stalls the whole agent loop.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/agent/tools/mcp.py",
+          "lines": "111-133",
+          "snippet": "        try:\n            result = await asyncio.wait_for(\n                self._session.call_tool(self._original_name, arguments=kwargs),\n                timeout=self._tool_timeout,\n            )\n        except asyncio.TimeoutError:\n            logger.warning(\"MCP tool '{}' timed out after {}s\", self._name, self._tool_timeout)\n            return f\"(MCP tool call timed out after {self._tool_timeout}s)\"\n        except asyncio.CancelledError:\n            # MCP SDK's anyio cancel scopes can leak CancelledError on timeout/failure.\n            # Re-raise only if our task was externally cancelled (e.g. /stop).\n            task = asyncio.current_task()\n            if task is not None and task.cancelling() > 0:\n                raise\n            logger.warning(\"MCP tool '{}' was cancelled by server/SDK\", self._name)\n            return \"(MCP tool call was cancelled)\"\n        except Exception as exc:\n            logger.exception(\n                \"MCP tool '{}' failed: {}: {}\",\n                self._name,\n                type(exc).__name__,\n                exc,\n            )"
+        },
+        {
+          "file": "bot/vikingbot/config/schema.py",
+          "lines": "603",
+          "snippet": "    tool_timeout: int = 30  # seconds before a tool call is cancelled"
+        }
+      ]
+    },
+    {
+      "name": "experience-memory injection before write actions",
+      "what_it_is": "When the model first calls a write tool in a turn (exp_write_tools, default write_file/edit_file), the loop queries OpenViking for learned agent experiences using the last three user messages, appends them as a 'Relevant Agent Experience' message and re-runs the iteration before executing the write. Subagents receive the same experience lookup for their task. Experiences are distilled from past trajectories and include failure-prevention rules.",
+      "function_in_system": "Sits in _run_agent_loop right before the first state-changing tool execution and at subagent start. Lets the agent apply lessons from earlier runs before it modifies files. Otherwise the agent repeats mistakes that earlier executions already recorded.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "731-736, 750-765",
+          "snippet": "                # Inject experience memory before write-related tool calls (once per session)\n                if not write_exp_injected:\n                    _ov_cfg = load_config().ov_server\n                    _write_tools = set(_ov_cfg.exp_write_tools)\n                    if any(tc.name in _write_tools for tc in response.tool_calls):\n                        write_exp_injected = True\n...\n                            _exp = await self.context.memory.get_viking_experience_context(\n                                query=_query,\n                                workspace_id=workspace_id,\n                                openviking_connection=openviking_connection,\n                            )\n                            logger.info(\n                                f\"[WRITE_EXP]: write tool detected, exp_found={bool(_exp)}, query={_query[:50]}\"\n                            )\n                            if _exp:\n                                messages.append(\n                                    {\n                                        \"role\": \"user\",\n                                        \"content\": f\"## Relevant Agent Experience\\n{_exp}\",\n                                    }\n                                )\n                                continue"
+        },
+        {
+          "file": "bot/vikingbot/agent/subagent.py",
+          "lines": "107-111",
+          "snippet": "                exp_memory = await memory_store.get_viking_experience_context(\n                    query=task, workspace_id=workspace_id\n                )\n                if exp_memory:\n                    task_content = f\"## Agent Experience (relevant to this task)\\n{exp_memory}\\n\\n---\\n\\n{task}\""
+        },
+        {
+          "file": "bot/vikingbot/config/schema.py",
+          "lines": "537",
+          "snippet": "    exp_write_tools: list[str] = Field(default_factory=lambda: [\"write_file\", \"edit_file\"])"
+        },
+        {
+          "file": "openviking/prompts/templates/memory/experiences.yaml",
+          "lines": "34",
+          "snippet": "      <markdown bullets: Hard Guardrails & Principles (The \"DON'Ts\"). Strict negative rules (e.g., \"NEVER do Z\"), boundary conditions, and failure-prevention heuristics to avoid past mistakes.>"
+        }
+      ]
+    },
+    {
+      "name": "budgeted memory recall injection",
+      "what_it_is": "Recalled user memories are filtered by score (>= 0.1), deduplicated by content hash and packed into the prompt under a total character budget (memory_recall_max_chars, default 4000) plus per-type budgets for events and entities. Memories beyond the budget are reduced to a summary or a URI-only entry, and the prompt tells the model to fetch those URIs with openviking_multi_read when needed.",
+      "function_in_system": "Sits in context building before each turn (ContextBuilder -> MemoryStore.get_viking_memory_context). Caps the context cost of automatic memory recall while keeping pointers to the rest. Otherwise every turn injects all retrieved memories in full and inflates the prompt.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/agent/memory.py",
+          "lines": "295",
+          "snippet": "        filtered_memories = [memory for memory in result if self._get_score(memory) >= min_score]"
+        },
+        {
+          "file": "bot/vikingbot/agent/memory.py",
+          "lines": "347-379",
+          "snippet": "                if use_type_budgets and memory_type in type_char_budgets:\n                    budget = max(0, int(type_char_budgets[memory_type]))\n                    if (\n                        type_chars[memory_type] + full_chars <= budget\n                        and total_chars + full_chars <= max_chars\n                    ):\n                        grouped_memories.setdefault(memory_type, []).append(full_memory_str)\n                        type_chars[memory_type] += full_chars\n                        total_chars += full_chars\n                        continue\n                elif use_type_budgets and memory_type == \"preferences\":\n                    preference_full_count += 1\n                    if total_chars + full_chars <= max_chars:\n                        grouped_memories.setdefault(memory_type, []).append(full_memory_str)\n                        total_chars += full_chars\n                        continue\n                elif total_chars + full_chars <= max_chars:\n                    grouped_memories.setdefault(memory_type, []).append(full_memory_str)\n                    total_chars += full_chars\n                    continue\n\n            if use_type_budgets and memory_type == \"events\" and content:\n                summary = self._extract_event_summary(content, fallback=abstract)\n                if summary:\n                    grouped_memories.setdefault(memory_type, []).append(\n                        self._format_summary_memory(idx, uri, score, summary)\n                    )\n                    continue\n\n            if include_uri_entries:\n                grouped_memories.setdefault(memory_type, []).append(\n                    self._format_uri_memory(idx, uri, score)\n                )"
+        },
+        {
+          "file": "bot/vikingbot/config/schema.py",
+          "lines": "550",
+          "snippet": "    memory_recall_max_chars: int = 4000"
+        },
+        {
+          "file": "bot/vikingbot/agent/context.py",
+          "lines": "240-241",
+          "snippet": "                \"- Injected memories are grouped by memory_type: events contain atomic time-based facts; entities contain stable topic/entity facts; preferences contain likes, habits, and recurring tendencies.\\n\"\n                \"- Injected memory entries use three types: full means the full memory content is already shown; summary means only a summary is shown and the URI has more detail; uri means only the URI is shown and it may still point to key facts.\\n\""
+        }
+      ]
+    },
+    {
+      "name": "session-window trimming with LLM memory consolidation",
+      "what_it_is": "When a session exceeds memory_window (default 50) messages, the session is cloned, the live session is cut to the last min(10, max(2, memory_window // 2)) messages, and an LLM call condenses the older messages into a HISTORY.md entry and an updated long-term MEMORY.md. Session.get_history additionally caps prompt history at 50 messages.",
+      "function_in_system": "Sits in _process_message before the agent loop runs. Keeps the conversation history in the prompt bounded while preserving older content as summarized memory. Otherwise long chats overflow the context window or lose older facts silently.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "1107-1114",
+          "snippet": "            elif len(session.messages) > self.memory_window and not self._eval:\n                # Clone session for async consolidation, then immediately trim original\n                session_clone = session.clone()\n                keep_count = min(10, max(2, self.memory_window // 2))\n                session.messages = session.messages[-keep_count:] if keep_count else []\n                await self.sessions.save(session)\n                # Run consolidation in background\n                await self._safe_consolidate_memory(session_clone, archive_all=False)"
+        },
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "1516-1520",
+          "snippet": "            prompt = f\"\"\"You are a memory consolidation agent. Process this conversation and return a JSON object with exactly two keys:\n\n1. \"history_entry\": A paragraph (2-5 sentences) summarizing the key events/decisions/topics. Start with a timestamp like [YYYY-MM-DD HH:MM]. Include enough detail to be useful when found by grep search later.\n\n2. \"memory_update\": The updated long-term memory content. Add any new facts: user location, preferences, personal info, habits, project context, technical decisions, tools/services used. If nothing new, return the existing content unchanged."
+        },
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "1547-1551",
+          "snippet": "            if entry := result.get(\"history_entry\"):\n                memory.append_history(entry)\n            if update := result.get(\"memory_update\"):\n                if load_config().use_local_memory and update != current_memory:\n                    memory.write_long_term(update)"
+        },
+        {
+          "file": "bot/vikingbot/session/manager.py",
+          "lines": "68-70",
+          "snippet": "        recent = (\n            self.messages[-max_messages:] if len(self.messages) > max_messages else self.messages\n        )"
+        }
+      ]
+    },
+    {
+      "name": "token-budgeted OpenViking session context with local fallback",
+      "what_it_is": "With session_context_enabled, the prompt history is rebuilt from OpenViking's archive overview plus recent messages under session_context_token_budget (default 3000), followed by the unsynced local tail. Before a turn, the session is committed to OpenViking when pending tokens reach commit_token_threshold or the message count reaches memory_window, keeping the most recent commit_keep_recent_count messages. If loading the OpenViking context fails, the loop falls back to the local session history. A failed sync marks last_sync_status as error, and the local session is then kept intact.",
+      "function_in_system": "Sits in _process_message and _build_prompt_history as the alternative context-management path. Bounds prompt size by tokens and moves older turns into server-side memory, and the fallback keeps the agent answering when the OpenViking server is unreachable. Otherwise the history grows unbounded or a server outage breaks every turn.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "449-453, 465-468",
+          "snippet": "        if not self._ov_session_context_enabled():\n            return session.get_history(provider_name=provider_name)\n\n        agents_config = getattr(self.config, \"agents\", None)\n        token_budget = int(getattr(agents_config, \"session_context_token_budget\", 12000) or 12000)\n...\n            context_payload = await client.get_session_context(\n                session_id=session_id,\n                token_budget=token_budget,\n            )"
+        },
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "480-485",
+          "snippet": "        except Exception as e:\n            logger.warning(\n                f\"Failed to load OpenViking session context for {session_id}: {e}. \"\n                \"Falling back to local session history.\"\n            )\n            return session.get_history(provider_name=provider_name)"
+        },
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "574-588",
+          "snippet": "        should_commit = bool(\n            pending_tokens >= commit_token_threshold\n            or pending_tokens + incoming_tokens >= commit_token_threshold\n            or messages_since_commit + incoming_messages_count >= self.memory_window\n        )\n        if not should_commit:\n            return\n\n        await self._submit_openviking_session_and_clear_if_committed(\n            session,\n            force_commit=True,\n            keep_recent_count=int(getattr(agents_config, \"commit_keep_recent_count\", 10) or 0),\n            commit_message_threshold=self.memory_window,\n            openviking_connection=getattr(msg, \"openviking_connection\", None),\n        )"
+        },
+        {
+          "file": "bot/vikingbot/config/schema.py",
+          "lines": "444-447",
+          "snippet": "    session_context_enabled: bool = False\n    session_context_token_budget: int = 3000\n    commit_token_threshold: int = 200000\n    commit_keep_recent_count: int = 5"
+        },
+        {
+          "file": "bot/vikingbot/hooks/builtins/openviking_hooks.py",
+          "lines": "98-102",
+          "snippet": "        should_commit = bool(\n            force_commit\n            or pending_tokens + unsynced_tokens >= commit_token_threshold\n            or reached_message_threshold\n        )"
+        },
+        {
+          "file": "bot/vikingbot/hooks/builtins/openviking_hooks.py",
+          "lines": "215-222",
+          "snippet": "        except Exception as e:\n            state = None\n            if hasattr(vikingbot_session, \"metadata\"):\n                state = get_openviking_state(vikingbot_session)\n                state[\"last_sync_status\"] = \"error\"\n                state[\"last_sync_error\"] = str(e)\n            logger.exception(f\"Failed to add message to OpenViking: {e}\")\n            return {\"success\": False, \"error\": str(e)}"
+        },
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "543-544",
+          "snippet": "        if not success:\n            return False"
+        }
+      ]
+    },
+    {
+      "name": "subagent capability restriction and failure reporting",
+      "what_it_is": "Subagents get a reduced tool registry with the spawn, message, cron, image and OpenViking tools disabled, so they cannot spawn further subagents or message users directly. Any exception in a subagent run is caught and announced to the main agent as a 'failed' result.",
+      "function_in_system": "Sits at subagent creation and completion in SubagentManager. Limits fan-out to one delegation level, confines side effects to the main agent, and turns subagent crashes into messages the main agent can handle. Otherwise subagents can spawn recursively or fail silently in the background.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/agent/tools/factory.py",
+          "lines": "144-152",
+          "snippet": "    register_default_tools(\n        registry=registry,\n        config=config,\n        include_message_tool=False,\n        include_spawn_tool=False,\n        include_cron_tool=False,\n        include_image_tool=False,\n        include_viking_tools=False,\n    )"
+        },
+        {
+          "file": "bot/vikingbot/agent/subagent.py",
+          "lines": "88-95",
+          "snippet": "            # Build subagent tools (no message tool, no spawn tool)\n            from vikingbot.agent.tools import register_subagent_tools\n\n            tools = ToolRegistry()\n            register_subagent_tools(\n                registry=tools,\n                config=self.config,\n            )"
+        },
+        {
+          "file": "bot/vikingbot/agent/subagent.py",
+          "lines": "188-191",
+          "snippet": "        except Exception as e:\n            error_msg = f\"Error: {str(e)}\"\n            logger.exception(f\"Subagent [{task_id}] failed: {e}\")\n            await self._announce_result(task_id, label, task, error_msg, session_key, \"error\")"
+        }
+      ]
+    },
+    {
+      "name": "shell execution timeout and output truncation",
+      "what_it_is": "Every exec command runs under asyncio.wait_for with exec.timeout (default 60 s); on timeout the process is killed and 'Error: Command timed out after N seconds' is returned. Command output is cut to 10000 characters with a '(truncated, N more chars)' marker. The srt and aiosandbox backends apply the same timeout and truncation.",
+      "function_in_system": "Sits in the sandbox backend behind the exec tool, between the agent's shell call and the tool result that enters the message history. Stops hanging commands from blocking the turn and caps the context cost of verbose output. Otherwise a long-running command stalls the agent and large outputs flood the context window.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/sandbox/backends/direct.py",
+          "lines": "49-53",
+          "snippet": "            try:\n                stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout)\n            except asyncio.TimeoutError:\n                process.kill()\n                return f\"Error: Command timed out after {timeout} seconds\""
+        },
+        {
+          "file": "bot/vikingbot/sandbox/backends/direct.py",
+          "lines": "73-75",
+          "snippet": "            max_len = 10000\n            if len(result) > max_len:\n                result = result[:max_len] + f\"\\n... (truncated, {len(result) - max_len} more chars)\""
+        },
+        {
+          "file": "bot/vikingbot/config/schema.py",
+          "lines": "588",
+          "snippet": "    timeout: int = 60"
+        },
+        {
+          "file": "bot/vikingbot/sandbox/backends/srt.py",
+          "lines": "139, 144, 175-177",
+          "snippet": "                \"timeout\": timeout * 1000,  # Convert to milliseconds\n...\n        response = await self._wait_for_response(timeout + 5)  # Extra 5 seconds buffer\n...\n        max_len = 10000\n        if len(result) > max_len:\n            result = result[:max_len] + f\"\\n... (truncated, {len(result) - max_len} more chars)\""
+        },
+        {
+          "file": "bot/vikingbot/sandbox/backends/aiosandbox.py",
+          "lines": "53, 70-75",
+          "snippet": "            result = await self._client.shell.exec_command(command=command, timeout=timeout)\n...\n            max_len = 10000\n            if len(result_text) > max_len:\n                result_text = (\n                    result_text[:max_len]\n                    + f\"\\n... (truncated, {len(result_text) - max_len} more chars)\"\n                )"
+        }
+      ]
+    },
+    {
+      "name": "workspace path confinement for file tools",
+      "what_it_is": "The default direct backend resolves every path used by read_file, write_file, edit_file and list_dir and raises PermissionError when it lies outside the session workspace (or a configured restricted workspace).",
+      "function_in_system": "Sits in the sandbox backend beneath the file tools; the PermissionError returns to the model as a tool error string. Limits the blast radius of wrong or hallucinated paths to the workspace. The exec tool in direct mode remains able to reach the host, so the confinement covers file tools only. Otherwise a wrong path lets the agent read or overwrite arbitrary host files.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/sandbox/backends/direct.py",
+          "lines": "145-165",
+          "snippet": "    def _check_path_restriction(self, path: Path) -> None:\n        \"\"\"Check if path is within workspace (if restricted).\n\n        Args:\n            path: Path to check\n\n        Raises:\n            PermissionError: If path outside workspace and restriction is enabled\n        \"\"\"\n\n        workspace = self.workspace.resolve()\n        resolved = path.resolve()\n\n        if self.restrict_workspaces and self.session_key in self.restrict_workspaces:\n            restrict_path = Path(self.restrict_workspaces[self.session_key]).resolve()\n            if resolved != restrict_path and restrict_path not in resolved.parents:\n                raise PermissionError(f\"Path outside restricted workspace: {path}\")\n            return\n\n        if resolved != workspace and workspace not in resolved.parents:\n            raise PermissionError(f\"Path outside workspace: {path}\")"
+        },
+        {
+          "file": "bot/vikingbot/sandbox/backends/direct.py",
+          "lines": "110, 125",
+          "snippet": "        self._check_path_restriction(sandbox_path)\n...\n        self._check_path_restriction(sandbox_path)"
+        }
+      ]
+    },
+    {
+      "name": "isolated sandbox backends",
+      "what_it_is": "Configurable execution backends (srt, opensandbox, aiosandbox) run shell and file operations in an isolated runtime with network allow/deny domain lists, write access limited to the workspace and /tmp, deny-read/deny-write lists, and CPU/memory limits for opensandbox. The shipped default is the unsandboxed direct backend.",
+      "function_in_system": "Sits beneath all shell and file tools via SandboxManager, one sandbox per workspace. Contains the side effects of agent-issued commands inside a restricted environment. Otherwise a harmful or mistaken command runs with full host and network access.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/config/schema.py",
+          "lines": "728",
+          "snippet": "    backend: SandboxBackend = SandboxBackend.DIRECT"
+        },
+        {
+          "file": "bot/vikingbot/sandbox/backends/srt.py",
+          "lines": "224-243",
+          "snippet": "    def _load_config(self) -> dict[str, Any]:\n        sandbox_workspace_str = str(self._workspace.resolve())\n        allow_write = [sandbox_workspace_str]\n\n        tmp_dir = \"/tmp\"\n        if tmp_dir not in allow_write:\n            allow_write.append(tmp_dir)\n\n        return {\n            \"network\": {\n                \"allowedDomains\": self.config.network.allowed_domains,\n                \"deniedDomains\": self.config.network.denied_domains,\n                \"allowLocalBinding\": self.config.network.allow_local_binding,\n            },\n            \"filesystem\": {\n                \"denyRead\": self.config.filesystem.deny_read,\n                \"allowWrite\": allow_write,\n                \"denyWrite\": self.config.filesystem.deny_write,\n            },\n        }"
+        },
+        {
+          "file": "bot/vikingbot/config/schema.py",
+          "lines": "677-682",
+          "snippet": "class OpenSandboxRuntimeConfig(BaseModel):\n    \"\"\"OpenSandbox runtime configuration.\"\"\"\n\n    timeout: int = 300\n    cpu: str = \"500m\"\n    memory: str = \"1Gi\""
+        }
+      ]
+    },
+    {
+      "name": "heartbeat cost gating and no-op suppression",
+      "what_it_is": "The periodic heartbeat only invokes the agent for a workspace when HEARTBEAT.md contains actionable lines (headers, comments and checkboxes are ignored) and skips sessions inactive for more than 2 days. When the agent answers with the HEARTBEAT_OK token, the exchange is kept out of the session history.",
+      "function_in_system": "Sits in HeartbeatService._tick before each scheduled agent run and in _process_message when storing the result. Saves LLM calls on idle workspaces and keeps periodic no-op turns out of the conversation context. Otherwise every heartbeat interval triggers a full agent loop per session and fills the history with empty check-ins.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "bot/vikingbot/heartbeat/service.py",
+          "lines": "28-42",
+          "snippet": "def _is_heartbeat_empty(content: str | None) -> bool:\n    \"\"\"Check if HEARTBEAT.md has no actionable content.\"\"\"\n    if not content:\n        return True\n\n    # Lines to skip: empty, headers, HTML comments, empty checkboxes\n    skip_patterns = {\"- [ ]\", \"* [ ]\", \"- [x]\", \"* [x]\"}\n\n    for line in content.split(\"\\n\"):\n        line = line.strip()\n        if not line or line.startswith(\"#\") or line.startswith(\"<!--\") or line in skip_patterns:\n            continue\n        return False  # Found actionable content\n\n    return True"
+        },
+        {
+          "file": "bot/vikingbot/heartbeat/service.py",
+          "lines": "25, 108-117, 128-129",
+          "snippet": "STALE_SESSION_THRESHOLD = timedelta(days=2)\n...\n    def _is_session_stale(self, session_info: dict[str, Any]) -> bool:\n        \"\"\"Check whether a session has been inactive for too long.\"\"\"\n        reference = _parse_session_timestamp(\n            session_info.get(\"updated_at\")\n        ) or _parse_session_timestamp(session_info.get(\"created_at\"))\n        if reference is None:\n            return False\n\n        now = datetime.now(reference.tzinfo) if reference.tzinfo else datetime.now()\n        return now - reference > STALE_SESSION_THRESHOLD\n...\n            if self._is_session_stale(session_info):\n                continue"
+        },
+        {
+          "file": "bot/vikingbot/heartbeat/service.py",
+          "lines": "180-182",
+          "snippet": "            # Skip if HEARTBEAT.md is empty or doesn't exist\n            if _is_heartbeat_empty(content):\n                continue"
+        },
+        {
+          "file": "bot/vikingbot/agent/loop.py",
+          "lines": "1200-1201",
+          "snippet": "            is_heartbeat = bool(msg.metadata.get(HEARTBEAT_METADATA_KEY))\n            if not (is_heartbeat and is_heartbeat_noop_response(final_content)):"
+        },
+        {
+          "file": "bot/vikingbot/config/schema.py",
+          "lines": "488",
+          "snippet": "    enabled: bool = True"
+        }
+      ]
+    },
+    {
+      "name": "classified transient-error retry with jittered exponential backoff",
+      "what_it_is": "Every VLM call in the openai and litellm backends runs through retry_sync/retry_async. classify_api_error matches the error text against pattern lists and labels it transient, quota_exceeded, auth, permanent, input_too_large or content_safety. Only transient errors (429, 5xx, timeout, connection errors) are retried, up to max_retries=3 by default, with delay min(0.5*2^n, 8s) plus random jitter. The OpenAI SDK's own retry is set to 0 so this layer owns retries. VolcEngineVLM overrides the async path with its own loop that retries every exception with a 2^n second sleep.",
+      "function_in_system": "Sits inside the backend wrapper around each chat completion request, below the OpenViking ExtractLoop, compressor_v2 and session summarisation calls. Absorbs rate limits and transient provider outages so a memory extraction run survives a single hiccup, while permanent errors (bad request, auth, oversized input) surface at once and waste no further calls. Vikingbot reaches this retry when agents.provider is set: commands.py then builds a bare VLMFactory backend wrapped in VLMProviderAdapter, so the bot inherits the transient retry; credential failover stays on the OpenViking side. Otherwise a single 429 or 503 fails the whole agent turn.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/utils/model_retry.py",
+          "lines": "75-88, 188-190, 200-202, 260-265",
+          "snippet": "TRANSIENT_API_ERROR_PATTERNS = (\n    \"429\",\n    \"500\",\n    \"502\",\n    \"503\",\n    \"504\",\n    \"toomanyrequests\",\n    \"ratelimit\",\n    \"requestbursttoofast\",\n    \"timeout\",\n    \"connectionerror\",\n    \"connection refused\",\n    \"connection reset\",\n)\n...\ndef is_retryable_api_error(error: Exception) -> bool:\n    \"\"\"Return True if the error should be retried.\"\"\"\n    return classify_api_error(error) == ERROR_CLASS_TRANSIENT\n...\n    delay = min(base_delay * (2**attempt), max_delay)\n    if jitter:\n        delay += random.uniform(0.0, min(base_delay, delay))\n...\n    while True:\n        try:\n            return await func()\n        except Exception as e:\n            if max_retries <= 0 or attempt >= max_retries or not is_retryable(e):\n                raise"
+        },
+        {
+          "file": "openviking/models/vlm/base.py",
+          "lines": "69",
+          "snippet": "        self.max_retries = config.get(\"max_retries\", 3)"
+        },
+        {
+          "file": "openviking/models/vlm/backends/openai_vlm.py",
+          "lines": "69-71, 313-318",
+          "snippet": "    kwargs[\"timeout\"] = timeout\n    # OpenViking owns provider retry/backoff via retry_sync/retry_async.\n    kwargs[\"max_retries\"] = 0\n...\n        return retry_sync(\n            _call,\n            max_retries=self.max_retries,\n            logger=logger,\n            operation_name=\"OpenAI VLM completion\",\n        )"
+        },
+        {
+          "file": "openviking/models/vlm/backends/volcengine_vlm.py",
+          "lines": "167-183",
+          "snippet": "        for attempt in range(self.max_retries + 1):\n            try:\n                t0 = time.perf_counter()\n                response = await client.chat.completions.create(**kwargs)\n                elapsed = time.perf_counter() - t0\n                self._update_token_usage_from_response(response, duration_seconds=elapsed)\n                result = self._build_vlm_response(response, has_tools=bool(tools))\n                if tools:\n                    return result\n                content = self._clean_response(str(result))\n                if content:\n                    tracer.info(f\"message.content={content}\")\n                return content\n            except Exception as e:\n                last_error = e\n                if attempt < self.max_retries:\n                    await asyncio.sleep(2**attempt)"
+        },
+        {
+          "file": "bot/vikingbot/cli/commands.py",
+          "lines": "286-288, 302-307",
+          "snippet": "    if provider_name:\n        from openviking.models.vlm.base import VLMFactory\n        from vikingbot.providers.vlm_adapter import VLMProviderAdapter\n...\n        vlm_instance = VLMFactory.create(vlm_config)\n        return VLMProviderAdapter(\n            vlm_instance=vlm_instance,\n            default_model=model,\n            langfuse_client=langfuse_client,\n        )"
+        }
+      ]
+    },
+    {
+      "name": "ordered multi-credential failover with timed failback",
+      "what_it_is": "When the vlm config lists more than one credential, get_vlm_instance wraps one backend per credential in MultiCredentialVLM; the legacy primary/backup config builds FailoverVLM. Each request starts at the active credential and cycles through the ring once. Request-level errors (400, input_too_large, content_safety) re-raise immediately. Auth, quota and retry-exhausted transient errors advance to the next credential, and the credential that succeeds becomes active. OrderedCredentialSwitcher moves back one priority step after 600 s or 50 requests on the fallback. If every credential fails, AllCredentialsFailedError carries the aggregated errors. The embedder uses the same switcher.",
+      "function_in_system": "Sits above the per-backend retry, between OpenViking's LLM consumers (memory ExtractLoop, compressor_v2, session summaries) and the provider. Keeps extraction running when one API key hits its quota, gets revoked or its provider has a longer outage, and returns to the preferred credential once it recovers. Fail-fast on request-level errors avoids burning every credential on a request that fails everywhere. Otherwise a quota exhaustion on the single key stops all memory extraction until an operator intervenes.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking_cli/utils/config/vlm_config.py",
+          "lines": "513-537",
+          "snippet": "            if self.credentials:\n                # Build VLM instances for each credential\n                vlm_instances = []\n                for cred in self.credentials:\n                    config_dict = self._build_vlm_config_dict_for_credential(cred)\n                    vlm_instances.append(VLMFactory.create(config_dict))\n\n                if len(vlm_instances) == 1:\n                    self._vlm_instance = vlm_instances[0]\n                else:\n                    self._vlm_instance = MultiCredentialVLM(\n                        vlm_instances,\n                        credential_ids=[c.id for c in self.credentials],\n                        failback_timeout_seconds=self.failback_timeout_seconds,\n                        failback_request_count=self.failback_request_count,\n                    )\n            else:\n                # Legacy mode: single VLM with optional backup\n                config_dict = self._build_vlm_config_dict()\n                primary = VLMFactory.create(config_dict)\n\n                if self.backup is not None and self.backup._has_any_config():\n                    backup_config_dict = self.backup._build_vlm_config_dict()\n                    backup = VLMFactory.create(backup_config_dict)\n                    self._vlm_instance = FailoverVLM(primary, backup)"
+        },
+        {
+          "file": "openviking/models/vlm/base.py",
+          "lines": "676-704",
+          "snippet": "        start = self._switcher.maybe_failback()\n        n = self._switcher.n\n\n        for offset in range(n):\n            idx = (start + offset) % n\n            credential_id = self._credential_ids[idx]\n            vlm_instance = self._vlm_instances[idx]\n\n            try:\n                method = getattr(vlm_instance, method_name)\n                result = method(*args, **kwargs)\n                self._switcher.commit_success(idx)\n                return result\n            except Exception as exc:\n                _annotate_vlm_error(exc, vlm_instance)\n                error_class = classify_api_error(exc)\n                aggregated_errors.append((credential_id, error_class, exc, idx))\n\n                if self._switcher.is_fail_fast(error_class):\n                    # Request-level failure (400 / input too large / content\n                    # safety): re-raise the original exception so callers can\n                    # react to its type; trying other credentials is useless.\n                    raise\n\n                self._logger.warning(\n                    f\"Credential {credential_id} failed with {error_class}, trying next credential\"\n                )\n\n        raise AllCredentialsFailedError(aggregated_errors)"
+        },
+        {
+          "file": "openviking/utils/model_retry.py",
+          "lines": "446-458, 526-541, 560-568",
+          "snippet": "        with self._lock:\n            if self._active_idx > 0:\n                timer_hit = (time.monotonic() - self._last_switch_time) >= self._failback_timeout\n                count_hit = self._active_request_count >= self._failback_request_count\n                if timer_hit or count_hit:\n                    previous_idx = self._active_idx\n                    self._active_idx -= 1\n                    self._last_switch_time = time.monotonic()\n                    self._active_request_count = 0\n                    logger.info(\n                        f\"Failback condition met (timer={timer_hit}, count={count_hit}), \"\n                        f\"switching active credential from {previous_idx} to {self._active_idx}\"\n                    )\n...\n        # Transient errors that have exhausted retries are treated as quota_exceeded\n        if error_class == ERROR_CLASS_TRANSIENT:\n            error_class = ERROR_CLASS_QUOTA_EXCEEDED\n\n        with self._lock:\n            # Request-level errors fail fast: the same request fails on every\n            # credential of the same model, so switching credentials is useless.\n            if error_class in (\n                ERROR_CLASS_PERMANENT,\n                ERROR_CLASS_INPUT_TOO_LARGE,\n                ERROR_CLASS_CONTENT_SAFETY,\n            ):\n                logger.warning(\n                    f\"Credential {idx} failed with {error_class} (request-level), fail-fast\"\n                )\n                return False\n...\n            if error_class == ERROR_CLASS_QUOTA_EXCEEDED:\n                if idx == self._active_idx:\n                    self._active_idx = min(self._active_idx + 1, self._n)\n                    self._last_switch_time = time.monotonic()\n                    self._active_request_count = 0\n                    logger.warning(\n                        f\"Credential {idx} failed with quota_exceeded, advancing to {self._active_idx}\"\n                    )\n                return True"
+        }
+      ]
+    },
+    {
+      "name": "oversized tool-output externalization with synopsis stubs and read-back refs",
+      "what_it_is": "When a message is added to an OpenViking session, every tool output above threshold_chars=20000 is moved to a ToolResultStore file in VikingFS under a sha256-based ref. If the tool outputs of one assistant turn still exceed assistant_turn_inline_budget_chars=100000, further outputs are selected largest first until the projected inline size fits. Each externalized output is replaced inline by a typed synopsis stub (JSON shape, code symbols, headers, head/tail sample) that names the ref and tells the agent to use openviking_tool_result_search or openviking_tool_result_read with offset/limit. A store failure follows failure_mode (default preserve_raw, alternatives reject and preview_only). Memory extraction rehydrates the full outputs before running.",
+      "function_in_system": "Sits at session message ingestion, between the agent that stores its conversation in OpenViking (e.g. the OpenClaw plugin, which ships the read-back tools, or Vikingbot on its opt-in OpenViking session path) and the context that is later served back to that agent. Keeps huge tool results out of the replayed context window while leaving the raw data retrievable on demand. Rehydration keeps the memory ExtractLoop working on complete data. Otherwise a single large command or file dump fills the agent's context budget on every later turn.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/server/config.py",
+          "lines": "146-156",
+          "snippet": "class ToolOutputExternalizationConfig(BaseModel):\n    \"\"\"External storage controls for oversized tool outputs.\"\"\"\n\n    enabled: bool = True\n    threshold_chars: int = 20_000\n    preview_chars: int = 2_000\n    assistant_turn_inline_budget_chars: int = 100_000\n    assistant_turn_preview_budget_chars: int = 10_000\n    min_preview_chars: int = 1_000\n    aggregate_selection_strategy: Literal[\"largest_first\"] = \"largest_first\"\n    failure_mode: Literal[\"reject\", \"preserve_raw\", \"preview_only\"] = \"preserve_raw\""
+        },
+        {
+          "file": "openviking/session/session.py",
+          "lines": "784-788, 840-853, 731-742",
+          "snippet": "            if part.tool_output_ref and part.tool_output_truncated:\n                continue\n            normal_indices.append(idx)\n            if len(part.tool_output or \"\") > cfg.threshold_chars:\n                selected.add(idx)\n...\n        while (\n            projected_inline_chars(selected) > cfg.assistant_turn_inline_budget_chars and remaining\n        ):\n            baseline = projected_inline_chars(selected)\n            chosen_pos = None\n            for pos, idx in enumerate(remaining):\n                candidate = set(selected)\n                candidate.add(idx)\n                if projected_inline_chars(candidate) < baseline:\n                    chosen_pos = pos\n                    break\n            if chosen_pos is None:\n                break\n            selected.add(remaining.pop(chosen_pos))\n...\n        ref = stored.storage_uri\n        part.tool_output = render_preview_from_synopsis(\n            stored.synopsis,\n            ref=ref,\n            tool_name=part.tool_name,\n            sha256=digest,\n            reason=reason,\n            original_chars=len(original_output),\n            preview_chars=min(len(original_output), max(preview_chars, 0)),\n        )\n        part.tool_output_ref = ref\n        part.tool_output_truncated = True"
+        },
+        {
+          "file": "openviking/session/tool_result_synopsis.py",
+          "lines": "477-484",
+          "snippet": "    if ref:\n        body.append(\"\")\n        body.append(\"Explore:\")\n        body.append(\n            f\"- Use openviking_tool_result_search with ref={ref} to find relevant raw snippets.\"\n        )\n        body.append(\n            f\"- Use openviking_tool_result_read with ref={ref} and offset/limit to inspect raw output.\""
+        },
+        {
+          "file": "openviking/session/session.py",
+          "lines": "1312",
+          "snippet": "                    extraction_messages = await self._hydrate_tool_outputs_for_extraction(messages)"
+        }
+      ]
+    },
+    {
+      "name": "schema-scoped memory locks held across the extraction loop",
+      "what_it_is": "Before a memory extraction run, SessionCompressorV2 derives exact file lock paths and subtree lock paths from the memory schemas and the user scope, then acquires them as one batch in a retry loop (v2_lock_retry_interval_seconds=0.2, v2_lock_max_retries=0 meaning unlimited, TimeoutError once a positive limit is hit, rate-limited warning logs). The locks stay held through the whole ExtractLoop run and the apply of its operations and are released in a finally block. Each extraction phase in _run_extract_phase uses the same scheme. Lock files carry a timestamp and count as stale after lock_expire (default 300 s): an acquirer that meets a stale exact or tree lock deletes it and logs a warning, and a LockManager background task started with the service checks every 60 s and releases in-process handles that stopped refreshing for longer than lock_expire.",
+      "function_in_system": "Wraps the memory ExtractLoop in session commit. Serializes concurrent extractions (parallel commits of sessions for the same user or agent) that read and patch the same memory files, so the read-before-write view the loop builds stays valid until its patches land. Otherwise two concurrent runs read the same memory, both apply their edits and one silently overwrites the other. Stale-lock reclamation frees memory paths left locked by a crashed or leaked extraction, so later commits for the same user can proceed. Otherwise one crash blocks all future memory extraction for that scope. The extraction handle has no refresh task, so a run longer than lock_expire can lose its locks to a concurrent extraction.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/compressor_v2.py",
+          "lines": "112-118, 346-379, 471-477",
+          "snippet": "            if _filename_has_variables(schema) or not filename_template:\n                _append_unique(tree_paths, viking_fs._uri_to_path(directory_uri, ctx))\n                continue\n\n            filename = render_template(filename_template, template_vars)\n            file_uri = f\"{directory_uri.rstrip('/')}/{filename.lstrip('/')}\"\n            _append_unique(exact_paths, viking_fs._uri_to_path(file_uri, ctx))\n...\n                retry_interval = config.memory.v2_lock_retry_interval_seconds\n                max_retries = config.memory.v2_lock_max_retries\n                retry_count = 0\n                last_lock_retry_warning_at = 0.0\n\n                # 循环重试获取锁（机制确保不会死锁）\n                while True:\n                    lock_acquired = await lock_manager.acquire_exact_tree_batch(\n                        transaction_handle,\n                        exact_paths=exact_lock_paths,\n                        tree_paths=tree_lock_dirs,\n                        timeout=None,\n                    )\n                    if lock_acquired:\n                        break\n                    retry_count += 1\n                    if max_retries > 0 and retry_count >= max_retries:\n                        raise TimeoutError(\n                            \"Failed to acquire memory locks after \"\n                            f\"{retry_count} retries (max={max_retries})\"\n                        )\n\n                    last_lock_retry_warning_at = _log_memory_lock_retry(\n                        retry_count=retry_count,\n                        max_retries=max_retries,\n                        last_warning_at=last_lock_retry_warning_at,\n                    )\n                    if retry_interval > 0:\n                        await asyncio.sleep(retry_interval)\n\n            orchestrator._transaction_handle = transaction_handle  # 传递给 ExtractLoop\n\n            # Run ReAct orchestrator\n            operations, tools_used = await orchestrator.run()\n...\n        finally:\n            # 确保释放所有锁（仅在有锁管理器时）\n            if lock_manager and transaction_handle:\n                try:\n                    await lock_manager.release(transaction_handle)\n                except Exception as e:\n                    logger.warning(f\"Failed to release transaction lock: {e}\")"
+        },
+        {
+          "file": "openviking_cli/utils/config/memory_config.py",
+          "lines": "23-37",
+          "snippet": "    v2_lock_retry_interval_seconds: float = Field(\n        default=0.2,\n        ge=0.0,\n        description=(\n            \"Retry interval (seconds) when SessionCompressorV2 fails to acquire memory subtree \"\n            \"locks. Set to 0 for immediate retries.\"\n        ),\n    )\n    v2_lock_max_retries: int = Field(\n        default=0,\n        ge=0,\n        description=(\n            \"Maximum retries for SessionCompressorV2 memory lock acquisition. \"\n            \"0 means unlimited retries.\"\n        ),"
+        },
+        {
+          "file": "openviking/storage/transaction/path_lock.py",
+          "lines": "498-502, 651-655",
+          "snippet": "            existing_exact_lock = await self._check_exact_path_lock(path, owner_id)\n            if existing_exact_lock:\n                if await self._is_lock_stale_async(existing_exact_lock, self._lock_expire):\n                    logger.warning(f\"[EXACT] Removing stale exact lock: {existing_exact_lock}\")\n                    await self._remove_lock_file(existing_exact_lock)\n...\n        while True:\n            if await self._is_locked_by_other(lock_path, owner_id):\n                if await self._is_lock_stale_async(lock_path, self._lock_expire):\n                    logger.warning(f\"[TREE] Removing stale lock: {lock_path}\")\n                    await self._remove_lock_file(lock_path)"
+        },
+        {
+          "file": "openviking/storage/transaction/lock_manager.py",
+          "lines": "399-411",
+          "snippet": "    async def _stale_cleanup_loop(self) -> None:\n        \"\"\"Check and release leaked handles every 60 s (in-process safety net).\"\"\"\n        while self._running:\n            await asyncio.sleep(_HANDLE_CLEANUP_INTERVAL_SECONDS)\n            now = time.time()\n            stale = []\n            for handle in list(self._handles.values()):\n                current = await self._reconcile_handle_async(handle)\n                if current and self._is_handle_stale(current, now):\n                    stale.append(current)\n            for handle in stale:\n                logger.warning(f\"Releasing stale lock handle {handle.id}\")\n                await self.release(handle)"
+        },
+        {
+          "file": "openviking_cli/utils/config/transaction_config.py",
+          "lines": "24-30",
+          "snippet": "    lock_expire: float = Field(\n        default=300.0,\n        description=(\n            \"Lock inactivity threshold (seconds). \"\n            \"Locks not refreshed within this window are treated as stale and reclaimed.\"\n        ),\n    )"
+        }
+      ]
+    },
+    {
+      "name": "redo marker for crash recovery of memory extraction",
+      "what_it_is": "Before phase 2 of a session commit (archive summary and memory extraction) starts, Session writes a pending redo marker with archive_uri, session_uri and identity to /local/_system/redo. The marker is deleted on success and also on a regular exception or cancellation, so only a hard crash leaves it behind. On service start LockManager scans leftover markers, re-reads the archived messages, re-runs extract_long_term_memories with a 60 s timeout and always enqueues a semantic processing job for the session as fallback. Controlled by redo_recovery_enabled (default true).",
+      "function_in_system": "Wraps the asynchronous commit phase that runs the memory ExtractLoop. Recovers extraction runs interrupted by a process crash or kill, whose messages are already archived. Otherwise the session is archived while its long-term memories are silently never extracted.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/session.py",
+          "lines": "1295-1307, 1541-1542, 1644-1645",
+          "snippet": "                    # redo-log protection\n                    if redo_enabled:\n                        redo_task_id = str(uuid.uuid4())\n                        await redo_log.write_pending_async(\n                            redo_task_id,\n                            {\n                                \"archive_uri\": archive_uri,\n                                \"session_uri\": self._session_uri,\n                                \"account_id\": self.ctx.account_id,\n                                \"user_id\": self.ctx.user.user_id,\n                                \"role\": str(self.ctx.role),\n                            },\n                        )\n...\n                    if redo_enabled and redo_task_id:\n                        await redo_log.mark_done_async(redo_task_id)\n...\n            if redo_enabled and redo_task_id:\n                await redo_log.mark_done_async(redo_task_id)"
+        },
+        {
+          "file": "openviking/storage/transaction/lock_manager.py",
+          "lines": "86-91, 445-453, 499-513, 521-527",
+          "snippet": "    async def start(self) -> None:\n        \"\"\"Start background cleanup and redo recovery.\"\"\"\n        self._running = True\n        self._cleanup_task = asyncio.create_task(self._stale_cleanup_loop())\n        if self._redo_recovery_enabled:\n            self._redo_task = asyncio.create_task(self._recover_pending_redo())\n...\n    async def _recover_pending_redo(self) -> None:\n        pending_ids = await self._redo_log.list_pending_async()\n        for task_id in pending_ids:\n            logger.info(f\"Recovering pending redo task: {task_id}\")\n            try:\n                info = await self._redo_log.read_async(task_id)\n                if info:\n                    await self._redo_session_memory(info)\n                await self._redo_log.mark_done_async(task_id)\n...\n        # 3. Re-extract memories (best-effort, only if archive was readable)\n        if messages:\n            session_id = session_uri.rstrip(\"/\").rsplit(\"/\", 1)[-1]\n            try:\n                from openviking.session import create_session_compressor\n\n                compressor = create_session_compressor(vikingdb=None)\n                memories = await asyncio.wait_for(\n                    compressor.extract_long_term_memories(\n                        messages=messages,\n                        user=user,\n                        session_id=session_id,\n                        ctx=ctx,\n                    ),\n                    timeout=60.0,\n...\n            uri=session_uri,\n            context_type=\"memory\",\n            account_id=account_id,\n            user_id=user_id,\n            peer_id=user_id,\n            role=role_str,\n        )"
+        },
+        {
+          "file": "openviking_cli/utils/config/transaction_config.py",
+          "lines": "32-38",
+          "snippet": "    redo_recovery_enabled: bool = Field(\n        default=True,\n        description=(\n            \"Enable session commit phase-2 crash-recovery redo. \"\n            \"When false, pending redo markers are not written and startup redo recovery is skipped.\"\n        ),\n    )"
+        }
+      ]
+    },
+    {
+      "name": "circuit breakers with classified re-enqueue on embedding and semantic queues",
+      "what_it_is": "The embedding queue handler guards embedding API calls with a CircuitBreaker: it opens after 5 consecutive failures or immediately on permanent, auth or quota errors, allows one probe after reset_timeout (60 s) and doubles the timeout up to 600 s after a failed probe. While open, messages wait up to 30 s and are re-enqueued. Failed calls are classified: input-too-large and permanent errors drop the message with an error, transient or unknown errors re-enqueue it. SemanticProcessor, which generates the L0 abstract and L1 overview files with LLM calls, runs a second CircuitBreaker with the same logic: while open it re-enqueues messages after the retry_after wait to damp re-enqueue storms, drops input-too-large and permanent-error messages, and re-enqueues lock-acquisition errors with the breaker left untouched.",
+      "function_in_system": "Sits in the background pipelines that summarize and vectorize content, including the memory files written by the ExtractLoop (memory_updater.py:1146), for later retrieval by the agents' search tools. Absorbs embedding and LLM provider outages and stops hammering a broken API. Otherwise an outage drops pending summaries and vectors, and the affected content stays unfindable by search.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/utils/circuit_breaker.py",
+          "lines": "34-40, 58-73, 107-112",
+          "snippet": "    \"\"\"Thread-safe circuit breaker for API call protection.\n\n    Trips after ``failure_threshold`` consecutive failures (or immediately for\n    permanent errors like 403/401). After ``reset_timeout`` seconds, allows one\n    probe request (HALF_OPEN). If the probe succeeds, the breaker closes; if it\n    fails, the breaker reopens.\n    \"\"\"\n...\n    def check(self) -> None:\n        \"\"\"Allow the request through, or raise ``CircuitBreakerOpen``.\"\"\"\n        with self._lock:\n            if self._state == _STATE_CLOSED:\n                return\n            if self._state == _STATE_HALF_OPEN:\n                return  # allow probe request\n            # OPEN — check if timeout elapsed\n            elapsed = time.monotonic() - self._last_failure_time\n            if elapsed >= self._current_reset_timeout:\n                self._state = _STATE_HALF_OPEN\n                logger.info(\"Circuit breaker transitioning OPEN -> HALF_OPEN (timeout elapsed)\")\n                return\n            raise CircuitBreakerOpen(\n                f\"Circuit breaker is OPEN, retry after {self._current_reset_timeout - elapsed:.0f}s\"\n            )\n...\n            if self._state == _STATE_HALF_OPEN:\n                self._state = _STATE_OPEN\n                self._current_reset_timeout = min(\n                    self._current_reset_timeout * 2,\n                    self._max_reset_timeout,\n                )"
+        },
+        {
+          "file": "openviking/storage/collection_schemas.py",
+          "lines": "570-581, 643-663",
+          "snippet": "                # Circuit breaker: if API is known-broken, re-enqueue and wait\n                try:\n                    self._circuit_breaker.check()\n                    self._breaker_open_last_log_at = 0.0\n                    self._breaker_open_suppressed_count = 0\n                except CircuitBreakerOpen:\n                    self._log_breaker_open_reenqueue_summary()\n                    if getattr(self._vikingdb, \"has_queue_manager\", False):\n                        wait = self._circuit_breaker.retry_after\n                        if wait > 0:\n                            await asyncio.sleep(wait)\n                        await self._vikingdb.enqueue_embedding_msg(embedding_msg)\n...\n                        if error_class == ERROR_CLASS_INPUT_TOO_LARGE:\n                            logger.error(error_msg)\n                            self._merge_request_stats(embedding_msg.telemetry_id, error_count=1)\n                            request_failed_message = error_msg\n                            report_error_args = (error_msg, data)\n                            return None\n\n                        if error_class == ERROR_CLASS_PERMANENT:\n                            logger.critical(error_msg)\n                            self._circuit_breaker.record_failure(embed_err)\n                            self._merge_request_stats(embedding_msg.telemetry_id, error_count=1)\n                            request_failed_message = error_msg\n                            report_error_args = (error_msg, data)\n                            return None\n\n                        # Transient or unknown — re-enqueue for retry\n                        logger.warning(error_msg)\n                        self._circuit_breaker.record_failure(embed_err)\n                        if getattr(self._vikingdb, \"has_queue_manager\", False):\n                            try:\n                                await self._vikingdb.enqueue_embedding_msg(embedding_msg)"
+        },
+        {
+          "file": "openviking_cli/utils/config/embedding_config.py",
+          "lines": "582-596",
+          "snippet": "class EmbeddingCircuitBreakerConfig(BaseModel):\n    failure_threshold: int = Field(\n        default=5,\n        ge=1,\n        description=\"Consecutive failures required to open the embedding circuit breaker\",\n    )\n    reset_timeout: float = Field(\n        default=60.0,\n        gt=0,\n        description=\"Base circuit breaker reset timeout in seconds\",\n    )\n    max_reset_timeout: float = Field(\n        default=600.0,\n        gt=0,\n        description=\"Maximum circuit breaker reset timeout in seconds\","
+        },
+        {
+          "file": "openviking/storage/queuefs/semantic_processor.py",
+          "lines": "112, 232-235, 334-344",
+          "snippet": "        self._circuit_breaker = CircuitBreaker()\n...\n        # Throttle to prevent re-enqueue storm during OPEN window\n        wait = self._circuit_breaker.retry_after\n        if wait > 0:\n            await asyncio.sleep(wait)\n...\n            # Circuit breaker: if API is known-broken, re-enqueue and wait\n            try:\n                self._circuit_breaker.check()\n            except CircuitBreakerOpen:\n                logger.warning(\n                    f\"Circuit breaker is open, re-enqueueing semantic message: {msg.uri}\"\n                )\n                await self._reenqueue_semantic_msg(msg)\n                self._merge_request_stats(msg.telemetry_id, requeue_count=1)\n                get_request_wait_tracker().record_semantic_requeue(msg.telemetry_id)\n                self.report_requeue()"
+        },
+        {
+          "file": "openviking/storage/queuefs/semantic_processor.py",
+          "lines": "462-471, 475-478, 486-491",
+          "snippet": "        except Exception as e:\n            if isinstance(e, LockAcquisitionError):\n                logger.warning(\n                    \"Lock error processing semantic message, re-enqueueing without \"\n                    \"tripping API circuit breaker: %s\",\n                    e,\n                    exc_info=True,\n                )\n                if msg is not None:\n                    await self._requeue_semantic_msg_after_error(msg, data, e)\n...\n\n            error_class = classify_api_error(e)\n            if error_class == ERROR_CLASS_INPUT_TOO_LARGE:\n                logger.error(\n...\n                    )\n                self.report_error(str(e), data)\n            elif error_class == ERROR_CLASS_PERMANENT:\n                logger.critical(\n                    f\"Permanent API error processing semantic message, dropping: {e}\",\n                    exc_info=True,"
+        }
+      ]
+    },
+    {
+      "name": "ordered archive pipeline with terminal done and failed markers",
+      "what_it_is": "Phase 2 of a session commit (archive summary and memory extraction) for archive N first polls every 0.1 s until archive N-1 carries a .done marker or a .failed.json marker. A successful run writes .done with the covered message range; a failed or cancelled run writes .failed.json with stage, error and a skipped flag, which lets the next archive proceed.",
+      "function_in_system": "Wraps the memory ExtractLoop in the asynchronous commit path. Serializes extraction runs per session so each run builds on the completed overview of the previous archive, and contains a failed run to its own archive. Otherwise out-of-order commits extract memories against a stale overview, and one failed archive stalls every later commit of the session. A hard crash leaves neither marker, so the wait for that archive has no upper bound.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "openviking/session/session.py",
+          "lines": "1284, 1309-1311, 1646-1650",
+          "snippet": "            await self._wait_for_previous_archive_done(archive_index)\n...\n                    latest_archive_overview = await self._get_latest_completed_archive_overview(\n                        exclude_archive_uri=archive_uri\n                    )\n...\n            await self._write_failed_marker(\n                archive_uri,\n                stage=\"memory_extraction\",\n                error=str(e),\n            )"
+        },
+        {
+          "file": "openviking/session/session.py",
+          "lines": "2049-2075",
+          "snippet": "    async def _wait_for_previous_archive_done(self, archive_index: int) -> bool:\n        \"\"\"Wait until the previous archive reaches a terminal state.\"\"\"\n        if archive_index <= 1 or not self._viking_fs:\n            return True\n\n        previous_archive_uri = f\"{self._session_uri}/history/archive_{archive_index - 1:03d}\"\n        while True:\n            try:\n                await self._viking_fs.read_file(f\"{previous_archive_uri}/.done\", ctx=self.ctx)\n                return True\n            except Exception:\n                pass\n\n            try:\n                await self._viking_fs.read_file(\n                    f\"{previous_archive_uri}/.failed.json\",\n                    ctx=self.ctx,\n                )\n                logger.info(\n                    \"Previous archive %s failed and is skipped; continuing\",\n                    previous_archive_uri,\n                )\n                return True\n            except Exception:\n                pass\n\n            await asyncio.sleep(_ARCHIVE_WAIT_POLL_SECONDS)"
+        },
+        {
+          "file": "openviking/session/session.py",
+          "lines": "1672-1676, 1695-1699",
+          "snippet": "        await self._viking_fs.write_file(\n            uri=f\"{archive_uri}/.done\",\n            content=content,\n            ctx=self.ctx,\n        )\n...\n        if blocked_by:\n            payload[\"blocked_by\"] = blocked_by\n        await self._viking_fs.write_file(\n            uri=f\"{archive_uri}/.failed.json\",\n            content=json.dumps(payload, ensure_ascii=False),"
+        }
+      ]
+    }
+  ]
+}

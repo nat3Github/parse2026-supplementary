@@ -1,0 +1,1148 @@
+{
+  "repo": "Lynpoint/CyberVerse",
+  "commit": "c30c4ef8d9",
+  "system_type": "application",
+  "system_type_reason": "Deployable digital-human voice agent (Go server + Python inference) with pluggable backends; product-oriented README.",
+  "repo_overview": {
+    "summary": "Real-time digital-human voice agent framework. A Go server orchestrates WebRTC sessions (direct P2P with embedded TURN, or LiveKit SFU) and calls a Python gRPC inference server hosting pluggable ASR/LLM/TTS/omni-voice/RAG/avatar backends. A PersonaAgent wraps a realtime omni model (Qwen Omni / Doubao) and delegates long-running work (search, research, reports) via native tool calls to background LangGraph SubAgents with their own LLM tool loop.",
+    "components": [
+      {
+        "path": "server/internal/orchestrator/",
+        "purpose": "Go core: session lifecycle, turn pipeline ASR->LLM->TTS->avatar, interruption handling, idle avatar runtime"
+      },
+      {
+        "path": "server/internal/inference/",
+        "purpose": "Go gRPC clients to the Python inference server"
+      },
+      {
+        "path": "server/internal/direct/, server/internal/livekit/, server/internal/mediapeer/",
+        "purpose": "WebRTC transport: Pion P2P with embedded TURN, LiveKit bot, media segments"
+      },
+      {
+        "path": "server/internal/api/, server/internal/ws/",
+        "purpose": "REST API (characters, settings, knowledge, offline videos) and WebSocket hub"
+      },
+      {
+        "path": "server/internal/agenttask/, character/, rag/, recording/, config/",
+        "purpose": "task store, persona and chat-history persistence, RAG store, session recording, YAML/.env config"
+      },
+      {
+        "path": "inference/server.py, inference/core/, inference/services/",
+        "purpose": "Python gRPC server, plugin registry, per-modality service adapters"
+      },
+      {
+        "path": "inference/plugins/voice_llm/",
+        "purpose": "agent core: PersonaAgent, Qwen Omni and Doubao realtime clients, persona/ (supervisor, local task runtime, LangGraph SubAgent, tools)"
+      },
+      {
+        "path": "inference/plugins/llm/, asr/, tts/, avatar/",
+        "purpose": "provider plugins: OpenAI/LiteLLM/Qwen LLM, Whisper/Qwen ASR, Doubao/Qwen/OpenAI TTS, FlashHead/LiveAct avatar"
+      },
+      {
+        "path": "inference/rag/",
+        "purpose": "embedding and retrieval engine for character knowledge"
+      },
+      {
+        "path": "infra/, proto/",
+        "purpose": "example config (session limits, timeouts, warmup), Docker files, gRPC schemas"
+      },
+      {
+        "path": "models/",
+        "purpose": "vendored third-party avatar model code (FlashHead, MuseTalk, SoulX-LiveAct), out of coding scope"
+      },
+      {
+        "path": "frontend/",
+        "purpose": "Vue web UI, out of coding scope"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "inference/plugins/voice_llm/persona/subagents/agent.py",
+        "lines": "213-218",
+        "snippet": "agent_builder = StateGraph(SubAgentState)\nagent_builder.add_node(\"llm_call\", llm_call)\nagent_builder.add_node(\"tool_node\", tool_node)\nagent_builder.add_edge(START, \"llm_call\")\nagent_builder.add_conditional_edges(\"llm_call\", route_after_llm, [\"tool_node\", END])\nagent_builder.add_conditional_edges(\"tool_node\", route_after_tools, [\"llm_call\", END])"
+      },
+      {
+        "file": "inference/plugins/voice_llm/persona/subagents/agent.py",
+        "lines": "197-204",
+        "snippet": "def route_after_llm(state: SubAgentState) -> Literal[\"tool_node\", \"__end__\"]:\n    if state.get(\"completed\"):\n        return END\n    messages = state.get(\"messages\", [])\n    last_message = messages[-1] if messages else None\n    if getattr(last_message, \"tool_calls\", None):\n        return \"tool_node\"\n    return END"
+      },
+      {
+        "file": "inference/plugins/voice_llm/persona_agent.py",
+        "lines": "612-620",
+        "snippet": "await injected.put(\n    VoiceLLMInputEvent(\n        tool_result=ToolResult(\n            id=call.id,\n            name=call.name,\n            result=result,\n        )\n    )\n)"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "route_after_llm (agent.py:197-204) sends the model's tool_calls to tool_node, which invokes the named tool with the model's arguments (agent.py:180-184); the PersonaAgent executes the omni model's native tool calls (persona_agent.py:593-605).",
+      "consumes_feedback": "tool_node appends each tool result as a ToolMessage to the SubAgent messages (agent.py:186), which feed the next llm_call (agent.py:146); the PersonaAgent injects tool results back into the realtime session (persona_agent.py:612-620).",
+      "multi_turn_until_termination": "The graph cycles llm_call -> tool_node -> llm_call (agent.py:213-218) until the terminal tool create_html_report sets completed or max_agent_iterations is reached (agent.py:206-211)."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent",
+    "evidence": [
+      {
+        "file": "inference/plugins/voice_llm/persona_agent.py",
+        "lines": "28-31",
+        "snippet": "PERSONA_TOOL_DEFINITIONS = [\n    ToolDefinition(\n        name=\"create_task\",\n        description=\"为搜索、调研、聚合或报告类请求创建 CyberVerse 后台任务。\","
+      },
+      {
+        "file": "inference/plugins/voice_llm/persona/runtime.py",
+        "lines": "340-347",
+        "snippet": "await run_task_with_langgraph(\n    task,\n    self.search_tool,\n    RuntimeCallbacks(self),\n    llm=self.llm,\n    tool_executor=self.tool_executor,\n    max_agent_iterations=self.max_agent_iterations,\n)"
+      },
+      {
+        "file": "inference/plugins/voice_llm/persona/runtime.py",
+        "lines": "96",
+        "snippet": "self.llm = llm or build_agent_llm_from_runtime_config(runtime_config)"
+      }
+    ],
+    "justification": "The PersonaAgent is driven by a realtime omni model (Qwen Omni or Doubao) with its own persona system prompt (persona_agent.py:69-82). Via the create_task tool it delegates to a background SubAgent that runs on a separate text LLM (llm.py, default qwen3.6-plus) with its own system prompt and its own LangGraph tool loop (agent.py:76-88, 213-218). A boss AI delegating to a helper AI with its own LLM loop counts as multi-agent, even though the delegation is exposed as a tool.",
+    "verdict_raw": "multi-agent"
+  },
+  "resilience": [
+    {
+      "name": "SubAgent iteration cap with terminal-tool completion check",
+      "what_it_is": "The LangGraph SubAgent loop (llm_call <-> tool_node) routes to END once llm_calls reaches max_agent_iterations (code default 8, example config 100). If the terminal tool create_html_report was never called by then, run_subagent raises TimeoutError, which the task runtime records as a failed task.",
+      "function_in_system": "Sits in the routing edge after each tool round of the background SubAgent. Bounds the number of LLM calls per delegated task and turns a non-converging run into an explicit failure. Otherwise a SubAgent that keeps searching and never writes its report loops indefinitely and accumulates unbounded token cost.",
+      "activation": "always",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "inference/plugins/voice_llm/persona/subagents/agent.py",
+          "lines": "206-211",
+          "snippet": "def route_after_tools(state: SubAgentState) -> Literal[\"llm_call\", \"__end__\"]:\n    if state.get(\"completed\"):\n        return END\n    if int(state.get(\"llm_calls\") or 0) >= max_agent_iterations:\n        return END\n    return \"llm_call\""
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona/subagents/agent.py",
+          "lines": "229-230",
+          "snippet": "if terminal_tool_names and not final_state.get(\"completed\"):\n    raise TimeoutError(f\"subagent did not call a terminal tool within {max_agent_iterations} LLM calls\")"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona/runtime.py",
+          "lines": "101",
+          "snippet": "self.max_agent_iterations = _positive_int(persona_params.get(\"max_agent_iterations\"), 8)"
+        },
+        {
+          "file": "infra/cyberverse_config.example.yaml",
+          "lines": "88",
+          "snippet": "max_agent_iterations: 100 # Max local sub-agent loop iterations per task."
+        }
+      ]
+    },
+    {
+      "name": "tool errors returned to the model as structured results (persona and SubAgent level)",
+      "what_it_is": "SubAgent level: ZhihuToolExecutor.execute catches every exception from the Zhihu API client (HTTP errors, missing access secret) and returns {\"ok\": False, \"error\": ...}; unknown tool names and non-zero Zhihu API codes are also normalized into error objects; tool_node wraps every result into a ToolMessage for the next LLM call. Persona level: any exception while executing a persona tool (supervisor routing, task limit, RAG) becomes {\"ok\": False, \"error\": ...} and is sent to the omni model as tool_result.",
+      "function_in_system": "Sits between tool execution and the next model call in both loops: the SubAgent tool_node and the PersonaAgent tool-call handling inside converse_stream. Converts tool failures into observations the model can react to, e.g. rephrasing a search or telling the user that too many tasks are running, and the loop keeps running. Otherwise a single failing tool call raises out of the graph and fails the background task, or breaks the realtime voice stream.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "inference/plugins/voice_llm/persona/tools.py",
+          "lines": "291-304",
+          "snippet": "async def execute(self, name: str, arguments: dict[str, Any]) -> dict[str, Any]:\n    args = dict(arguments or {})\n    try:\n        if name == \"zhihu_search\":\n            return await self.client.zhihu_search(str(args.get(\"query\") or \"\"), args.get(\"count\", 10))\n        ...\n    except Exception as exc:\n        return {\"ok\": False, \"tool\": name, \"error\": str(exc)}\n    return {\"ok\": False, \"tool\": name, \"error\": f\"unsupported tool: {name}\"}"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona/tools.py",
+          "lines": "181-184",
+          "snippet": "code = payload.get(\"Code\", payload.get(\"code\", 0))\nmessage = str(payload.get(\"Message\", payload.get(\"message\", \"\")) or \"\")\nif code not in (0, \"0\", None):\n    return {\"ok\": False, \"tool\": tool_name, \"code\": code, \"error\": message or \"Zhihu API error\"}"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona/subagents/agent.py",
+          "lines": "180-186",
+          "snippet": "tool = tools_by_name.get(name)\nif tool is None:\n    result = {\"ok\": False, \"tool\": name, \"error\": f\"unsupported tool: {name}\"}\nelse:\n    result = await tool.ainvoke(arguments)\n\ntool_messages.append(ToolMessage(content=_safe_json(result), name=name, tool_call_id=call_id))"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona_agent.py",
+          "lines": "604-620",
+          "snippet": "try:\n    tool_result = await self._execute_tool(effective_call, session_config)\n    if tool_result.pending_task is not None:\n        pending_task_starts.append(tool_result.pending_task)\n    result = tool_result.result\nexcept Exception as exc:\n    logger.exception(\"persona tool call failed: %s\", call.name)\n    result = {\"ok\": False, \"error\": str(exc)}\nawait injected.put(\n    VoiceLLMInputEvent(\n        tool_result=ToolResult(\n            id=call.id,\n            name=call.name,\n            result=result,\n        )\n    )\n)"
+        }
+      ]
+    },
+    {
+      "name": "per-session concurrent background task limit",
+      "what_it_is": "LocalTaskRuntime.create_task counts tasks of the session in queued/running/waiting_user state under a lock and raises RuntimeError when max_active_tasks_per_session (default 3, configurable via plugin params) is reached.",
+      "function_in_system": "Sits at task creation, reached when the PersonaAgent calls the create_task tool. Caps how many SubAgents one voice session can run in parallel. Otherwise a model that delegates repeatedly spawns an unbounded number of LLM tool loops with matching cost and load.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "inference/plugins/voice_llm/persona/runtime.py",
+          "lines": "169-176",
+          "snippet": "async with self._lock:\n    active = [\n        existing\n        for existing in self._tasks.values()\n        if existing.session_id == session_id and existing.status in ACTIVE_STATUSES\n    ]\n    if len(active) >= self.max_active_tasks_per_session:\n        raise RuntimeError(f\"session already has {len(active)} active tasks\")"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona_agent.py",
+          "lines": "148-151",
+          "snippet": "self.task_runtime = LocalTaskRuntime(\n    runtime_config=runtime_config,\n    max_active_tasks_per_session=int(config.params.get(\"max_active_tasks_per_session\") or 3),\n)"
+        }
+      ]
+    },
+    {
+      "name": "background task failure isolation with spoken fallback",
+      "what_it_is": "Each SubAgent runs as its own asyncio task; _run_task catches any exception and stores a task.failed event. The supervisor polls the task until a terminal status with a monitor timeout (default 1800 s, poll 1 s). On timeout or error, run_pending_task returns task_start_failed_prompt, which instructs the persona to tell the user in one natural sentence to try again later.",
+      "function_in_system": "Sits between the background SubAgent and the realtime voice conversation. Contains SubAgent crashes and hangs inside the task and turns them into a spoken answer for the user. Otherwise a failing or hanging background task either breaks the voice session or leaves the user waiting for a result that never arrives.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "inference/plugins/voice_llm/persona/runtime.py",
+          "lines": "348-363",
+          "snippet": "except asyncio.CancelledError:\n    raise\nexcept Exception as exc:\n    logger.exception(\"persona local task failed: task_id=%s\", task_id)\n    task = self._tasks.get(task_id)\n    localizer = Localizer(task.locale if task else None)\n    try:\n        await self.append_event(\n            task_id,\n            TaskEvent(\n                event_type=\"task.failed\",\n                status=\"failed\","
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona/supervisor.py",
+          "lines": "212-218",
+          "snippet": "final_task, events = await self.wait_for_task_terminal(task_id)\n    return self.task_completion_prompt(pending.user_request, final_task, events)\nexcept asyncio.CancelledError:\n    raise\nexcept Exception as exc:\n    logger.exception(\"persona supervisor task failed\")\n    return self.task_start_failed_prompt(pending.user_request, exc)"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona/supervisor.py",
+          "lines": "221, 234-238",
+          "snippet": "deadline = asyncio.get_running_loop().time() + self.task_monitor_timeout_seconds\n...\nif str(task.get(\"status\") or \"\") in TERMINAL_STATUSES:\n    return task, events\nif asyncio.get_running_loop().time() >= deadline:\n    raise TimeoutError(f\"task {task_id} did not finish before persona monitor timeout\")\nawait asyncio.sleep(self.task_poll_interval_seconds)"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona/supervisor.py",
+          "lines": "296-303",
+          "snippet": "def task_start_failed_prompt(user_request: str, error: Exception) -> str:\n    return \"\\n\".join(\n        [\n            \"后台任务没有成功启动。请作为数字人用一句自然口语告诉用户稍后再试。\",\n            f\"用户原始请求：{user_request}\",\n            f\"错误原因：{error}\",\n        ]\n    )"
+        }
+      ]
+    },
+    {
+      "name": "tool output truncation for context budget",
+      "what_it_is": "Every tool result is serialized and cut to 12000 characters before it enters the SubAgent message history (_safe_json). Zhihu results are additionally clipped: item text to 1600 characters, at most 3 comments of 300 characters, zhida reasoning to 2000 characters; result counts are bounded to 10/20/30.",
+      "function_in_system": "Sits at the boundary between tool execution and the SubAgent message list, which grows with every iteration. Keeps each observation small so the context window and per-call token cost stay bounded over many tool rounds. Otherwise large search payloads accumulate across iterations and overflow the context or inflate cost.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "inference/plugins/voice_llm/persona/subagents/agent.py",
+          "lines": "36-40",
+          "snippet": "def _safe_json(value: Any, limit: int = 12000) -> str:\n    text = json.dumps(value, ensure_ascii=False, default=str)\n    if len(text) <= limit:\n        return text\n    return text[:limit] + \"...<truncated>\""
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona/tools.py",
+          "lines": "39-43",
+          "snippet": "def _clip_text(value: Any, limit: int = 1600) -> str:\n    text = str(value or \"\").strip()\n    if len(text) <= limit:\n        return text\n    return text[:limit] + \"...\""
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona/tools.py",
+          "lines": "208-213",
+          "snippet": "comments = raw.get(\"CommentInfoList\", raw.get(\"comment_info_list\", []))\nif isinstance(comments, list):\n    item[\"comments\"] = [\n        _clip_text(comment.get(\"Content\") if isinstance(comment, dict) else comment, limit=300)\n        for comment in comments[:3]\n    ]"
+        }
+      ]
+    },
+    {
+      "name": "user/model-initiated background task cancellation",
+      "what_it_is": "The cancel_task tool routed by the supervisor cancels the running SubAgent asyncio task and appends a task.cancelled event. append_event ignores all events once a task is in a terminal status, so late SubAgent events cannot revive a cancelled task.",
+      "function_in_system": "Exposed to the PersonaAgent as a hidden tool, so the user can stop a wrong or overly long research task by voice. Stops further LLM and tool calls of that SubAgent. Otherwise an unwanted task keeps consuming tokens and occupies one of the limited task slots until it finishes or times out.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "inference/plugins/voice_llm/persona/runtime.py",
+          "lines": "229-247",
+          "snippet": "async def cancel_task(self, session_id: str) -> dict[str, Any]:\n    status = await self.get_task_status(session_id)\n    task = status.get(\"task\")\n    if not task:\n        return {\"cancelled\": False, \"reason\": \"no_active_task\"}\n    task_id = str(task.get(\"id\") or \"\")\n    runner = self._runners.get(task_id)\n    if runner and not runner.done():\n        runner.cancel()\n    event = await self.append_event("
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona/runtime.py",
+          "lines": "291-292",
+          "snippet": "if task.status in TERMINAL_STATUSES:\n    return _as_json(self._events.get(task_id, [])[-1]) if self._events.get(task_id) else {}"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona/supervisor.py",
+          "lines": "128-129",
+          "snippet": "if route == \"cancel_task\":\n    return {\"result\": await self.runtime.cancel_task(session_id)}"
+        }
+      ]
+    },
+    {
+      "name": "deferred background-task start after spoken acknowledgement",
+      "what_it_is": "The create_task tool returns an accepted result with a short ACK reply immediately. The pending SubAgent start is held until the omni model's acknowledgement reply is final, then scheduled as an asyncio task. When the task reaches a terminal status, a completion prompt is injected as text input into the still running realtime session.",
+      "function_in_system": "Sits in the PersonaAgent event loop between the omni model's tool call and the background SubAgent. Keeps long research tasks off the realtime voice turn so the user gets an instant spoken answer and can keep talking while the task runs. Otherwise every delegated task blocks the conversation for the full duration of the SubAgent run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "inference/plugins/voice_llm/persona/supervisor.py",
+          "lines": "241-249",
+          "snippet": "def _accepted_task_result(task: dict[str, Any] | None = None) -> dict[str, Any]:\n    task_id = str((task or {}).get(\"id\") or \"\").strip()\n    return {\n        \"ok\": True,\n        \"accepted\": True,\n        \"status\": \"accepted\",\n        \"reply\": \"好的，请稍等，我现在开始处理。\",\n        \"task_id\": task_id,\n    }"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona_agent.py",
+          "lines": "630-634",
+          "snippet": "if event.is_final and pending_task_starts:\n    starts = pending_task_starts[:]\n    pending_task_starts.clear()\n    for pending in starts:\n        schedule_task_start(pending)"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona_agent.py",
+          "lines": "464-472",
+          "snippet": "async def _run_async_task(\n    self,\n    pending: PendingSubAgentTask,\n    injected: asyncio.Queue[VoiceLLMInputEvent],\n) -> None:\n    if self.supervisor is None:\n        raise RuntimeError(\"persona supervisor is not initialized\")\n    prompt = await self.supervisor.run_pending_task(pending)\n    await injected.put(VoiceLLMInputEvent(text=prompt))"
+        }
+      ]
+    },
+    {
+      "name": "automatic RAG grounding before each reply with failure fallback",
+      "what_it_is": "After every user transcript the PersonaAgent searches the character knowledge base and sends the hits as response_instructions for the next reply, telling the model to prioritize these materials and to avoid inventing facts absent from them. If retrieval raises, the exception is logged and the reply proceeds with empty instructions.",
+      "function_in_system": "Sits in the PersonaAgent loop between the user transcript and the omni model's response. Grounds persona answers in imported character material to reduce hallucinated biographical facts, and a retrieval failure degrades to an ungrounded reply. Otherwise the model answers character questions from its own weights, and a RAG outage blocks the reply.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "inference/plugins/voice_llm/persona_agent.py",
+          "lines": "582-587",
+          "snippet": "try:\n    response_instructions = await self._rag_response_instructions(user_text, session_config)\nexcept Exception:\n    logger.exception(\"persona RAG pre-response failed\")\n    response_instructions = \"\"\nawait injected.put(VoiceLLMInputEvent(response_instructions=response_instructions))"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona_agent.py",
+          "lines": "261-263, 272",
+          "snippet": "\"请回答用户刚才的问题。下列内容来自当前角色素材库；如果与问题相关，必须优先依据这些素材回答；如果无关，请忽略它们。\",\nf\"用户问题：{query}\",\n\"【角色素材检索结果】\",\n...\nlines.append(\"不要提到内部检索过程。不要编造素材中没有的事实。\")"
+        },
+        {
+          "file": "inference/plugins/voice_llm/persona_agent.py",
+          "lines": "230-231",
+          "snippet": "if not session_config.character_dir:\n    return SupervisorToolResult(result={\"ok\": True, \"results\": [], \"reason\": \"character_dir_missing\"})"
+        }
+      ]
+    },
+    {
+      "name": "Doubao realtime WebSocket reconnect with exponential backoff",
+      "what_it_is": "converse_stream reopens the whole Doubao realtime session on websockets.ConnectionClosed, ConnectionError or OSError, up to max_retries (default 3) with backoff min(retry_backoff_base * 2^(attempt-1), retry_backoff_max) (defaults 1 s and 10 s), then raises RuntimeError. Each reconnect starts a new provider session id.",
+      "function_in_system": "Wraps the realtime voice model connection used by the PersonaAgent when Doubao is the omni provider. Absorbs transient network drops of the long-lived WebSocket. Otherwise one dropped connection ends the voice conversation immediately.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "inference/plugins/voice_llm/doubao_realtime.py",
+          "lines": "257-283",
+          "snippet": "attempt = 0\nlast_error = None\nwhile attempt <= effective_config.max_retries:\n    try:\n        async for event in self._converse_stream_inner(input_stream, effective_config):\n            yield event\n        return\n    except (websockets.ConnectionClosed, ConnectionError, OSError) as e:\n        attempt += 1\n        last_error = e\n        if attempt > effective_config.max_retries:\n            break\n        backoff = min(\n            effective_config.retry_backoff_base * (2 ** (attempt - 1)),\n            effective_config.retry_backoff_max,\n        )\n        ...\n        await asyncio.sleep(backoff)\nraise RuntimeError(\n    f\"Doubao connection failed after {attempt} attempts: {last_error}\"\n)"
+        },
+        {
+          "file": "inference/plugins/voice_llm/doubao_config.py",
+          "lines": "129-131",
+          "snippet": "max_retries = int(config.params.get(\"max_retries\", 3))\nretry_backoff_base = float(config.params.get(\"retry_backoff_base\", 1.0))\nretry_backoff_max = float(config.params.get(\"retry_backoff_max\", 10.0))"
+        }
+      ]
+    },
+    {
+      "name": "Qwen deferred-response serialization with conflict re-queue",
+      "what_it_is": "A _QwenResponseCoordinator queues every response.create request (tool result, RAG instructions, injected task result) and sends the next one only once the model is idle. When the provider answers with \"Conversation already has an active response\", the current request is pushed back to the front of the queue and resent later. On stream close it waits up to 60 s for outstanding responses.",
+      "function_in_system": "Sits between the PersonaAgent's injected inputs and the Qwen Omni realtime WebSocket. Prevents replies from being dropped when a tool result or a finished background task arrives while the persona is still speaking. Otherwise the provider rejects the overlapping response.create and the user never hears the task result.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "inference/plugins/voice_llm/qwen_omni_realtime.py",
+          "lines": "436-445",
+          "snippet": "if event_type == \"error\":\n    message = self._error_message(event)\n    if self._is_active_response_error(message):\n        logger.info(\n            \"qwen_omni deferred response delayed by active response session=%s\",\n            session_id or \"qwen_omni\",\n        )\n        await response_coordinator.mark_active_response_error()\n        continue\n    raise RuntimeError(message)"
+        },
+        {
+          "file": "inference/plugins/voice_llm/qwen_omni_realtime.py",
+          "lines": "887-897",
+          "snippet": "async def mark_active_response_error(self) -> None:\n    retry: _QwenDeferredResponse | None = None\n    async with self._state_condition:\n        if self._current_response is not None:\n            retry = self._current_response\n            retry.item_sent = True\n            self._current_response = None\n        self._idle = False\n        self._state_condition.notify_all()\n    if retry is not None:\n        await self._prepend(retry)"
+        },
+        {
+          "file": "inference/plugins/voice_llm/qwen_omni_realtime.py",
+          "lines": "397-404",
+          "snippet": "if not await response_coordinator.wait_idle():\n    return\nif request.item_payload is not None and not request.item_sent:\n    await self._send_json(ws, request.item_payload)\n    request.item_sent = True\nawait response_coordinator.begin_client_response(request)\ntry:\n    await self._send_json(ws, request.response_payload)"
+        },
+        {
+          "file": "inference/plugins/voice_llm/qwen_omni_realtime.py",
+          "lines": "266-267",
+          "snippet": "if drain_responses_on_close and expects_deferred_response:\n    await response_coordinator.wait_all_responses_done(timeout=60.0)"
+        }
+      ]
+    },
+    {
+      "name": "ASR session rollover before the provider session limit",
+      "what_it_is": "The Qwen ASR sender runs against a deadline of max_session_seconds (default 540 s). On expiry it sends session.finish and returns the rollover marker, the outer loop drains late transcript events for rollover_drain_seconds (default 5 s), closes the WebSocket and opens a fresh provider session with the next queued chunk as its first audio. A producer task buffers incoming audio in a bounded asyncio.Queue (default 64 chunks) so the caller's stream keeps flowing during the swap.",
+      "function_in_system": "Sits in the ASR plugin between the orchestrator's audio stream and the DashScope realtime WebSocket, one layer below the turn pipeline. Rotates the provider session before the provider's own session limit ends it, while the gRPC audio stream from the Go side stays open. Otherwise a conversation longer than the provider session limit loses transcription mid-turn and the voice pipeline stalls.",
+      "activation": "always",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "inference/plugins/asr/qwen_asr_plugin.py",
+          "lines": "42-44",
+          "snippet": "self.max_session_seconds = 540.0\nself.rollover_drain_seconds = 5.0\nself.audio_queue_maxsize = 64"
+        },
+        {
+          "file": "inference/plugins/asr/qwen_asr_plugin.py",
+          "lines": "86-91",
+          "snippet": "audio_queue: asyncio.Queue[bytes | None] = asyncio.Queue(\n    maxsize=max(self.audio_queue_maxsize, 1)\n)\nproducer_task = asyncio.create_task(\n    self._queue_audio(audio_stream, audio_queue)\n)"
+        },
+        {
+          "file": "inference/plugins/asr/qwen_asr_plugin.py",
+          "lines": "242-258",
+          "snippet": "while True:\n    remaining = deadline - time.monotonic()\n    if remaining <= 0:\n        await self._finish_session(ws, session_id)\n        return _SEND_ROLLOVER\n\n    try:\n        chunk = await asyncio.wait_for(\n            audio_queue.get(), timeout=remaining\n        )\n    except asyncio.TimeoutError:\n        await self._finish_session(ws, session_id)\n        return _SEND_ROLLOVER\n\n    if chunk is None:\n        await self._finish_session(ws, session_id)\n        return _SEND_EOF"
+        },
+        {
+          "file": "inference/plugins/asr/qwen_asr_plugin.py",
+          "lines": "155-166",
+          "snippet": "drain_timeout = (\n    self.rollover_drain_seconds\n    if send_result == _SEND_ROLLOVER\n    else None\n)\nasync for event in self._drain_session_events(\n    receiver_task, event_queue, drain_timeout\n):\n    yield event\n\nif send_result == _SEND_EOF:\n    break"
+        },
+        {
+          "file": "inference/plugins/asr/qwen_asr_plugin.py",
+          "lines": "93-98",
+          "snippet": "while True:\n    first_chunk = await audio_queue.get()\n    if first_chunk is None:\n        break\n    if not first_chunk:\n        continue"
+        }
+      ]
+    },
+    {
+      "name": "retrieval budget for RAG grounding",
+      "what_it_is": "RAG search requests top_k hits (default 5), drops every hit whose converted score falls below min_score (default 0.25), and fills up to max_context_chars (default 4500), clipping the last chunk and breaking once the budget is spent. Indexing splits documents into 900-character chunks with 120 characters overlap, so a single hit stays small.",
+      "function_in_system": "Sits in front of the character knowledge block that the PersonaAgent injects as response_instructions before every reply. Caps how much retrieved text enters each realtime turn and filters weakly matching chunks out of the prompt. Otherwise whole documents travel into every grounded reply, which inflates per-turn token cost and the latency of a voice turn that the user waits on.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "inference/rag/engine.py",
+          "lines": "339-358",
+          "snippet": "top_k = req.top_k if req.top_k > 0 else self.default_top_k\nmax_chars = req.max_context_chars if req.max_context_chars > 0 else self.default_max_context_chars\nmin_score = req.min_score if req.min_score > 0 else self.default_min_score\n\nraw_results = store.similarity_search_with_score(query, k=top_k)\nresults: list[RAGSearchResult] = []\nused_chars = 0\nfor doc, raw_score in raw_results:\n    score = 1.0 / (1.0 + max(float(raw_score), 0.0))\n    if score < min_score:\n        continue\n    content = (doc.page_content or \"\").strip()\n    if not content:\n        continue\n    remaining = max_chars - used_chars\n    if remaining <= 0:\n        break\n    if len(content) > remaining:\n        content = content[:remaining]\n    used_chars += len(content)"
+        },
+        {
+          "file": "inference/rag/engine.py",
+          "lines": "19-23",
+          "snippet": "DEFAULT_CHUNK_SIZE = 900\nDEFAULT_CHUNK_OVERLAP = 120\nDEFAULT_TOP_K = 5\nDEFAULT_MAX_CONTEXT_CHARS = 4500\nDEFAULT_MIN_SCORE = 0.25"
+        },
+        {
+          "file": "inference/rag/engine.py",
+          "lines": "190-194",
+          "snippet": "return RecursiveCharacterTextSplitter(\n    chunk_size=max(100, self.chunk_size),\n    chunk_overlap=max(0, min(self.chunk_overlap, max(0, self.chunk_size - 1))),\n    separators=[\"\\n\\n\", \"\\n\", \"。\", \"！\", \"？\", \".\", \"!\", \"?\", \"；\", \";\", \" \", \"\"],\n)"
+        },
+        {
+          "file": "infra/cyberverse_config.example.yaml",
+          "lines": "182-186",
+          "snippet": "top_k: 5\nmin_score: 0.25 # Drop retrieval hits below this relevance score.\nmax_context_chars: 4500 # Max retrieved text injected into prompts.\nchunk_chars: 900 # Target document chunk size during indexing.\nchunk_overlap_chars: 120 # Overlap between adjacent indexed chunks."
+        }
+      ]
+    },
+    {
+      "name": "voice pre-flight check before a character is saved",
+      "what_it_is": "The character API probes a chosen voice id against the realtime provider under a 5 s Go deadline before the voice is persisted. The Python CheckVoice handler wraps the provider probe in asyncio.wait_for with a 4.5 s timeout and reports a provider rejection as provider_error separately from a transport failure. A rejection answers 502 with the provider message, a timeout answers 503.",
+      "function_in_system": "Sits on the character configuration path, ahead of every voice session that will later use that character. Moves an invalid voice id into the edit request that introduced it, where a human is present to correct it. Otherwise the bad voice surfaces when the realtime session opens and breaks the first turn of a live conversation.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/api/characters.go",
+          "lines": "349-364",
+          "snippet": "ctx, cancel := context.WithTimeout(req.Context(), 5*time.Second)\ndefer cancel()\n\nproviderError, err := r.orch.CheckVoice(ctx, provider, voiceType)\nif providerError != \"\" {\n\twriteJSON(w, http.StatusBadGateway, ErrorResponse{Error: providerError})\n\treturn\n}\nif err != nil {\n\tif ctx.Err() == context.DeadlineExceeded {\n\t\twriteJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: \"voice check timed out\"})\n\t\treturn\n\t}\n\twriteJSON(w, http.StatusServiceUnavailable, ErrorResponse{Error: err.Error()})\n\treturn\n}"
+        },
+        {
+          "file": "server/internal/inference/voice_llm_client.go",
+          "lines": "83-91",
+          "snippet": "func (c *Client) CheckVoice(ctx context.Context, config VoiceLLMSessionConfig) (string, error) {\n\tresp, err := c.voiceLLM.CheckVoice(ctx, &pb.CheckVoiceRequest{\n\t\tConfig: voiceLLMConfigPB(config),\n\t})\n\tif err != nil {\n\t\treturn \"\", unwrapGRPCError(err)\n\t}\n\treturn resp.GetProviderError(), nil\n}"
+        },
+        {
+          "file": "inference/services/voice_llm_service.py",
+          "lines": "183-197",
+          "snippet": "try:\n    await asyncio.wait_for(\n        plugin.check_voice(session_config=session_config),\n        timeout=4.5,\n    )\n    return voice_llm_pb2.CheckVoiceResponse(ok=True)\nexcept VoiceCheckError as exc:\n    return voice_llm_pb2.CheckVoiceResponse(\n        ok=False,\n        provider_error=str(exc),\n    )\nexcept asyncio.TimeoutError:\n    context.set_code(grpc.StatusCode.DEADLINE_EXCEEDED)\n    context.set_details(\"voice check timed out\")\n    return voice_llm_pb2.CheckVoiceResponse(ok=False)"
+        }
+      ]
+    },
+    {
+      "name": "cancellation-scoped teardown of inference streams",
+      "what_it_is": "Every Go streaming helper for ASR, TTS, avatar and the omni conversation follows one shape: a sender goroutine and a receiver loop that both select on ctx.Done(), output and error channels closed via defer, and the sender joined through a buffered sendDone channel before the helper returns. The avatar helper closes its video channel before the error channel so consumers drain buffered frames first.",
+      "function_in_system": "Sits under every turn of the Go pipeline, between the orchestrator and the Python inference server. Cancelling the turn context stops all provider streams of that turn together and releases their goroutines and gRPC streams. This is the effect side of an interrupted or aborted turn. Otherwise a cancelled turn leaves sender goroutines blocked on channel sends and provider streams open, and the audio of the abandoned turn keeps arriving while the next turn runs.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/inference/avatar_client.go",
+          "lines": "64-68",
+          "snippet": "go func() {\n\t// Close videoCh before errCh so consumers can drain buffered VideoChunk\n\t// before seeing errCh close (avoids racing on a zero error receive).\n\tdefer close(errCh)\n\tdefer close(videoCh)"
+        },
+        {
+          "file": "server/internal/inference/avatar_client.go",
+          "lines": "114-134",
+          "snippet": "sendDone := make(chan error, 1)\ngo func() {\n\tdefer func() { _ = stream.CloseSend() }()\n\tfor {\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\tsendDone <- ctx.Err()\n\t\t\treturn\n\t\tcase chunk, ok := <-audioCh:\n\t\t\tif !ok {\n\t\t\t\tsendDone <- nil\n\t\t\t\treturn\n\t\t\t}\n\t\t\terr := stream.Send(chunk)\n\t\t\tif err != nil {\n\t\t\t\tsendDone <- err\n\t\t\t\treturn\n\t\t\t}\n\t\t}\n\t}\n}()"
+        },
+        {
+          "file": "server/internal/inference/avatar_client.go",
+          "lines": "145-155",
+          "snippet": "select {\ncase videoCh <- chunk:\ncase <-ctx.Done():\n\terrCh <- ctx.Err()\n\treturn\n}\n\t}\n\n\tif err := <-sendDone; err != nil {\n\t\terrCh <- err\n\t}"
+        },
+        {
+          "file": "server/internal/inference/voice_llm_client.go",
+          "lines": "122-145",
+          "snippet": "go func() {\n\tdefer func() { _ = stream.CloseSend() }()\n\tfor {\n\t\tselect {\n\t\tcase <-ctx.Done():\n\t\t\tsendDone <- ctx.Err()\n\t\t\treturn\n\t\tcase input, ok := <-inputCh:\n\t\t\tif !ok {\n\t\t\t\tsendDone <- nil\n\t\t\t\treturn\n\t\t\t}\n\t\t\treq := voiceLLMInputPB(input)\n\t\t\tif req == nil {\n\t\t\t\tcontinue\n\t\t\t}\n\t\t\terr := stream.Send(req)\n\t\t\tif err != nil {\n\t\t\t\tsendDone <- err\n\t\t\t\treturn\n\t\t\t}\n\t\t}\n\t}\n}()"
+        }
+      ]
+    },
+    {
+      "name": "barge-in and turn interruption across orchestrator and realtime plugins",
+      "what_it_is": "Three call sites in the Go orchestrator combine inference.Interrupt(sessionID) with cancelPipeline: stopPipelineAndWait used by the startup greeting and by assistant speech, handleVoiceLLMTextInput, and the explicit Interrupt entry point. A fourth trigger is the barge_in flag on an omni output, which aborts the running turn inside the pipeline loop. The gRPC Interrupt handler fans the call out to every registered omni and voice_llm plugin: Qwen Omni sends response.cancel plus input_audio_buffer.clear on the realtime WebSocket, Doubao sends a FinishSession frame.",
+      "function_in_system": "Sits between user input and the reply that is currently being generated and played. Ends that reply at the provider, in the Go pipeline and in the browser playback at the same time when the user speaks, sends text, or a new turn preempts the old one. Otherwise the persona keeps speaking over the user while tokens and audio are still billed for an answer nobody listens to. The teardown of the affected inference streams is covered by \"cancellation-scoped teardown of inference streams\".",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "1701-1709",
+          "snippet": "func (o *Orchestrator) stopPipelineAndWait(session *Session, sessionID string, interruptVoice bool) {\n\tif interruptVoice && session.Mode == ModeOmni && o.inference != nil {\n\t\tif err := o.inference.Interrupt(context.Background(), sessionID); err != nil {\n\t\t\tlog.Printf(\"Failed to interrupt omni model for session %s: %v\", sessionID, err)\n\t\t}\n\t}\n\to.cancelPipeline(session)\n\tsession.WaitPipelineDone(3 * time.Second)\n}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "2184-2189",
+          "snippet": "\tif o.inference != nil {\n\t\tif err := o.inference.Interrupt(context.Background(), sessionID); err != nil {\n\t\t\tlog.Printf(\"Failed to interrupt omni model for session %s: %v\", sessionID, err)\n\t\t}\n\t}\n\to.cancelPipeline(session)"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "4068-4075",
+          "snippet": "\tturnSeq := session.MarkTurnStarted()\n\to.advancePlaybackEpoch(sessionID, turnSeq)\n\to.cancelPipeline(session)\n\n\t// Also interrupt the omni model on the inference side\n\tif session.Mode == ModeOmni {\n\t\t_ = o.inference.Interrupt(context.Background(), sessionID)\n\t}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "3733-3750",
+          "snippet": "\t\t\tif output.GetBargeIn() {\n\t\t\t\tif currentTurn != nil || pendingTurnSeq == 0 {\n\t\t\t\t\tseq := reservePendingTurn()\n\t\t\t\t\tif outputQuestionID != \"\" {\n\t\t\t\t\t\tpendingQuestionID = outputQuestionID\n\t\t\t\t\t}\n\t\t\t\t\tif outputReplyID != \"\" {\n\t\t\t\t\t\tpendingReplyID = outputReplyID\n\t\t\t\t\t}\n\t\t\t\t\tpendingTurnAssistantReady = false\n\t\t\t\t\tlogVoiceTrace(\"go_barge_in_received\", sessionID, seq, pendingReplyID, pendingQuestionID, time.Time{})\n\t\t\t\t\tif currentTurn != nil {\n\t\t\t\t\t\tabortTurn(currentTurn, true)\n\t\t\t\t\t\tcurrentTurn = nil\n\t\t\t\t\t\tcurrentTurnDone = nil\n\t\t\t\t\t\tpendingAssistantMustMatchKey = true\n\t\t\t\t\t\tbroadcastProcessing(seq)\n\t\t\t\t\t}"
+        },
+        {
+          "file": "inference/services/voice_llm_service.py",
+          "lines": "203-212",
+          "snippet": "    async def Interrupt(self, request, context):\n        plugins = [\n            *self.registry.get_all_by_category(\"omni\"),\n            *self.registry.get_all_by_category(\"voice_llm\"),\n        ]\n        if not plugins:\n            plugin = self._get_plugin()\n            plugins = [plugin]\n        await asyncio.gather(*(plugin.interrupt() for plugin in plugins))\n        return voice_llm_pb2.InterruptResponse(success=True)"
+        },
+        {
+          "file": "inference/plugins/voice_llm/qwen_omni_realtime.py",
+          "lines": "149-163",
+          "snippet": "    async def interrupt(self) -> None:\n        ws = self._active_ws\n        if ws is None:\n            return\n        for event_type in (\"response.cancel\", \"input_audio_buffer.clear\"):\n            try:\n                await self._send_json(\n                    ws,\n                    {\n                        \"type\": event_type,\n                        \"event_id\": self._event_id(\"qwen_omni\", \"interrupt\"),\n                    },\n                )\n            except Exception:\n                logger.debug(\"Failed to send Qwen Omni interrupt event\", exc_info=True)"
+        },
+        {
+          "file": "inference/plugins/voice_llm/doubao_realtime.py",
+          "lines": "703-723",
+          "snippet": "    async def interrupt(self) -> None:\n        ws = self._ws\n        session_id = self._session_id\n        if ws is None or session_id is None:\n            return\n        self._interrupting = True\n        try:\n            await ws.send(\n                encode_frame(\n                    msg_type_bits=MSGTYPE_FULL_CLIENT,\n                    serialization_bits=SERIALIZATION_JSON,\n                    event=DoubaoEvent.FINISH_SESSION,\n                    session_id=session_id,\n                    payload=compress_payload(\n                        b\"{}\", self._config.compression_bits\n                    ),\n                    compression_bits=self._config.compression_bits,\n                )\n            )\n        except Exception:\n            logger.warning(\"Failed to send interrupt frame to Doubao\")"
+        }
+      ]
+    },
+    {
+      "name": "monotonic turn and pipeline sequences guarding stale output",
+      "what_it_is": "Every session carries two monotonic counters. MarkTurnStarted increments TurnSeq per conversational turn, MarkPipelineRunning increments PipelineSeq per pipeline goroutine. State transitions, status broadcasts and completion handling check IsCurrentTurn and IsCurrentPipeline first, and MarkPipelineFinished returns early when a stale pipeline reports completion. advancePlaybackEpoch pushes the turn sequence to the media peer, and every published AV segment carries Epoch set to that turn sequence. Aborted turns are parked in an ignoredTurns map keyed by reply or question id so that late provider output is matched back to them. On the transport side both media backends hold the epoch in an atomic that only moves forward through compare-and-swap, and they check isPlaybackStale at five stages: when a segment is enqueued, at the encoder input, after encoding, in the publisher, and inside the per-frame loop of publishAVSegment while the segment is already going out.",
+      "function_in_system": "Sits around the whole turn pipeline, between the provider output loop and the browser. After an interrupt or a preempting turn, output belonging to the superseded turn is discarded before publication. Otherwise audio and video segments of a dead turn reach playback and its late \"speaking\" and \"idle\" transitions overwrite the state of the turn that replaced it.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/orchestrator/session.go",
+          "lines": "188-194",
+          "snippet": "func (s *Session) MarkTurnStarted() uint64 {\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\ts.TurnSeq++\n\ts.LastActiveAt = time.Now()\n\treturn s.TurnSeq\n}"
+        },
+        {
+          "file": "server/internal/orchestrator/session.go",
+          "lines": "162-179",
+          "snippet": "func (s *Session) MarkPipelineFinished(seq uint64) {\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\tch := s.PipelineDone\n\tcurrentSeq := s.PipelineSeq\n\tif seq != currentSeq {\n\t\treturn\n\t}\n\ts.PipelineCancel = nil\n\tif ch != nil {\n\t\tselect {\n\t\tcase <-ch:\n\t\t\t// already closed\n\t\tdefault:\n\t\t\tclose(ch)\n\t\t}\n\t}\n}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "4152-4162",
+          "snippet": "func (o *Orchestrator) advancePlaybackEpoch(sessionID string, turnSeq uint64) {\n\tif turnSeq == 0 {\n\t\treturn\n\t}\n\to.mu.RLock()\n\tpeer := o.peers[sessionID]\n\to.mu.RUnlock()\n\tif peer != nil {\n\t\tpeer.AdvancePlaybackEpoch(turnSeq)\n\t}\n}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "3249-3255",
+          "snippet": "\tsetIdleIfCurrent := func(turnSeq uint64) {\n\t\tif turnSeq == 0 || !session.IsCurrentPipeline(pipelineSeq) || !session.IsCurrentTurn(turnSeq) {\n\t\t\treturn\n\t\t}\n\t\tsession.SetState(StateListening)\n\t\to.broadcastStatusTurn(sessionID, \"idle\", turnSeq)\n\t}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "3822-3830",
+          "snippet": "\t\t\tturnKey := voiceOutputTurnKey(output)\n\t\t\tif turnKey != \"\" {\n\t\t\t\tif ignoredTurn, ignored := ignoredTurns[turnKey]; ignored {\n\t\t\t\t\tif recordIgnoredTurnOutput(ignoredTurn, output) {\n\t\t\t\t\t\tdelete(ignoredTurns, turnKey)\n\t\t\t\t\t}\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "558-569",
+          "snippet": "func (p *DirectPeer) prepareRawAVSegment(seg *mediapeer.RawAVSegment) bool {\n\tif seg == nil || p.isPlaybackStale(seg.Epoch) {\n\t\treturn false\n\t}\n\tif seg.Supersedable {\n\t\tseg.SpeechEpochAtQueue = p.latestSpeechEpoch.Load()\n\t}\n\tif seg.Epoch > 0 {\n\t\tp.advanceLatestSpeechEpoch(seg.Epoch)\n\t}\n\treturn !p.isRawAVSegmentStale(seg)\n}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "1200-1216",
+          "snippet": "func (p *DirectPeer) isPlaybackStale(epoch uint64) bool {\n\tif epoch == 0 {\n\t\treturn false\n\t}\n\tcurrent := p.playbackEpoch.Load()\n\treturn current > 0 && epoch < current\n}\n\nfunc (p *DirectPeer) isRawAVSegmentStale(seg *mediapeer.RawAVSegment) bool {\n\tif seg == nil {\n\t\treturn true\n\t}\n\tif p.isPlaybackStale(seg.Epoch) {\n\t\treturn true\n\t}\n\treturn seg.Supersedable && p.latestSpeechEpoch.Load() > seg.SpeechEpochAtQueue\n}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "1044-1047",
+          "snippet": "\tfor videoIndex < nVideo || audioIndex < len(opusFrames) {\n\t\tif p.isAVSegmentStale(seg) {\n\t\t\treturn\n\t\t}"
+        },
+        {
+          "file": "server/internal/livekit/bot.go",
+          "lines": "437-448",
+          "snippet": "func (b *Bot) prepareRawAVSegment(seg *RawAVSegment) bool {\n\tif seg == nil || b.isPlaybackStale(seg.Epoch) {\n\t\treturn false\n\t}\n\tif seg.Supersedable {\n\t\tseg.SpeechEpochAtQueue = b.latestSpeechEpoch.Load()\n\t}\n\tif seg.Epoch > 0 {\n\t\tb.advanceLatestSpeechEpoch(seg.Epoch)\n\t}\n\treturn !b.isRawAVSegmentStale(seg)\n}"
+        }
+      ]
+    },
+    {
+      "name": "history capture for superseded turns",
+      "what_it_is": "abortTurn marks an interrupted turn as aborted, cancels its avatar context and registers it under its reply or question key in ignoredTurns. Output that still arrives for that key goes to recordIgnoredTurnOutput, which keeps accumulating transcript and audio and, once the output is final, writes the assistant message, the raw audio, the transcript and the conversation file, and broadcasts one final assistant transcript.",
+      "function_in_system": "Sits behind the barge-in path in the omni pipeline loop. The realtime provider finishes generating the aborted reply on its side, so this keeps the text in local history and in the persisted conversation. The dialog context of the next turn then matches what the model believes it said. Otherwise provider-side conversation state and local history diverge with every interruption.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "3139-3150",
+          "snippet": "\tabortTurn := func(turn *voicePipelineTurn, ignoreKey bool) {\n\t\tif turn == nil {\n\t\t\treturn\n\t\t}\n\t\tturn.aborted = true\n\t\tif ignoreKey && turn.key != \"\" {\n\t\t\tignoredTurns[turn.key] = turn\n\t\t}\n\t\tif turn.avatarCancel != nil {\n\t\t\tturn.avatarCancel()\n\t\t}\n\t}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "3212-3235",
+          "snippet": "\trecordIgnoredTurnOutput := func(turn *voicePipelineTurn, output *pb.VoiceLLMOutput) bool {\n\t\tif turn == nil || output == nil {\n\t\t\treturn false\n\t\t}\n\t\tisFinal := voiceOutputIsFinal(output)\n\t\tif transcript := output.GetTranscript(); transcript != \"\" {\n\t\t\tif isFinal {\n\t\t\t\tturn.assistantText = transcript\n\t\t\t} else {\n\t\t\t\tturn.assistantText += transcript\n\t\t\t}\n\t\t}\n\t\tif audio := output.GetAudio(); audio != nil && len(audio.GetData()) > 0 {\n\t\t\tturn.recAudioBuf = append(turn.recAudioBuf, audio.GetData()...)\n\t\t\tif int(audio.GetSampleRate()) > 0 {\n\t\t\t\tturn.recAudioSR = int(audio.GetSampleRate())\n\t\t\t}\n\t\t}\n\t\tif isFinal {\n\t\t\tshouldBroadcast := !turn.historySaved && strings.TrimSpace(turn.assistantText) != \"\"\n\t\t\tsaveAssistantMessage(turn)\n\t\t\tsaveTurnRawAudio(turn)\n\t\t\tsaveTurnTranscript(turn)\n\t\t\tsaveTurnConversation(turn)"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "3822-3830",
+          "snippet": "\t\t\tturnKey := voiceOutputTurnKey(output)\n\t\t\tif turnKey != \"\" {\n\t\t\t\tif ignoredTurn, ignored := ignoredTurns[turnKey]; ignored {\n\t\t\t\t\tif recordIgnoredTurnOutput(ignoredTurn, output) {\n\t\t\t\t\t\tdelete(ignoredTurns, turnKey)\n\t\t\t\t\t}\n\t\t\t\t\tcontinue\n\t\t\t\t}\n\t\t\t}"
+        }
+      ]
+    },
+    {
+      "name": "per-turn conversation persistence with idempotent save flags",
+      "what_it_is": "Assistant message, raw audio, transcript and conversation file are written by four helpers, each guarded by its own flag on the turn (historySaved, rawAudioSaved, transcriptSaved, conversationSaved) so repeated calls write once. They run when the model output turns final and again when the avatar worker for that turn completes. persistSessionConversation snapshots the session history under a read lock and writes the whole conversation through the character store.",
+      "function_in_system": "Sits at the end of every turn in both the omni and the standard pipeline. Commits the conversation incrementally while the session is still running. A crash, a dropped WebRTC connection or an idle eviction then costs at most the turn in flight. Otherwise the session history exists only in memory until teardown and is lost whenever teardown fails to run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "3152-3158",
+          "snippet": "\tsaveAssistantMessage := func(turn *voicePipelineTurn) {\n\t\tif turn == nil || turn.historySaved || strings.TrimSpace(turn.assistantText) == \"\" {\n\t\t\treturn\n\t\t}\n\t\tsession.AddMessage(ChatMessage{Role: \"assistant\", Content: turn.assistantText, TurnSeq: turn.seq})\n\t\tturn.historySaved = true\n\t}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "3188-3200",
+          "snippet": "\tsaveTurnConversation := func(turn *voicePipelineTurn) {\n\t\tif turn == nil || turn.conversationSaved || strings.TrimSpace(turn.assistantText) == \"\" {\n\t\t\treturn\n\t\t}\n\t\tsaved, err := o.persistSessionConversation(session)\n\t\tif err != nil {\n\t\t\tlog.Printf(\"conversation: SaveConversation error session=%s turn=%d: %v\", sessionID, turn.seq, err)\n\t\t\treturn\n\t\t}\n\t\tif saved {\n\t\t\tturn.conversationSaved = true\n\t\t}\n\t}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "3957-3960",
+          "snippet": "\t\t\tsaveAssistantMessage(currentTurn)\n\t\t\tsaveTurnRawAudio(currentTurn)\n\t\t\tsaveTurnTranscript(currentTurn)\n\t\t\tsaveTurnConversation(currentTurn)"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "4480-4489",
+          "snippet": "func (o *Orchestrator) persistSessionConversation(session *Session) (bool, error) {\n\tif o == nil || o.charStore == nil || session == nil {\n\t\treturn false, nil\n\t}\n\n\tsessionID, characterID, startedAt, endedAt, history := session.ConversationSnapshot()\n\tif characterID == \"\" || len(history) == 0 {\n\t\treturn false, nil\n\t}\n"
+        }
+      ]
+    },
+    {
+      "name": "dialog-context window for provider session config",
+      "what_it_is": "Constants cap the conversational history that leaves the orchestrator: 20 user/assistant pairs per provider session, a store load limit of 80 messages, and 6 items for the startup greeting prompt. buildVoiceDialogContextFromSession and buildDoubaoDialogContext trim to maxPairs*2 items, startupGreetingHistory trims to its own limit, and HydrateVoiceDialogContext loads the recent messages under the load limit before pairing them.",
+      "function_in_system": "Sits in front of every VoiceLLMSessionConfig that opens or reopens a realtime provider session, and in front of the startup greeting prompt. Bounds how much prior conversation is shipped to the provider and paid for on each session start. Otherwise the context sent with every session grows with the lifetime of the character, since chat history is persisted across sessions.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "58-61",
+          "snippet": "const (\n\tdoubaoDialogContextMaxPairs  = 20\n\tdoubaoDialogContextLoadLimit = doubaoDialogContextMaxPairs * 4\n\tstartupGreetingHistoryItems  = 6"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "530-534",
+          "snippet": "\tmaxItems := maxPairs * 2\n\tif len(items) > maxItems {\n\t\titems = items[len(items)-maxItems:]\n\t}\n\treturn normalizeDialogContextTimestamps(items, now)"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "537-545",
+          "snippet": "func startupGreetingHistory(items []DialogContextItem, maxItems int) []DialogContextItem {\n\tif maxItems <= 0 {\n\t\tmaxItems = startupGreetingHistoryItems\n\t}\n\tif len(items) > maxItems {\n\t\titems = items[len(items)-maxItems:]\n\t}\n\treturn append([]DialogContextItem(nil), items...)\n}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "1726-1733",
+          "snippet": "\t\tmessages, _, _, err = o.charStore.LoadRecentMessagesForOwner(session.CharacterID, ownerID, \"\", doubaoDialogContextLoadLimit)\n\t} else {\n\t\tmessages, _, _, err = o.charStore.LoadRecentMessages(session.CharacterID, \"\", doubaoDialogContextLoadLimit)\n\t}\n\tif err != nil {\n\t\treturn err\n\t}\n\tsession.SetDialogContext(buildDoubaoDialogContext(messages, doubaoDialogContextMaxPairs, time.Now().UTC()))"
+        }
+      ]
+    },
+    {
+      "name": "concurrent session cap with idle eviction",
+      "what_it_is": "SessionManager.Create refuses a new session with ErrMaxSessions once the live session count reaches max_concurrent (yaml value, code default 4), which the REST API turns into HTTP 503. A cleanup goroutine ticks every 30 s and evicts sessions whose LastActiveAt is older than the idle timeout, calling OnSessionEnd before removing them. LastActiveAt is refreshed by every state change, turn start and stored message.",
+      "function_in_system": "Sits at the entry point of every new session and above all running sessions. Bounds how many GPU-backed avatar and realtime provider sessions exist in parallel, and reclaims sessions whose browser tab went away without a teardown request. Otherwise abandoned sessions hold provider connections, avatar model state and GPU capacity for the lifetime of the server. The idle timeout in effect is the 5 minutes hardcoded in NewSessionManager, the constructor the server binary uses. The config keys idle_timeout_s and max_duration_s are declared and parsed, and reading them back into the session manager is left open.",
+      "activation": "always",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "server/internal/orchestrator/session.go",
+          "lines": "440-454",
+          "snippet": "func (m *SessionManager) Create(id string, mode PipelineMode, characterID string) (*Session, error) {\n\tm.mu.Lock()\n\tdefer m.mu.Unlock()\n\n\tif len(m.sessions) >= m.maxConc {\n\t\treturn nil, ErrMaxSessions\n\t}\n\tif _, exists := m.sessions[id]; exists {\n\t\treturn nil, ErrSessionExists\n\t}\n\n\tsession := NewSession(id, mode, characterID)\n\tm.sessions[id] = session\n\treturn session, nil\n}"
+        },
+        {
+          "file": "server/internal/orchestrator/session.go",
+          "lines": "388-401",
+          "snippet": "func NewSessionManager(maxConcurrent int) *SessionManager {\n\treturn NewSessionManagerWithTimeout(maxConcurrent, 5*time.Minute)\n}\n\nfunc NewSessionManagerWithTimeout(maxConcurrent int, idleTimeout time.Duration) *SessionManager {\n\tm := &SessionManager{\n\t\tsessions:    make(map[string]*Session),\n\t\tmaxConc:     maxConcurrent,\n\t\tidleTimeout: idleTimeout,\n\t\tstopCleanup: make(chan struct{}),\n\t}\n\tgo m.cleanupLoop()\n\treturn m\n}"
+        },
+        {
+          "file": "server/internal/orchestrator/session.go",
+          "lines": "416-433",
+          "snippet": "func (m *SessionManager) evictIdle() {\n\tm.mu.Lock()\n\tdefer m.mu.Unlock()\n\tnow := time.Now()\n\tfor id, s := range m.sessions {\n\t\ts.mu.RLock()\n\t\tidle := now.Sub(s.LastActiveAt) > m.idleTimeout\n\t\ts.mu.RUnlock()\n\t\tif idle {\n\t\t\tif m.OnSessionEnd != nil {\n\t\t\t\tm.OnSessionEnd(s)\n\t\t\t}\n\t\t\ts.mu.Lock()\n\t\t\ts.state = StateClosed\n\t\t\ts.mu.Unlock()\n\t\t\tdelete(m.sessions, id)\n\t\t}\n\t}"
+        },
+        {
+          "file": "server/internal/api/handlers.go",
+          "lines": "227-234",
+          "snippet": "\tsessionID := uuid.New().String()\n\tsession, err := r.sessionMgr.Create(sessionID, mode, body.CharacterID)\n\tif err != nil {\n\t\tstatus := http.StatusInternalServerError\n\t\tif err == orchestrator.ErrMaxSessions {\n\t\t\tstatus = http.StatusServiceUnavailable\n\t\t}\n\t\twriteJSON(w, status, ErrorResponse{Error: err.Error()})"
+        },
+        {
+          "file": "server/internal/config/config.go",
+          "lines": "62-66, 185-186",
+          "snippet": "type SessionConfig struct {\n\tMaxConcurrent int `yaml:\"max_concurrent\"`\n\tIdleTimeoutS  int `yaml:\"idle_timeout_s\"`\n\tMaxDurationS  int `yaml:\"max_duration_s\"`\n}\n\tif cfg.Session.MaxConcurrent == 0 {\n\t\tcfg.Session.MaxConcurrent = 4"
+        },
+        {
+          "file": "infra/cyberverse_config.example.yaml",
+          "lines": "172-175",
+          "snippet": "session:\n    max_concurrent: 4\n    idle_timeout_s: 300\n    max_duration_s: 3600"
+        }
+      ]
+    },
+    {
+      "name": "bounded graceful teardown",
+      "what_it_is": "TeardownSession cancels the pipeline context, waits up to 3 s on the pipeline goroutine through WaitPipelineDone, stops the silent avatar runtime and waits up to 3 s for it, and only then disconnects the media peer and closes the WebSocket. WaitPipelineDone is a select over the done channel and a timer, so a hung goroutine cannot block. At the regular end of a turn the pipeline waits up to 10 s in WaitAVDrain so buffered AV segments still reach the browser. WaitAVDrain is implemented as a fence marker: a segment carrying only a Fence channel travels through encoder and publisher without being encoded, and the publisher closes that channel once every preceding segment has been published including its real-time pacing. Both the enqueue of the fence and the wait on it carry the timeout.",
+      "function_in_system": "Sits at session end and at the end of each turn. Gives in-flight work a bounded grace period to persist its messages and to play out buffered media. Otherwise teardown either drops the last turn including its history and recording, or blocks indefinitely on a provider stream that never returns.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "4083-4096",
+          "snippet": "func (o *Orchestrator) TeardownSession(sessionID string) error {\n\tsession, err := o.sessionMgr.Get(sessionID)\n\tif err != nil {\n\t\treturn err\n\t}\n\n\to.cancelPipeline(session)\n\n\t// Wait for pipeline goroutine to finish storing messages (up to 3s)\n\tsession.WaitPipelineDone(3 * time.Second)\n\n\tif runtime := o.stopSilentAvatarRuntime(sessionID); runtime != nil {\n\t\truntime.wait(3 * time.Second)\n\t}"
+        },
+        {
+          "file": "server/internal/orchestrator/session.go",
+          "lines": "219-231",
+          "snippet": "// WaitPipelineDone blocks until the pipeline goroutine finishes (with timeout).\nfunc (s *Session) WaitPipelineDone(timeout time.Duration) {\n\ts.mu.RLock()\n\tch := s.PipelineDone\n\ts.mu.RUnlock()\n\tif ch == nil {\n\t\treturn\n\t}\n\tselect {\n\tcase <-ch:\n\tcase <-time.After(timeout):\n\t}\n}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "3566-3573",
+          "snippet": "\t\t\t\t\t\tif err := <-avatarErrCh; err != nil && turn.avatarCtx.Err() == nil && !errors.Is(err, context.Canceled) {\n\t\t\t\t\t\t\tresult.err = err\n\t\t\t\t\t\t}\n\t\t\t\t\t\tif turn.avatarCtx.Err() == nil {\n\t\t\t\t\t\t\tif peer := lookupPeer(); peer != nil {\n\t\t\t\t\t\t\t\tpeer.WaitAVDrain(10 * time.Second)\n\t\t\t\t\t\t\t}\n\t\t\t\t\t\t}"
+        },
+        {
+          "file": "server/internal/mediapeer/segment.go",
+          "lines": "38-42",
+          "snippet": "\t// Fence is a pipeline drain marker. When set (non-nil) and RGB is empty,\n\t// the encoder passes it through without encoding. The publisher closes\n\t// the channel after finishing all preceding segments, signalling the\n\t// producer that the pipeline has been fully drained.\n\tFence chan struct{}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "601-619",
+          "snippet": "// WaitAVDrain blocks until all queued segments are published.\nfunc (p *DirectPeer) WaitAVDrain(timeout time.Duration) {\n\tif p.encodeCh == nil {\n\t\treturn\n\t}\n\tfence := make(chan struct{})\n\tselect {\n\tcase p.encodeCh <- &mediapeer.RawAVSegment{Fence: fence}:\n\tcase <-p.avPipelineCtx.Done():\n\t\treturn\n\tcase <-time.After(timeout):\n\t\treturn\n\t}\n\tselect {\n\tcase <-fence:\n\tcase <-p.avPipelineCtx.Done():\n\tcase <-time.After(timeout):\n\t}\n}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "913-930",
+          "snippet": "func (p *DirectPeer) runPublisher() {\n\tdefer p.avPipelineWg.Done()\n\n\tfor seg := range p.publishCh {\n\t\tif p.avPipelineCtx.Err() != nil {\n\t\t\treturn\n\t\t}\n\t\t// Fence marker\n\t\tif seg.Fence != nil && len(seg.VP8Samples) == 0 {\n\t\t\tclose(seg.Fence)\n\t\t\tcontinue\n\t\t}\n\t\tif p.isAVSegmentStale(seg) {\n\t\t\tcontinue\n\t\t}\n\t\tp.publishAVSegment(seg)\n\t}\n}"
+        }
+      ]
+    },
+    {
+      "name": "global serialization of the shared avatar model state",
+      "what_it_is": "The inference server holds one avatar image per avatar model, so a single orchestrator mutex avatarMu is held across whole generation cycles: SetAvatar plus GenerateAvatar plus frame collection in EnsureIdleVideo, the full avatar streaming loop of the standard pipeline, the per-turn avatar worker of the omni pipeline, and the entire lifetime of the silent avatar runtime. On top of that SetupSession refuses a second session while a silent-inference avatar runtime is already running.",
+      "function_in_system": "Sits between all concurrent users of the avatar model: parallel sessions, idle-video generation and the idle runtime. Keeps one session's avatar image installed for the whole time that session streams frames. Otherwise a concurrent SetAvatar swaps the image mid-stream and the running session renders video with another character's face.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "1538-1546",
+          "snippet": "\t// Hold the mutex for the entire generation cycle (SetAvatar + GenerateAvatar\n\t// + frame collection) so that a concurrent SetupSession or another\n\t// EnsureIdleVideo call cannot change the inference server's avatar state\n\t// while we are still collecting frames.\n\to.avatarMu.Lock()\n\tdefer o.avatarMu.Unlock()\n\n\tjobID := fmt.Sprintf(\"idle-%s-%d\", characterID, time.Now().UnixNano())\n\tif err := o.inference.SetAvatar(ctx, jobID, imageData, format); err != nil {"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "3452-3460",
+          "snippet": "\t\tgo func(turn *voicePipelineTurn) {\n\t\t\tresult := voicePipelineTurnResult{turn: turn}\n\t\t\tdefer func() {\n\t\t\t\tturn.doneCh <- result\n\t\t\t}()\n\n\t\t\to.avatarMu.Lock()\n\t\t\tdefer o.avatarMu.Unlock()\n"
+        },
+        {
+          "file": "server/internal/orchestrator/silent_avatar_runtime.go",
+          "lines": "321-327",
+          "snippet": "func (r *silentAvatarRuntime) run() {\n\tdefer close(r.doneCh)\n\tdefer close(r.modelAudioCh)\n\tr.orchestrator.avatarMu.Lock()\n\tdefer r.orchestrator.avatarMu.Unlock()\n\n\tvideoCh, errCh := r.orchestrator.inference.GenerateAvatarStream(r.ctx, r.modelAudioCh)"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "1619-1621",
+          "snippet": "\tif o.useSilentInference() && session != nil && o.hasOtherSilentAvatarRuntime(session.ID) {\n\t\treturn nil, warnings, errors.New(\"silent_inference currently supports one active avatar session\")\n\t}"
+        }
+      ]
+    },
+    {
+      "name": "idle lead filling with bounded lookahead for the persistent avatar stream",
+      "what_it_is": "In silent_inference mode one avatar gRPC stream stays open for the whole session. A feed loop pushes 100 ms chunks of synthetic breathing audio into it whenever the lead, measured as model input samples minus rendered video samples, stays below maxLead. maxLead is derived from the avatar model's own chunk duration and frames-per-chunk reported by AvatarInfo, defaults to 1.2 s and is capped at 5 s. Speech items take priority over idle chunks, and idle filling stops once the active speech has produced its first video segment.",
+      "function_in_system": "Sits under every turn of a silent-inference session, between the turn pipeline and the avatar model. Keeps the long-lived stream fed between turns so the avatar keeps breathing and the model stays warm across turn boundaries, with one stream setup per session. The lead cap bounds how much idle video is generated ahead of time, which is video a new reply has to queue behind. Otherwise either the stream starves between turns or the response latency of the next turn grows with the prebuffered idle backlog.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/orchestrator/silent_avatar_runtime.go",
+          "lines": "17-23",
+          "snippet": "const (\n\tsilentAvatarSampleRate       = 24000\n\tsilentAvatarIdleChunk        = 100 * time.Millisecond\n\tsilentAvatarDefaultMaxLead   = 1200 * time.Millisecond\n\tsilentAvatarMaxLeadCap       = 5 * time.Second\n\tsilentAvatarSpeechQueueDepth = 128\n)"
+        },
+        {
+          "file": "server/internal/orchestrator/silent_avatar_runtime.go",
+          "lines": "339-362",
+          "snippet": "func (r *silentAvatarRuntime) feedLoop() {\n\tticker := time.NewTicker(silentAvatarIdleChunk)\n\tdefer ticker.Stop()\n\tr.fillIdleLead()\n\tfor {\n\t\tselect {\n\t\tcase <-r.ctx.Done():\n\t\t\treturn\n\t\tcase item := <-r.speechCh:\n\t\t\tr.sendSpeechItem(item)\n\t\tcase <-ticker.C:\n\t\t\tfor {\n\t\t\t\tselect {\n\t\t\t\tcase item := <-r.speechCh:\n\t\t\t\t\tr.sendSpeechItem(item)\n\t\t\t\t\tcontinue\n\t\t\t\tdefault:\n\t\t\t\t}\n\t\t\t\tbreak\n\t\t\t}\n\t\t\tr.fillIdleLead()\n\t\t}\n\t}\n}"
+        },
+        {
+          "file": "server/internal/orchestrator/silent_avatar_runtime.go",
+          "lines": "397-415",
+          "snippet": "func (r *silentAvatarRuntime) shouldSendIdle() bool {\n\tr.stateMu.Lock()\n\tactiveSpeech := r.activeSpeech\n\tblockedBySpeech := activeSpeech != nil && r.finalSpeech == nil && activeSpeech.firstVideo\n\tr.stateMu.Unlock()\n\tif blockedBySpeech {\n\t\treturn false\n\t}\n\tmaxLeadSamples := int64(math.Round(r.maxLead.Seconds() * silentAvatarSampleRate))\n\treturn r.timeline.leadSamples() < maxLeadSamples\n}\n\nfunc (r *silentAvatarRuntime) fillIdleLead() {\n\tfor r.shouldSendIdle() {\n\t\tif !r.sendIdle() {\n\t\t\treturn\n\t\t}\n\t}\n}"
+        },
+        {
+          "file": "server/internal/orchestrator/silent_avatar_runtime.go",
+          "lines": "681-700",
+          "snippet": "func silentAvatarMaxLead(info *pb.AvatarInfo) time.Duration {\n\tchunkDuration := silentAvatarDefaultMaxLead\n\tif info != nil {\n\t\tif d := time.Duration(float64(info.GetChunkDurationS()) * float64(time.Second)); d > 0 {\n\t\t\tchunkDuration = d\n\t\t}\n\t\tframes := int(info.GetFramesPerChunk())\n\t\tfps := int(info.GetOutputFps())\n\t\tif frames > 0 && fps > 0 {\n\t\t\tframeDuration := time.Duration(math.Round(float64(frames) * float64(time.Second) / float64(fps)))\n\t\t\tif frameDuration > chunkDuration {\n\t\t\t\tchunkDuration = frameDuration\n\t\t\t}\n\t\t}\n\t}\n\tif chunkDuration > silentAvatarMaxLeadCap {\n\t\treturn silentAvatarMaxLeadCap\n\t}\n\treturn chunkDuration\n}"
+        }
+      ]
+    },
+    {
+      "name": "supersedable idle segments dropped when newer speech is queued",
+      "what_it_is": "Idle filler video from the silent avatar runtime is enqueued with Supersedable set. At enqueue such a segment records the current latestSpeechEpoch as SpeechEpochAtQueue, while every segment carrying a real turn epoch pushes latestSpeechEpoch forward through compare-and-swap. The staleness check then drops any supersedable segment whose recorded speech epoch has been overtaken, at every pipeline stage down to the per-frame publish loop.",
+      "function_in_system": "Sits between the idle avatar runtime and playback, one layer below the turn pipeline. Discards breathing video that was queued or already encoded as soon as a reply is on its way, so the reply starts playing at once. Otherwise the answer waits behind up to maxLead seconds of prerendered idle video, which adds that delay to every response. This is the playback-side counterpart of \"idle lead filling with bounded lookahead for the persistent avatar stream\".",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/mediapeer/segment.go",
+          "lines": "34-36",
+          "snippet": "\tQueuedAt           time.Time // set by SendAVSegment for pipeline latency tracking\n\tSupersedable       bool      // idle filler can be dropped when newer speech is ready\n\tSpeechEpochAtQueue uint64"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "558-569",
+          "snippet": "func (p *DirectPeer) prepareRawAVSegment(seg *mediapeer.RawAVSegment) bool {\n\tif seg == nil || p.isPlaybackStale(seg.Epoch) {\n\t\treturn false\n\t}\n\tif seg.Supersedable {\n\t\tseg.SpeechEpochAtQueue = p.latestSpeechEpoch.Load()\n\t}\n\tif seg.Epoch > 0 {\n\t\tp.advanceLatestSpeechEpoch(seg.Epoch)\n\t}\n\treturn !p.isRawAVSegmentStale(seg)\n}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "571-584",
+          "snippet": "func (p *DirectPeer) advanceLatestSpeechEpoch(epoch uint64) {\n\tif epoch == 0 {\n\t\treturn\n\t}\n\tfor {\n\t\tcurrent := p.latestSpeechEpoch.Load()\n\t\tif epoch <= current {\n\t\t\treturn\n\t\t}\n\t\tif p.latestSpeechEpoch.CompareAndSwap(current, epoch) {\n\t\t\treturn\n\t\t}\n\t}\n}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "1208-1216",
+          "snippet": "func (p *DirectPeer) isRawAVSegmentStale(seg *mediapeer.RawAVSegment) bool {\n\tif seg == nil {\n\t\treturn true\n\t}\n\tif p.isPlaybackStale(seg.Epoch) {\n\t\treturn true\n\t}\n\treturn seg.Supersedable && p.latestSpeechEpoch.Load() > seg.SpeechEpochAtQueue\n}"
+        },
+        {
+          "file": "server/internal/livekit/bot.go",
+          "lines": "649-665",
+          "snippet": "func (b *Bot) isPlaybackStale(epoch uint64) bool {\n\tif epoch == 0 {\n\t\treturn false\n\t}\n\tcurrent := b.playbackEpoch.Load()\n\treturn current > 0 && epoch < current\n}\n\nfunc (b *Bot) isRawAVSegmentStale(seg *RawAVSegment) bool {\n\tif seg == nil {\n\t\treturn true\n\t}\n\tif b.isPlaybackStale(seg.Epoch) {\n\t\treturn true\n\t}\n\treturn seg.Supersedable && b.latestSpeechEpoch.Load() > seg.SpeechEpochAtQueue\n}"
+        }
+      ]
+    },
+    {
+      "name": "media path reset inside a live session",
+      "what_it_is": "On a direct_media_reset_request from the browser the orchestrator resends the ICE configuration and calls ResetMediaPath, which closes the old PeerConnection and rebuilds the whole media path: tracks, opus encoder, bitrate target, audio delay state, RTP gap clock and the connected channel are reset, then Connect and StartNegotiation run again. The user audio channel owned by the session survives this, and isActivePeerConnection makes every callback of the old connection a no-op.",
+      "function_in_system": "Sits under the running session, between browser and orchestrator. Repairs a broken WebRTC media path while the session, its history and the realtime provider connection keep running. Otherwise a failed ICE connection ends the session, and the user restarts the conversation from an empty context.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "709-713",
+          "snippet": "\tcase \"direct_media_reset_request\":\n\t\to.sendDirectWebRTCConfig(sessionID)\n\t\tif err := dp.ResetMediaPath(context.Background()); err != nil {\n\t\t\tlog.Printf(\"[Orchestrator] session=%s ResetMediaPath failed: %v\", sessionID, err)\n\t\t}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "304-347",
+          "snippet": "func (p *DirectPeer) prepareMediaPathReset() *webrtc.PeerConnection {\n\tp.mu.Lock()\n\toldPC := p.pc\n\tp.pc = nil\n\tp.videoTrack = nil\n\tp.audioTrack = nil\n\tp.connected = make(chan struct{})\n\tp.lastVideoWriteTime = time.Time{}\n\tp.lastAudioWriteTime = time.Time{}\n\tp.lastPublishEpoch = 0\n\tp.mu.Unlock()\n\n\tp.targetBitrateBps.Store(0)\n\tp.opusMu.Lock()\n\tp.opusEncoder = nil\n\tp.opusEncoderSR = 0\n\tp.opusMu.Unlock()\n\tp.resetAudioDelayState()\n\treturn oldPC\n}\n\n// ResetMediaPath rebuilds the Direct WebRTC PeerConnection without closing\n// the user audio subscription channel owned by the session.\nfunc (p *DirectPeer) ResetMediaPath(ctx context.Context) error {\n\tp.mediaMu.Lock()\n\tdefer p.mediaMu.Unlock()\n\n\tlog.Printf(\"[DirectPeer] session=%s Direct media path reset requested\", p.sessionID)\n\toldPC := p.prepareMediaPathReset()\n\tif oldPC != nil {\n\t\tif err := oldPC.Close(); err != nil {\n\t\t\tlog.Printf(\"[DirectPeer] session=%s close old PeerConnection during media reset failed: %v\", p.sessionID, err)\n\t\t}\n\t}\n\n\tif err := p.Connect(ctx); err != nil {\n\t\treturn err\n\t}\n\tif err := p.StartNegotiation(); err != nil {\n\t\treturn err\n\t}\n\tlog.Printf(\"[DirectPeer] session=%s Direct media path reset negotiation started\", p.sessionID)\n\treturn nil\n}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "287-291",
+          "snippet": "func (p *DirectPeer) isActivePeerConnection(pc *webrtc.PeerConnection) bool {\n\tp.mu.Lock()\n\tdefer p.mu.Unlock()\n\treturn p.pc == pc\n}"
+        }
+      ]
+    },
+    {
+      "name": "bandwidth-adaptive VP8 bitrate with clamps and fallback",
+      "what_it_is": "The shared webrtc.API registers GCC send-side bandwidth estimation (initial 1 Mbps, min 100 kbps, max 10 Mbps) next to NACK and TWCC. DirectPeer subscribes to the estimator with a 10 s timeout and keeps the default bitrate when none arrives. currentVideoBitrateKbps takes 65 percent of the current estimate and clamps the result into 500 to 1800 kbps, and each segment is VP8-encoded at that value. Dedicated RTCP reader goroutines run per sender so the interceptors receive browser feedback at all.",
+      "function_in_system": "Sits at the outgoing media boundary, in front of the per-segment VP8 encode. Follows the measured uplink capacity so avatar frames keep arriving under congestion, with a hard floor, a ceiling and a fallback when the estimator stays silent. Otherwise the server encodes above the available capacity on a narrow link and segments queue up until the reply arrives late.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/direct/webrtcapi.go",
+          "lines": "38-57",
+          "snippet": "\t// 1) GCC + NoOp pacer (must be before RegisterDefaultInterceptors).\n\t// Real-time pacing lives in DirectPeer.publishAVSegment; leaky-bucket pacing\n\t// plus GCC dropping to MinBitrate during segment idle mis-queues RTP.\n\tcongestionController, err := cc.NewInterceptor(func() (cc.BandwidthEstimator, error) {\n\t\treturn gcc.NewSendSideBWE(\n\t\t\tgcc.SendSideBWEInitialBitrate(cfg.InitialBitrate),\n\t\t\tgcc.SendSideBWEMinBitrate(cfg.MinBitrate),\n\t\t\tgcc.SendSideBWEMaxBitrate(cfg.MaxBitrate),\n\t\t\tgcc.SendSideBWEPacer(gcc.NewNoOpPacer()),\n\t\t)\n\t})\n\tif err != nil {\n\t\treturn nil, nil, err\n\t}\n\n\testimatorChan := make(chan cc.BandwidthEstimator, 1)\n\tcongestionController.OnNewPeerConnection(func(id string, estimator cc.BandwidthEstimator) {\n\t\testimatorChan <- estimator\n\t})\n\ti.Add(congestionController)"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "266-282",
+          "snippet": "\t// Monitor GCC bandwidth estimation\n\tif p.estimatorCh != nil {\n\t\tgo func() {\n\t\t\tselect {\n\t\t\tcase estimator, ok := <-p.estimatorCh:\n\t\t\t\tif !ok {\n\t\t\t\t\treturn\n\t\t\t\t}\n\t\t\t\testimator.OnTargetBitrateChange(func(bitrate int) {\n\t\t\t\t\tp.targetBitrateBps.Store(int64(bitrate))\n\t\t\t\t\tlog.Printf(\"[DirectPeer] session=%s GCC target bitrate: %d kbps\", p.sessionID, bitrate/1000)\n\t\t\t\t})\n\t\t\tcase <-time.After(10 * time.Second):\n\t\t\t\tlog.Printf(\"[DirectPeer] session=%s GCC estimator unavailable; using default VP8 bitrate\", p.sessionID)\n\t\t\t}\n\t\t}()\n\t}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "621-634",
+          "snippet": "func (p *DirectPeer) currentVideoBitrateKbps() int {\n\ttargetBps := p.targetBitrateBps.Load()\n\tif targetBps <= 0 {\n\t\treturn defaultDirectVideoBitrateKbps\n\t}\n\tkbps := int((targetBps * videoBitrateSafetyPercent) / 100 / 1000)\n\tif kbps < minDirectVideoBitrateKbps {\n\t\treturn minDirectVideoBitrateKbps\n\t}\n\tif kbps > maxDirectVideoBitrateKbps {\n\t\treturn maxDirectVideoBitrateKbps\n\t}\n\treturn kbps\n}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "185-188",
+          "snippet": "\t// RTCP reader goroutines — MUST read continuously so that\n\t// NACK/TWCC/GCC interceptors receive browser feedback and work correctly.\n\tgo readRTCP(videoSender)\n\tgo readRTCP(audioSender)"
+        }
+      ]
+    },
+    {
+      "name": "publish readiness guards against silent media loss",
+      "what_it_is": "Before publishing a segment or an audio frame the direct peer waits up to 10 s in waitConnected, which also returns on pipeline cancellation, and it skips the publish when the video or audio track is missing. In the LiveKit bot ensureVideoTrackLocked polls track.IsBound() for up to 10 s and logs the timeout, because LocalTrack.WriteSample stays a silent no-op until WebRTC Bind has installed the packetizer.",
+      "function_in_system": "Sits between the AV pipeline and the transport, at the start of every publish. Holds segments back until the connection and the tracks can actually carry them. Otherwise the first reply of a session is written into an unbound track and vanishes, while its audio plays through the separate audio track and the user sees a still image talking.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "932-961",
+          "snippet": "func (p *DirectPeer) waitConnected(timeout time.Duration) bool {\n\tselect {\n\tcase <-p.connected:\n\t\treturn true\n\tcase <-p.avPipelineCtx.Done():\n\t\treturn false\n\tcase <-time.After(timeout):\n\t\treturn false\n\t}\n}\n\nfunc (p *DirectPeer) publishAVSegment(seg *mediapeer.AVSegment) {\n\tp.mediaMu.Lock()\n\tdefer p.mediaMu.Unlock()\n\n\t// Wait for connection to be established\n\tif !p.waitConnected(10 * time.Second) {\n\t\tif p.avPipelineCtx.Err() == nil {\n\t\t\tlog.Printf(\"[DirectPeer] session=%s publish timeout waiting for connection\", p.sessionID)\n\t\t}\n\t\treturn\n\t}\n\tp.mu.Lock()\n\tvideoTrack := p.videoTrack\n\taudioTrack := p.audioTrack\n\tp.mu.Unlock()\n\tif videoTrack == nil {\n\t\tlog.Printf(\"[DirectPeer] session=%s publish skipped: video track is not ready\", p.sessionID)\n\t\treturn\n\t}"
+        },
+        {
+          "file": "server/internal/direct/peer.go",
+          "lines": "1233-1243",
+          "snippet": "\tp.mediaMu.Lock()\n\tdefer p.mediaMu.Unlock()\n\n\tif !p.waitConnected(10 * time.Second) {\n\t\tif p.avPipelineCtx.Err() != nil {\n\t\t\treturn fmt.Errorf(\"audio publish cancelled\")\n\t\t}\n\t\treturn fmt.Errorf(\"audio publish timeout waiting for connection\")\n\t}\n\treturn p.writeOpus(pcm, sampleRate)\n}"
+        },
+        {
+          "file": "server/internal/livekit/bot.go",
+          "lines": "329-339",
+          "snippet": "\t// LocalTrack.WriteSample is a no-op until WebRTC Bind() sets packetizer; without\n\t// waiting, all VP8 samples are silently dropped while audio (PCMLocalTrack) still works.\n\tdeadline := time.Now().Add(10 * time.Second)\n\tfor !track.IsBound() && time.Now().Before(deadline) {\n\t\ttime.Sleep(30 * time.Millisecond)\n\t}\n\telapsed := time.Since(bindStart)\n\tif !track.IsBound() {\n\t\tlog.Printf(\"assistant-video: track not bound after 10s (elapsed=%.3fs); VP8 WriteSample may be dropped\", elapsed.Seconds())\n\t}\n\treturn nil"
+        }
+      ]
+    },
+    {
+      "name": "avatar warmup with silent inference before the first session",
+      "what_it_is": "A warmup block in the config gates a silent inference pass during avatar plugin init. resolve_avatar_warmup_policy combines warmup.enabled (false when the key is absent) with warmup.distributed.enabled (true by default) and the world size, so multi-GPU runs can skip it. FlashHead pushes one silent audio slice of slice_len_samples through the pipeline and resets its local state afterwards. LiveAct runs three iterations that cover the first-chunk path, the overlap-decode path and the steady-state update_cache path. Before either runs, _distributed_all_ranks_ready reduces the per-rank init flag with all_reduce MIN, so warmup starts once every rank finished avatar setup. The parsed distributed.timeout_s value is carried in the policy and no code reads it.",
+      "function_in_system": "Sits at process start, ahead of the turn loop. It pays the one-time cost of kernel compilation, memory allocation and cache setup while no user is waiting. Otherwise the first turn of the first session absorbs that cost, which is exactly the moment the user waits for the avatar to speak for the first time.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "infra/cyberverse_config.example.yaml",
+          "lines": "20-25",
+          "snippet": "# Warm up inference components to reduce first-frame latency.\nwarmup:\n    enabled: true\n    distributed:\n        enabled: true # Enable warmup in multi-GPU mode.\n        timeout_s: 30 # Timeout in seconds to prevent hangs."
+        },
+        {
+          "file": "inference/plugins/avatar/warmup.py",
+          "lines": "46-60",
+          "snippet": "    global_enabled = _parse_bool(warmup_cfg.get(\"enabled\"), default=False)\n    distributed_enabled = _parse_bool(\n        distributed_cfg.get(\"enabled\"),\n        default=True,\n    )\n    timeout_raw = distributed_cfg.get(\"timeout_s\")\n    timeout_s = int(timeout_raw) if timeout_raw is not None else None\n\n    enabled = global_enabled and (world_size <= 1 or distributed_enabled)\n    return AvatarWarmupPolicy(\n        enabled=enabled,\n        global_enabled=global_enabled,\n        distributed_enabled=distributed_enabled,\n        timeout_s=timeout_s,\n    )"
+        },
+        {
+          "file": "inference/plugins/avatar/flash_head_plugin.py",
+          "lines": "288-297",
+          "snippet": "        if avatar_ready and warmup_policy.enabled:\n            self._warmup()\n        elif self._rank == 0:\n            logger.info(\n                \"FlashHead warmup skipped: avatar_ready=%s global_enabled=%s distributed_enabled=%s world_size=%d\",\n                avatar_ready,\n                warmup_policy.global_enabled,\n                warmup_policy.distributed_enabled,\n                self._world_size,\n            )"
+        },
+        {
+          "file": "inference/plugins/avatar/flash_head_plugin.py",
+          "lines": "530-541",
+          "snippet": "    def _warmup(self) -> None:\n        if not self._avatar_initialized or self.pipeline is None or self.audio_deque is None:\n            logger.info(\"FlashHead warmup skipped: pipeline/avatar not initialized\")\n            return\n        if self._slice_len_samples <= 0:\n            logger.info(\n                \"FlashHead warmup skipped: invalid slice_len_samples=%d\",\n                self._slice_len_samples,\n            )\n            return\n        if self._world_size > 1 and self._rank != 0:\n            return"
+        },
+        {
+          "file": "inference/plugins/avatar/flash_head_plugin.py",
+          "lines": "546-554",
+          "snippet": "        silent_slice = np.zeros(self._slice_len_samples, dtype=np.float64)\n        self.audio_deque.extend(silent_slice)\n        audio_array = np.array(self.audio_deque, dtype=np.float64)\n\n        logger.info(\n            \"FlashHead warmup: running silent inference to prime pipeline (world_size=%d slice_len_samples=%d)\",\n            self._world_size,\n            self._slice_len_samples,\n        )"
+        },
+        {
+          "file": "inference/plugins/avatar/flash_head_plugin.py",
+          "lines": "112-125",
+          "snippet": "\ndef _distributed_all_ranks_ready(local_ready: bool) -> bool:\n    \"\"\"Synchronize avatar init readiness across ranks before warmup/worker loop.\"\"\"\n    if not dist.is_available() or not dist.is_initialized():\n        return local_ready\n\n    device_index = int(os.environ.get(\"LOCAL_RANK\", os.environ.get(\"RANK\", \"0\")))\n    ready = torch.tensor(\n        [1 if local_ready else 0],\n        dtype=torch.int32,\n        device=torch.device(f\"cuda:{device_index}\") if torch.cuda.is_available() else \"cpu\",\n    )\n    dist.all_reduce(ready, op=dist.ReduceOp.MIN)\n    return bool(int(ready.item()))"
+        },
+        {
+          "file": "inference/plugins/avatar/live_act_plugin.py",
+          "lines": "395-396",
+          "snippet": "            if warmup_policy.enabled and avatar_ready:\n                self._warmup()"
+        },
+        {
+          "file": "inference/plugins/avatar/live_act_plugin.py",
+          "lines": "698-706",
+          "snippet": "                context = self._context\n                y_cut = y[:, :, :frame_num // 4 + 1, ...]\n\n                # 3 warmup iterations:\n                # 1) first chunk path\n                # 2) overlap decode path\n                # 3) steady-state update_cache=True path\n                pre_latent = None\n                total_iterations = 3"
+        }
+      ]
+    },
+    {
+      "name": "terminal-status write guard on background tasks",
+      "what_it_is": "AppendEvent and CreateArtifact load the task row inside the same transaction as the write and return ErrTerminal when the status is completed, failed or cancelled. IsTerminal defines those three states. The HTTP layer maps ErrTerminal to 409 Conflict.",
+      "function_in_system": "Sits at the write boundary of the task store, where a background SubAgent reports progress and results. It rejects late reports from a run that already ended, cancelled runs included. Otherwise a delayed report moves a cancelled task back to running and the persona speaks a result the user called off.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "376-381",
+          "snippet": "\tif err != nil {\n\t\treturn nil, nil, err\n\t}\n\tif task.Status.IsTerminal() {\n\t\treturn nil, nil, ErrTerminal\n\t}"
+        },
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "490-492",
+          "snippet": "\tif task.Status.IsTerminal() {\n\t\treturn nil, ErrTerminal\n\t}"
+        },
+        {
+          "file": "server/internal/agenttask/types.go",
+          "lines": "19-26",
+          "snippet": "func (s Status) IsTerminal() bool {\n\tswitch s {\n\tcase StatusCompleted, StatusFailed, StatusCancelled:\n\t\treturn true\n\tdefault:\n\t\treturn false\n\t}\n}"
+        },
+        {
+          "file": "server/internal/api/tasks.go",
+          "lines": "203-211",
+          "snippet": "func writeTaskError(w http.ResponseWriter, err error) {\n\tif errors.Is(err, agenttask.ErrNotFound) {\n\t\twriteJSON(w, http.StatusNotFound, ErrorResponse{Error: err.Error()})\n\t\treturn\n\t}\n\tif errors.Is(err, agenttask.ErrTerminal) {\n\t\twriteJSON(w, http.StatusConflict, ErrorResponse{Error: err.Error()})\n\t\treturn\n\t}"
+        }
+      ]
+    },
+    {
+      "name": "self-disabling turn recording on any setup failure",
+      "what_it_is": "BeginTurn returns nil on every failure path: recording disabled, output directory not creatable, ffmpeg stdin pipe error, ffmpeg start error. Every TurnRecording method checks its nil receiver first, so the nil value stays usable. The orchestrator treats nil as a regular state and only logs the errors returned by SaveRawAudio and SaveTranscript.",
+      "function_in_system": "Sits on the live media path of each turn, where frames and PCM are forwarded to ffmpeg while they are sent to the browser. It keeps a recording failure local to recording. Otherwise a missing ffmpeg binary or an unwritable directory aborts the conversation turn itself, although recording is a side task.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/recording/recorder.go",
+          "lines": "167-175",
+          "snippet": "func (r *VideoRecorder) BeginTurn(sessionDir, turnID string, width, height, fps int) *TurnRecording {\n\tif !r.cfg.Enabled {\n\t\treturn nil\n\t}\n\n\toutDir := r.resolveOutputDir(sessionDir)\n\tif err := os.MkdirAll(outDir, 0755); err != nil {\n\t\tlog.Printf(\"recording: failed to create dir %s: %v\", outDir, err)\n\t\treturn nil"
+        },
+        {
+          "file": "server/internal/recording/recorder.go",
+          "lines": "194-202",
+          "snippet": "\tstdin, err := cmd.StdinPipe()\n\tif err != nil {\n\t\tlog.Printf(\"recording: stdin pipe error: %v\", err)\n\t\treturn nil\n\t}\n\tif err := cmd.Start(); err != nil {\n\t\tlog.Printf(\"recording: ffmpeg start error: %v\", err)\n\t\treturn nil\n\t}"
+        },
+        {
+          "file": "server/internal/recording/recorder.go",
+          "lines": "217-220",
+          "snippet": "func (t *TurnRecording) WriteVideoChunk(rgbBytes []byte) {\n\tif t == nil || len(rgbBytes) == 0 {\n\t\treturn\n\t}"
+        },
+        {
+          "file": "server/internal/recording/recorder.go",
+          "lines": "242-245",
+          "snippet": "func (t *TurnRecording) Finish() error {\n\tif t == nil {\n\t\treturn nil\n\t}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "2492-2498",
+          "snippet": "\t\tactiveRec := o.recorder.BeginTurn(recSessionDir, recTurnID, width, height, fps)\n\t\tturnRec = activeRec\n\t\taudioCopy := append([]byte(nil), recAudioBuf...)\n\t\taudioSR := recAudioSR\n\t\tif activeRec != nil && len(audioCopy) > 0 && audioSR > 0 {\n\t\t\tactiveRec.WriteAudioChunk(audioCopy, audioSR)\n\t\t}"
+        },
+        {
+          "file": "server/internal/orchestrator/orchestrator.go",
+          "lines": "2549-2558",
+          "snippet": "\t\t\tif len(audioCopy) > 0 && audioSR > 0 {\n\t\t\t\tif err := o.recorder.SaveRawAudio(recSessionDir, recTurnID, audioCopy, audioSR); err != nil {\n\t\t\t\t\tlog.Printf(\"recording: SaveRawAudio error session=%s turn=%s: %v\", sessionID, recTurnID, err)\n\t\t\t\t}\n\t\t\t}\n\t\t\tif strings.TrimSpace(assistantResp) != \"\" {\n\t\t\t\tif err := o.recorder.SaveTranscript(recSessionDir, recTurnID, assistantResp); err != nil {\n\t\t\t\t\tlog.Printf(\"recording: SaveTranscript error session=%s turn=%s: %v\", sessionID, recTurnID, err)\n\t\t\t\t}\n\t\t\t}"
+        }
+      ]
+    },
+    {
+      "name": "indexing status lifecycle with persisted failure reason",
+      "what_it_is": "Each knowledge source carries a status (indexing, ready, failed), an error string and a chunk count in sources.json. indexKnowledgeSource marks the source failed with the concrete error at every abort point (path not resolvable, RAG disabled, inference not configured, indexing call failed) and ready with the chunk count on success. Uploading an indexable file schedules the indexing run, and the reindex endpoint resets the status and repeats it.",
+      "function_in_system": "Sits between file upload and the retrieval path that grounds every reply. It records why a document never entered the index and makes the run repeatable. Otherwise the reply pipeline answers without the document the user just uploaded and the failure stays invisible.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/rag/store.go",
+          "lines": "40-45",
+          "snippet": "\tStatus         SourceStatus `json:\"status\"`\n\tChunkCount     int          `json:\"chunk_count\"`\n\tError          string       `json:\"error,omitempty\"`\n\tCreatedAt      string       `json:\"created_at\"`\n\tUpdatedAt      string       `json:\"updated_at\"`\n\tIndexedAt      string       `json:\"indexed_at,omitempty\"`"
+        },
+        {
+          "file": "server/internal/rag/store.go",
+          "lines": "468-489",
+          "snippet": "func (s *Store) MarkReady(characterID, sourceID string, chunkCount int) (*Source, error) {\n\treturn s.updateSource(characterID, sourceID, func(src *Source) {\n\t\tsrc.Status = SourceStatusReady\n\t\tsrc.Error = \"\"\n\t\tsrc.ChunkCount = chunkCount\n\t\tnow := nowString()\n\t\tsrc.UpdatedAt = now\n\t\tsrc.IndexedAt = now\n\t})\n}\n\nfunc (s *Store) MarkFailed(characterID, sourceID string, indexErr error) (*Source, error) {\n\tmsg := \"\"\n\tif indexErr != nil {\n\t\tmsg = indexErr.Error()\n\t}\n\treturn s.updateSource(characterID, sourceID, func(src *Source) {\n\t\tsrc.Status = SourceStatusFailed\n\t\tsrc.Error = msg\n\t\tsrc.UpdatedAt = nowString()\n\t})\n}"
+        },
+        {
+          "file": "server/internal/api/knowledge.go",
+          "lines": "304-325",
+          "snippet": "\tpath, err := r.ragStore.SourcePath(characterID, source)\n\tif err != nil {\n\t\t_, _ = r.ragStore.MarkFailed(characterID, sourceID, err)\n\t\treturn err\n\t}\n\tif r.cfg != nil && !r.cfg.Pipeline.RAG.IsEnabled() {\n\t\terr := errors.New(\"RAG is disabled\")\n\t\t_, _ = r.ragStore.MarkFailed(characterID, sourceID, err)\n\t\treturn err\n\t}\n\tif r.orch == nil {\n\t\terr := errors.New(\"inference service is not configured\")\n\t\t_, _ = r.ragStore.MarkFailed(characterID, sourceID, err)\n\t\treturn err\n\t}\n\tchunkCount, err := r.orch.IndexKnowledgeSource(ctx, characterID, r.charStore.CharDir(characterID), source, path)\n\tif err != nil {\n\t\t_, _ = r.ragStore.MarkFailed(characterID, sourceID, err)\n\t\treturn err\n\t}\n\t_, err = r.ragStore.MarkReady(characterID, sourceID, chunkCount)\n\treturn err"
+        },
+        {
+          "file": "server/internal/api/knowledge.go",
+          "lines": "224-241",
+          "snippet": "\tcharacterID := req.PathValue(\"id\")\n\tsourceID := req.PathValue(\"source_id\")\n\tsource, err := r.ragStore.MarkIndexing(characterID, sourceID)\n\tif err != nil {\n\t\twriteJSON(w, http.StatusNotFound, ErrorResponse{Error: err.Error()})\n\t\treturn\n\t}\n\tif !source.Indexable {\n\t\tsource, err = r.ragStore.MarkStoredReady(characterID, sourceID)\n\t\tif err != nil {\n\t\t\twriteJSON(w, http.StatusNotFound, ErrorResponse{Error: err.Error()})\n\t\t\treturn\n\t\t}\n\t\twriteJSON(w, http.StatusAccepted, source)\n\t\treturn\n\t}\n\tr.scheduleKnowledgeIndex(characterID, source.ID)\n\twriteJSON(w, http.StatusAccepted, source)"
+        },
+        {
+          "file": "server/internal/api/knowledge.go",
+          "lines": "95-97",
+          "snippet": "\t\tif result.Source.Indexable {\n\t\t\tr.scheduleKnowledgeIndex(characterID, result.Source.ID)\n\t\t} else if result.PreviousIndexable && r.orch != nil {"
+        }
+      ]
+    },
+    {
+      "name": "path containment for model-supplied storage ids",
+      "what_it_is": "validateStorageID rejects task and artifact ids that are . or .. or contain a path separator. It runs on every id supplied through the API, while ids the store generates itself are uuids. In the knowledge store, cleanRelativePath drops empty and . segments, rejects .. and sanitizes each remaining segment, while pathFromStoredPath resolves the joined path and verifies by absolute-path prefix that it stays under the character knowledge directory.",
+      "function_in_system": "Sits at the storage boundary of the task API, where artifact ids arrive from the background SubAgent and therefore from model output. It bounds where an agent run can write. Otherwise a generated identifier places a file outside the artifact directory of its task.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "21-26",
+          "snippet": "func validateStorageID(kind, id string) error {\n\tif id == \".\" || id == \"..\" || strings.ContainsAny(id, `/\\`) {\n\t\treturn fmt.Errorf(\"%s id must not contain path separators or traversal segments\", kind)\n\t}\n\treturn nil\n}"
+        },
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "506-511",
+          "snippet": "\tid := strings.TrimSpace(in.ID)\n\tif id == \"\" {\n\t\tid = uuid.NewString()\n\t} else if err := validateStorageID(\"artifact\", id); err != nil {\n\t\treturn nil, err\n\t}"
+        },
+        {
+          "file": "server/internal/rag/store.go",
+          "lines": "300-331",
+          "snippet": "func (s *Store) pathFromStoredPath(characterID, storedPath string) (string, error) {\n\tstoredPath = filepath.ToSlash(strings.TrimSpace(storedPath))\n\tif storedPath == \"\" || strings.HasPrefix(storedPath, \"/\") {\n\t\treturn \"\", fmt.Errorf(\"invalid stored path\")\n\t}\n\tcleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(storedPath)))\n\tif cleaned == \".\" || !strings.HasPrefix(cleaned, \"sources/\") {\n\t\treturn \"\", fmt.Errorf(\"invalid stored path\")\n\t}\n\tfor _, part := range strings.Split(cleaned, \"/\") {\n\t\tif part == \"..\" {\n\t\t\treturn \"\", fmt.Errorf(\"invalid stored path\")\n\t\t}\n\t}\n\tknowledgeDir, err := s.KnowledgeDir(characterID)\n\tif err != nil {\n\t\treturn \"\", err\n\t}\n\tpath := filepath.Join(knowledgeDir, filepath.FromSlash(cleaned))\n\tabsKnowledgeDir, err := filepath.Abs(knowledgeDir)\n\tif err != nil {\n\t\treturn \"\", err\n\t}\n\tabsPath, err := filepath.Abs(path)\n\tif err != nil {\n\t\treturn \"\", err\n\t}\n\tif absPath != absKnowledgeDir && !strings.HasPrefix(absPath, absKnowledgeDir+string(filepath.Separator)) {\n\t\treturn \"\", fmt.Errorf(\"invalid stored path\")\n\t}\n\treturn path, nil\n}"
+        },
+        {
+          "file": "server/internal/rag/store.go",
+          "lines": "188-210",
+          "snippet": "func cleanRelativePath(value string) (string, string, error) {\n\tvalue = strings.TrimSpace(strings.ReplaceAll(value, \"\\\\\", \"/\"))\n\tif value == \"\" || strings.HasPrefix(value, \"/\") || filepath.IsAbs(value) {\n\t\treturn \"\", \"\", fmt.Errorf(\"invalid relative path\")\n\t}\n\trawParts := strings.Split(value, \"/\")\n\tparts := make([]string, 0, len(rawParts))\n\tfor _, part := range rawParts {\n\t\tpart = strings.TrimSpace(part)\n\t\tif part == \"\" || part == \".\" {\n\t\t\tcontinue\n\t\t}\n\t\tif part == \"..\" {\n\t\t\treturn \"\", \"\", fmt.Errorf(\"invalid relative path\")\n\t\t}\n\t\tparts = append(parts, sanitizePathSegment(part, \"item\"))\n\t}\n\tif len(parts) == 0 {\n\t\treturn \"\", \"\", fmt.Errorf(\"invalid relative path\")\n\t}\n\tfilename := parts[len(parts)-1]\n\treturn strings.Join(parts, \"/\"), filename, nil\n}"
+        }
+      ]
+    },
+    {
+      "name": "transactional task event log with per-task sequence numbers",
+      "what_it_is": "Each event takes its sequence from SELECT COALESCE(MAX(seq), 0) + 1 inside the transaction that also inserts the event and updates the task row, with PRIMARY KEY(task_id, seq) enforcing uniqueness. ListEventsAfter reads the log from a given sequence onward with a clamped limit; that replay path has no caller outside the tests.",
+      "function_in_system": "Sits under every status update of a background task, between the reporting SubAgent and the WebSocket broadcast to the session. It keeps the task row and its event chain in one atomic write, so status, progress and result summary stay consistent with the events the client already received. Otherwise a crash between the two writes leaves a task whose row and history disagree.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "397-406",
+          "snippet": "\tvar seq int64\n\tif err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq), 0) + 1 FROM task_events WHERE task_id = ?`, taskID).Scan(&seq); err != nil {\n\t\treturn nil, nil, err\n\t}\n\tif _, err := tx.ExecContext(ctx, `INSERT INTO task_events\n\t\t(task_id, seq, event_type, status, message, progress, payload_json, created_at)\n\t\tVALUES (?, ?, ?, ?, ?, ?, ?, ?)`,\n\t\ttaskID, seq, strings.TrimSpace(in.EventType), status, message, progress, payload, now); err != nil {\n\t\treturn nil, nil, err\n\t}"
+        },
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "416-423",
+          "snippet": "\tif _, err := tx.ExecContext(ctx, `UPDATE tasks SET status = ?, progress = ?, result_summary = ?,\n\t\tupdated_at = ?, finished_at = CASE WHEN ? != '' THEN ? ELSE finished_at END WHERE id = ?`,\n\t\tstatus, progress, resultSummary, now, finishedAt, finishedAt, taskID); err != nil {\n\t\treturn nil, nil, err\n\t}\n\tif err := tx.Commit(); err != nil {\n\t\treturn nil, nil, err\n\t}"
+        },
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "99-110",
+          "snippet": "\t\t`CREATE TABLE IF NOT EXISTS task_events (\n\t\t\ttask_id TEXT NOT NULL,\n\t\t\tseq INTEGER NOT NULL,\n\t\t\tevent_type TEXT NOT NULL,\n\t\t\tstatus TEXT NOT NULL,\n\t\t\tmessage TEXT NOT NULL DEFAULT '',\n\t\t\tprogress INTEGER NOT NULL DEFAULT 0,\n\t\t\tpayload_json TEXT NOT NULL DEFAULT '',\n\t\t\tcreated_at TEXT NOT NULL,\n\t\t\tPRIMARY KEY(task_id, seq),\n\t\t\tFOREIGN KEY(task_id) REFERENCES tasks(id) ON DELETE CASCADE\n\t\t);`,"
+        },
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "442-447",
+          "snippet": "func (s *Store) ListEventsAfter(ctx context.Context, taskID string, afterSeq int64, limit int) ([]Event, error) {\n\tif limit <= 0 || limit > 500 {\n\t\tlimit = 200\n\t}\n\trows, err := s.db.QueryContext(ctx, `SELECT task_id, seq, event_type, status, message, progress, payload_json, created_at\n\t\tFROM task_events WHERE task_id = ? AND seq > ? ORDER BY seq ASC LIMIT ?`, taskID, afterSeq, limit)"
+        }
+      ]
+    },
+    {
+      "name": "durable task store with WAL and serialized writes",
+      "what_it_is": "OpenStore opens the SQLite file, caps the pool at one connection with SetMaxOpenConns(1) and runs the migration before the store is handed out. The migration sets journal_mode=WAL, creates every table with CREATE TABLE IF NOT EXISTS and adds the later owner_id column through ensureTaskOwnerColumn, which inspects PRAGMA table_info and issues ALTER TABLE only when the column is missing.",
+      "function_in_system": "Sits under the state of all background tasks, which run for minutes while the voice session continues. It carries that state across a server restart and serializes concurrent event writers from several running tasks. Otherwise parallel writes hit SQLITE_BUSY and a restart loses every task in flight.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "46-57",
+          "snippet": "\tdb, err := sql.Open(\"sqlite\", dbPath)\n\tif err != nil {\n\t\treturn nil, err\n\t}\n\tdb.SetMaxOpenConns(1)\n\ts := &Store{db: db, artifactDir: artifactDir}\n\tif err := s.migrate(context.Background()); err != nil {\n\t\tdb.Close()\n\t\treturn nil, err\n\t}\n\treturn s, nil\n}"
+        },
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "73-77",
+          "snippet": "func (s *Store) migrate(ctx context.Context) error {\n\tif _, err := s.db.ExecContext(ctx, `PRAGMA journal_mode=WAL;`); err != nil {\n\t\treturn err\n\t}\n\tstmts := []string{"
+        },
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "144-168",
+          "snippet": "func (s *Store) ensureTaskOwnerColumn(ctx context.Context) error {\n\trows, err := s.db.QueryContext(ctx, `PRAGMA table_info(tasks)`)\n\tif err != nil {\n\t\treturn err\n\t}\n\tdefer rows.Close()\n\tfor rows.Next() {\n\t\tvar cid int\n\t\tvar name, typ string\n\t\tvar notNull int\n\t\tvar defaultValue any\n\t\tvar pk int\n\t\tif err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {\n\t\t\treturn err\n\t\t}\n\t\tif name == \"owner_id\" {\n\t\t\treturn rows.Err()\n\t\t}\n\t}\n\tif err := rows.Err(); err != nil {\n\t\treturn err\n\t}\n\t_, err = s.db.ExecContext(ctx, `ALTER TABLE tasks ADD COLUMN owner_id TEXT NOT NULL DEFAULT ''`)\n\treturn err\n}"
+        }
+      ]
+    },
+    {
+      "name": "artifact file rollback on failed persistence",
+      "what_it_is": "CreateArtifact writes the artifact content to disk first and then inserts the database row inside the open transaction. When the insert or the commit fails, the file it just wrote is removed before the error is returned.",
+      "function_in_system": "Sits at the end of a background task, where the SubAgent hands over the document it produced. It keeps the file tree and the artifact table consistent. Otherwise a failed insert leaves a file on disk that no task references and that no listing or cleanup path reaches.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/internal/agenttask/store.go",
+          "lines": "512-540",
+          "snippet": "\ttaskDir := filepath.Join(s.artifactDir, taskID)\n\tif err := os.MkdirAll(taskDir, 0755); err != nil {\n\t\treturn nil, err\n\t}\n\text := \".txt\"\n\tif strings.Contains(mimeType, \"markdown\") || typ == \"markdown\" {\n\t\text = \".md\"\n\t}\n\tif strings.Contains(mimeType, \"html\") || typ == \"html\" {\n\t\text = \".html\"\n\t}\n\tcontentPath := filepath.Join(taskDir, id+ext)\n\tif err := os.WriteFile(contentPath, []byte(in.Content), 0644); err != nil {\n\t\treturn nil, err\n\t}\n\tmetadata := strings.TrimSpace(string(in.Metadata))\n\tnow := nowString()\n\t_, err = tx.ExecContext(ctx, `INSERT INTO artifacts\n\t\t(id, task_id, type, title, mime_type, content_path, metadata_json, created_at)\n\t\tVALUES (?, ?, ?, ?, ?, ?, ?, ?)`,\n\t\tid, taskID, typ, title, mimeType, contentPath, metadata, now)\n\tif err != nil {\n\t\t_ = os.Remove(contentPath)\n\t\treturn nil, err\n\t}\n\tif err := tx.Commit(); err != nil {\n\t\t_ = os.Remove(contentPath)\n\t\treturn nil, err\n\t}"
+        }
+      ]
+    }
+  ]
+}

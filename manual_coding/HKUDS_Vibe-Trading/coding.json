@@ -1,0 +1,1637 @@
+{
+  "repo": "HKUDS/Vibe-Trading",
+  "commit": "73add97c06",
+  "system_type": "application",
+  "system_type_reason": "End-user trading research agent with CLI, web UI and MCP server.",
+  "repo_overview": {
+    "summary": "Personal trading research agent: a ReAct loop (AgentLoop) calls 50+ finance, data, file and shell tools, writes signal-engine code, runs backtests and produces research answers, exposed via CLI, FastAPI/Web UI and an MCP server. An optional swarm DAG runs multiple worker agents, and an opt-in live-trading path relays orders to brokers behind mandate enforcement, an order guard, a kill switch and an audit ledger.",
+    "components": [
+      {
+        "path": "agent/src/agent/",
+        "purpose": "ReAct core loop with five-layer context management (microcompact, collapse, auto_compact, compact tool, iterative summary update), parallel read-only tool execution, trace, heartbeat/progress, workspace memory, skill loading"
+      },
+      {
+        "path": "agent/src/providers/",
+        "purpose": "LLM interfaces: chat/streaming client, OpenAI Codex provider, per-provider capability flags"
+      },
+      {
+        "path": "agent/src/tools/",
+        "purpose": "52 agent tools: market data, backtest, bash/file, web search, swarm, goal, compact, remember, MCP client, output redaction"
+      },
+      {
+        "path": "agent/src/swarm/",
+        "purpose": "multi-agent DAG runtime: workers scheduled by topological layer, presets, grounding, task store, stale-run reaping"
+      },
+      {
+        "path": "agent/src/goal/, agent/src/hypotheses/",
+        "purpose": "persistent research goals (criteria, evidence, budgets, completion policy) and a hypothesis registry"
+      },
+      {
+        "path": "agent/src/session/, agent/src/memory/, agent/src/core/",
+        "purpose": "session store (JSONL), session search, cross-session memory, run state, runner for generated backtest code"
+      },
+      {
+        "path": "agent/src/live/, agent/src/trading/",
+        "purpose": "live trading: fail-closed mandate enforcement, order guard, SDK order gate, halt/kill switch, audit, reconcile, flatten, autonomous runner, 10 broker connectors"
+      },
+      {
+        "path": "agent/src/security/, agent/src/config/, agent/src/preflight.py",
+        "purpose": "code/secret scanner, config schema and loader, startup preflight checks for data sources and LLM provider"
+      },
+      {
+        "path": "agent/backtest/",
+        "purpose": "backtest engines, data loaders with source fallback chain, optimizers"
+      },
+      {
+        "path": "agent/src/factors/, agent/src/skills/, agent/src/shadow_account/, agent/src/scheduled_research/",
+        "purpose": "domain logic: Alpha Zoo (~450 factors), example signal engines, shadow account extraction, scheduled research job store"
+      },
+      {
+        "path": "agent/cli/, agent/api_server.py, agent/mcp_server.py",
+        "purpose": "entry points: CLI/REPL, REST+SSE API server, MCP server"
+      },
+      {
+        "path": "frontend/, wiki/",
+        "purpose": "React web UI and documentation site"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "agent/src/agent/loop.py",
+        "lines": "547",
+        "snippet": "while iteration < self.max_iterations:"
+      },
+      {
+        "file": "agent/src/agent/loop.py",
+        "lines": "641-647",
+        "snippet": "response = self.llm.stream_chat(\n    messages,\n    tools=tool_defs,\n    on_text_chunk=_on_text_chunk,\n    on_reasoning_chunk=_on_reasoning_chunk,\n    should_cancel=self._cancel_event.is_set,\n)"
+      },
+      {
+        "file": "agent/src/agent/loop.py",
+        "lines": "738-739",
+        "snippet": "if not response.has_tool_calls:\n    final_content = response.content or \"\""
+      },
+      {
+        "file": "agent/src/agent/loop.py",
+        "lines": "844-846",
+        "snippet": "compact_requested, focus_topic = self._process_tool_calls(\n    response.tool_calls, context, messages, trace, react_trace, current_iter,\n)"
+      },
+      {
+        "file": "agent/src/agent/loop.py",
+        "lines": "1316-1317",
+        "snippet": "truncated = result[:TOOL_RESULT_LIMIT]\nmessages.append(context.format_tool_result(tc.id, tc.name, truncated))"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "Each iteration calls llm.stream_chat with the tool definitions (loop.py:641-647); the tool calls in the response are executed via _process_tool_calls (loop.py:844-846).",
+      "consumes_feedback": "_finalize_tool_result appends each tool result as a role 'tool' message to messages (loop.py:1316-1317), which is the input of the next stream_chat call.",
+      "multi_turn_until_termination": "The while loop (loop.py:547) runs until a response carries no tool calls (loop.py:738-833) or max_iterations (default 50) is reached."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent",
+    "evidence": [
+      {
+        "file": "agent/src/swarm/runtime.py",
+        "lines": "256",
+        "snippet": "layers = topological_layers(run.tasks)"
+      },
+      {
+        "file": "agent/src/swarm/runtime.py",
+        "lines": "575-586",
+        "snippet": "future = executor.submit(\n    self._run_worker_with_retries,\n    agent_spec=agent_spec,\n    task=task,\n    upstream_summaries=upstream,\n    user_vars=run.user_vars,\n    run_dir=run_dir,\n    event_callback=_event_callback,\n    run_id=run.id,\n    include_shell_tools=include_shell_tools,\n    grounding_block=grounding_block,\n)"
+      },
+      {
+        "file": "agent/src/swarm/runtime.py",
+        "lines": "569-573",
+        "snippet": "# Build upstream summaries from input_from mapping\nupstream: dict[str, str] = {}\nfor context_key, source_task_id in task.input_from.items():\n    if source_task_id in task_summaries:\n        upstream[context_key] = task_summaries[source_task_id]"
+      },
+      {
+        "file": "agent/src/swarm/worker.py",
+        "lines": "396",
+        "snippet": "for iteration in range(max_iterations):"
+      }
+    ],
+    "justification": "Besides the single main AgentLoop, the system contains a swarm runtime that orchestrates multiple LLM agents: SwarmRuntime layers a preset's task DAG (runtime.py:256) and dispatches one worker agent per task (runtime.py:575-586), each with its own role system prompt, its own ReAct loop (worker.py:396) and its own tool registry; downstream agents consume upstream agents' summaries as context (runtime.py:569-573). The main agent is single-agent by default and starts a swarm via the run_swarm tool when the user asks for team or committee analysis, so the system as a whole is multi-agent.",
+    "verdict_raw": "multi-agent"
+  },
+  "resilience": [
+    {
+      "name": "threshold-tiered zero-cost context pruning (microcompact + context collapse)",
+      "what_it_is": "Two string-only compaction layers run before every LLM call: above 50% of TOKEN_THRESHOLD (40k estimated tokens) all tool results except the 3 most recent are replaced by '[cleared]'; above 70% long text blocks (>2400 chars) in older messages are folded to 900 head + 500 tail chars, keeping the 6 most recent messages intact. No LLM call involved. Swarm workers apply the same microcompact rule unconditionally at every iteration.",
+      "function_in_system": "Sits at the top of each ReAct iteration in AgentLoop.run, escalating only when its own token threshold is crossed. Keeps the transcript inside the context window and cuts input-token cost at zero API cost. Otherwise long backtest/research runs grow the context until the provider rejects the request or cost explodes.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "59, 62-66",
+          "snippet": "MICROCOMPACT_THRESHOLD = int(TOKEN_THRESHOLD * 0.5)\nCOLLAPSE_THRESHOLD = int(TOKEN_THRESHOLD * 0.7)\nCOLLAPSE_PRESERVE_RECENT = 6\nCOLLAPSE_TEXT_MIN = 2400\nCOLLAPSE_HEAD = 900\nCOLLAPSE_TAIL = 500"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "199-205",
+          "snippet": "tool_msgs = [m for m in messages if m.get(\"role\") == \"tool\"]\nif len(tool_msgs) <= KEEP_RECENT:\n    return\nfor msg in tool_msgs[:-KEEP_RECENT]:\n    content = msg.get(\"content\", \"\")\n    if isinstance(content, str) and len(content) > 100:\n        msg[\"content\"] = \"[cleared]\""
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "225-228",
+          "snippet": "head = content[:COLLAPSE_HEAD]\ntail = content[-COLLAPSE_TAIL:]\ntrimmed = len(content) - COLLAPSE_HEAD - COLLAPSE_TAIL\nmsg[\"content\"] = f\"{head}\\n\\n...[{trimmed} chars collapsed]...\\n\\n{tail}\""
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "566-579",
+          "snippet": "tokens = estimate_tokens(messages)\n...\nif tokens > MICROCOMPACT_THRESHOLD:\n    _microcompact(messages)\n    tokens = estimate_tokens(messages)\n\n# Layer 2: context collapse (fold long text, zero API cost)\nif tokens > COLLAPSE_THRESHOLD:\n    _context_collapse(messages)\n    tokens = estimate_tokens(messages)"
+        },
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "397-403",
+          "snippet": "# Microcompact: clear old tool results to prevent token bloat\ntool_msgs = [m for m in messages if m.get(\"role\") == \"tool\"]\nif len(tool_msgs) > _KEEP_RECENT_TOOLS:\n    for msg in tool_msgs[:-_KEEP_RECENT_TOOLS]:\n        content = msg.get(\"content\", \"\")\n        if isinstance(content, str) and len(content) > 100:\n            msg[\"content\"] = \"[cleared]\""
+        }
+      ]
+    },
+    {
+      "name": "structured LLM summary compaction with iterative update",
+      "what_it_is": "When the estimated transcript exceeds TOKEN_THRESHOLD (40k), the older part of the conversation is summarized by the LLM using a fixed handoff template (Goal, Constraints, Progress, Key Decisions, Resolved Questions, Relevant Files, Critical Context, Tools & Patterns); a tail of ~20k tokens is preserved verbatim and never split inside a tool_call/tool_result pair. From the second compaction on, the previous summary is updated with the new turns. The full transcript is saved to disk first, and _fix_tool_pairs repairs orphaned tool calls/results afterwards.",
+      "function_in_system": "Third compaction layer in each iteration of AgentLoop.run, after the zero-cost layers. Replaces the message list with system prompt + summary + preserved tail, keeping long runs within the context window while retaining goal, numbers and file paths. The iterative update limits information decay across repeated compactions. Otherwise the run either overflows the context window or loses key task state after truncation.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "581-584",
+          "snippet": "# Layer 3: auto_compact (token threshold exceeded)\nif tokens > TOKEN_THRESHOLD:\n    logger.info(f\"Auto compact triggered: {tokens} tokens > {TOKEN_THRESHOLD}\")\n    self._auto_compact(messages, run_dir, trace, iteration=current_iter)"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "1360-1363",
+          "snippet": "transcript_path = trace.dir_path / f\"transcript_{int(_time.time())}.jsonl\"\nwith open(transcript_path, \"w\", encoding=\"utf-8\") as f:\n    for msg in messages:\n        f.write(json.dumps(msg, default=str, ensure_ascii=False) + \"\\n\")"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "1371-1382",
+          "snippet": "for i in range(len(body) - 1, -1, -1):\n    content = body[i].get(\"content\", \"\")\n    msg_tokens = (len(str(content)) // 4) + 10\n    if accumulated + msg_tokens > TAIL_TOKEN_BUDGET:\n        cut_idx = i + 1\n        break\n    accumulated += msg_tokens\n    cut_idx = i\n\n# Don't split in the middle of a tool_call/tool_result pair\nwhile 0 < cut_idx < len(body) and body[cut_idx].get(\"role\") == \"tool\":\n    cut_idx += 1"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "1403-1414",
+          "snippet": "if self._previous_summary:\n    prompt = _ITERATIVE_UPDATE_PROMPT.format(\n        previous_summary=self._previous_summary,\n        new_turns=conv_text,\n        focus_section=focus_section,\n    )\nelse:\n    prompt = _STRUCTURED_SUMMARY_PROMPT.format(focus_section=focus_section) + conv_text\n\nsummary_resp = self.llm.chat([{\"role\": \"user\", \"content\": prompt}])\nsummary = summary_resp.content or \"\"\nself._previous_summary = summary"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "1436-1442",
+          "snippet": "messages.clear()\nmessages.append(system_msg)\nmessages.append({\"role\": \"user\", \"content\": f\"{compressed}\\n\\n<system>Continue from the summary above.</system>\"})\nmessages.extend(tail)\n\n# Fix orphaned tool pairs in the reconstructed message list\n_fix_tool_pairs(messages)"
+        }
+      ]
+    },
+    {
+      "name": "model-invoked compaction tool with focus topic",
+      "what_it_is": "The model can call a 'compact' tool with an optional focus_topic. The loop intercepts the call, returns an ok stub, and after the tool batch runs the structured summary compaction; the focus section tells the summarizer to spend 60-70% of the summary budget on that topic.",
+      "function_in_system": "Fourth context layer, triggered by the agent itself inside _process_tool_calls. Lets the model shed context before the automatic threshold hits and steer what survives. Its effect depends on the model deciding to call the tool.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "960-966",
+          "snippet": "# Layer 4: compact tool — mark then defer execution\nif tc.name == \"compact\":\n    compact_requested = True\n    focus_topic = tc.arguments.get(\"focus_topic\", \"\")\n    messages.append(context.format_tool_result(tc.id, \"compact\", '{\"status\":\"ok\",\"message\":\"Compressing...\"}'))\n    trace.write({\"type\": \"compact_requested\", \"iter\": iteration})\n    continue"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "848-851",
+          "snippet": "# Layer 3: compress after all tools have executed\nif compact_requested:\n    logger.info(\"Manual compact triggered by model\")\n    self._auto_compact(messages, run_dir, trace, focus_topic=focus_topic, iteration=current_iter)"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "366-370",
+          "snippet": "FOCUS TOPIC: {topic}\nAllocate 60-70% of the summary budget to content related to this topic.\nAggressively compress unrelated content to make room."
+        }
+      ]
+    },
+    {
+      "name": "iteration budget with wrap-up nudge and forced text-only final turn",
+      "what_it_is": "The loop is capped at max_iterations (default 50). At 80% of the budget a [SYSTEM] user message tells the model how many iterations remain and to stop calling tools and answer; on the last iteration the tool definitions are dropped from the request so the model can only produce text. Swarm workers mirror the policy with their own max_iterations (default 25): nudge at 80% asking to write report.md, tools dropped on the last iteration.",
+      "function_in_system": "Controls termination of AgentLoop.run. Bounds cost and time per run and converts budget exhaustion into a (partial) final answer. Otherwise the agent burns all iterations on tool calls and ends in 'failed' with no output (the failure mode named in CHANGELOG/README #148).",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "443",
+          "snippet": "max_iterations: int = 50,"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "544",
+          "snippet": "wrap_up_at = max(1, int(self.max_iterations * 0.8))"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "593-603",
+          "snippet": "if iteration == wrap_up_at and 1 < iteration < self.max_iterations:\n    remaining = self.max_iterations - iteration\n    messages.append({\n        \"role\": \"user\",\n        \"content\": (\n            f\"[SYSTEM] You have {remaining} iterations remaining out of \"\n            f\"{self.max_iterations}. Please wrap up your work. \"\n            \"Stop calling tools and provide your final answer as plain text. \"\n            \"If you have partial results, summarize what you have so far.\"\n        ),\n    })"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "634-638",
+          "snippet": "# On last iteration, drop tool definitions to force text output\nis_last_iteration = (iteration == self.max_iterations)\ntool_defs = None if is_last_iteration else self.registry.get_definitions()\nif is_last_iteration:\n    trace.write({\"type\": \"forced_text_only\", \"iter\": current_iter})"
+        },
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "439-452",
+          "snippet": "if iteration == wrap_up_at:\n    remaining = max_iterations - iteration\n    messages.append({\n        \"role\": \"user\",\n        \"content\": (\n            f\"[SYSTEM] You have {remaining} iterations remaining. \"\n            \"If report.md is not written yet, make one final write_file call for report.md. \"\n            \"Otherwise stop calling tools and output your final analysis summary as plain text.\"\n        ),\n    })\n\n# On last iteration, call LLM without tool definitions to force text output\nis_last_iteration = iteration == max_iterations - 1\ntool_defs = None if is_last_iteration else registry.get_definitions()"
+        }
+      ]
+    },
+    {
+      "name": "single retry on transient provider stream failure",
+      "what_it_is": "If stream_chat raises a ProviderStreamError marked retryable, the loop waits STREAM_RETRY_DELAY_S (default 1s) and repeats the same request once; non-retryable (deterministic 4xx) errors are re-raised immediately. Partial deltas of the failed attempt are discarded and a stream_reset event is emitted. Retryability is decided by ProviderStreamError.retryable: HTTP 408, 429, 5xx and transport errors without a status code count as transient, all other 4xx as deterministic. Swarm workers use the same single-retry policy (SWARM_STREAM_RETRY_DELAY_S) and recompute the remaining worker time budget for the retry.",
+      "function_in_system": "Wraps the LLM call inside one ReAct iteration. Absorbs mid-stream connection resets and relay hiccups. Otherwise a single dropped stream ends the whole run as 'failed' with error_code provider_stream_error.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "50",
+          "snippet": "STREAM_RETRY_DELAY_S = float(os.getenv(\"VT_STREAM_RETRY_DELAY_S\", \"1.0\"))"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "648-655, 670-680",
+          "snippet": "except ProviderStreamError as exc:\n    # One retry for transient mid-stream failures (connection\n    # reset, relay hiccup) — mirrors the swarm worker policy.\n    # Deterministic 4xx errors fail immediately. Deltas from\n    # the failed attempt are dropped so the trace does not\n    # contain duplicated thinking text.\n    if not exc.retryable:\n        raise\n...\n    thinking_chunks.clear()\n    reasoning_chars = 0\n    last_reasoning_emit = None\n    _time.sleep(STREAM_RETRY_DELAY_S)\n    response = self.llm.stream_chat(\n        messages,\n        tools=tool_defs,\n        on_text_chunk=_on_text_chunk,\n        on_reasoning_chunk=_on_reasoning_chunk,\n        should_cancel=self._cancel_event.is_set,\n    )"
+        },
+        {
+          "file": "agent/src/providers/chat.py",
+          "lines": "95-108",
+          "snippet": "@property\ndef retryable(self) -> bool:\n    \"\"\"Whether a single retry could plausibly succeed.\n\n    Returns:\n        False for deterministic client errors (4xx other than 408/429),\n        True for everything else — timeouts, rate limits, 5xx, and\n        transport errors that carry no HTTP status.\n    \"\"\"\n    if self.status_code is None:\n        return True\n    if self.status_code in (408, 429):\n        return True\n    return not 400 <= self.status_code < 500"
+        },
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "509-525",
+          "snippet": "try:\n    response = _stream_once()\nexcept ProviderStreamError as stream_exc:\n    if not stream_exc.retryable:\n        raise\n    logger.warning(\n        \"Provider stream failed for agent=%s task=%s iteration=%d \"\n        \"(provider=%s model=%s); retrying once: %s\",\n        agent_id,\n        task_id,\n        iteration,\n        stream_exc.provider,\n        stream_exc.model,\n        stream_exc,\n    )\n    time.sleep(_STREAM_RETRY_DELAY_S)\n    response = _stream_once()"
+        }
+      ]
+    },
+    {
+      "name": "SDK-level request timeout and retry for LLM calls",
+      "what_it_is": "Every LLM client is built with timeout=TIMEOUT_SECONDS (default 120s) and max_retries=MAX_RETRIES (default 2), both env-configurable; the underlying openai/langchain client retries connection errors, 408/409/429 and 5xx responses with exponential backoff. The OpenAI Codex OAuth path applies only the timeout.",
+      "function_in_system": "Innermost layer around each provider request, below the loop-level single stream retry. Bounds the wait on a hung provider and absorbs short rate-limit or server hiccups before they surface as a ProviderStreamError. Otherwise a stalled request blocks the agent loop and every transient 429/5xx escalates to the loop's retry or fails the run.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "agent/src/providers/llm.py",
+          "lines": "626-631",
+          "snippet": "kwargs: dict[str, Any] = {\n    \"model\": name,\n    \"temperature\": temperature,\n    \"timeout\": int(os.getenv(\"TIMEOUT_SECONDS\", \"120\")),\n    \"max_retries\": int(os.getenv(\"MAX_RETRIES\", \"2\")),\n    \"callbacks\": callbacks,"
+        },
+        {
+          "file": "agent/src/providers/llm.py",
+          "lines": "406-410",
+          "snippet": "return chat_deepseek(\n    model=model,\n    temperature=temperature,\n    timeout=int(os.getenv(\"TIMEOUT_SECONDS\", \"120\")),\n    max_retries=int(os.getenv(\"MAX_RETRIES\", \"2\")),"
+        },
+        {
+          "file": "agent/src/providers/openai_codex.py",
+          "lines": "396-398",
+          "snippet": "def stream(self, messages: list[dict[str, Any]], config: Optional[dict[str, Any]] = None) -> Iterable[CodexAIMessage]:\n    timeout = (config or {}).get(\"timeout\") or self.timeout\n    with httpx.Client(timeout=timeout, follow_redirects=True, trust_env=True) as client:"
+        }
+      ]
+    },
+    {
+      "name": "duplicate successful tool-call blocking",
+      "what_it_is": "Tools default to repeatable=False. Once such a tool has returned a non-error result in the current run, further calls to it are skipped and the model receives {\"skipped\": true, \"reason\": \"<tool> already completed successfully. Use the previous result.\"}. Live order tools (LiveOrderGuardTool, trading_place_order) set repeatable = False so an order is never silently re-issued.",
+      "function_in_system": "Filter in _process_tool_calls between the model response and tool execution. Stops the agent from re-running expensive tools (backtests, data fetches) in repetition loops and redirects it to the existing result. Otherwise the model can loop on the same call and waste iterations, time and API cost.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/tools.py",
+          "lines": "26",
+          "snippet": "repeatable: bool = False"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "968-976",
+          "snippet": "tool_def = self.registry.get(tc.name)\nis_repeatable = tool_def.repeatable if tool_def else False\nif tc.name in self._called_ok and not is_repeatable:\n    logger.warning(f\"Blocked duplicate call: {tc.name} (already succeeded)\")\n    skip_msg = json.dumps({\"skipped\": True, \"reason\": f\"{tc.name} already completed successfully. Use the previous result.\"})\n    messages.append(context.format_tool_result(tc.id, tc.name, skip_msg))\n    trace.write({\"type\": \"tool_skipped\", \"iter\": iteration, \"tool\": tc.name})\n    react_trace.append({\"type\": \"tool_skipped\", \"tool\": tc.name})\n    continue"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "1311-1313",
+          "snippet": "success = _is_tool_success(result)\nif success:\n    self._called_ok.add(tc.name)"
+        },
+        {
+          "file": "agent/src/live/order_guard.py",
+          "lines": "81",
+          "snippet": "repeatable = False"
+        },
+        {
+          "file": "agent/src/tools/trading_connector_tool.py",
+          "lines": "340",
+          "snippet": "repeatable = False"
+        }
+      ]
+    },
+    {
+      "name": "read/write-aware tool timeout",
+      "what_it_is": "Read-only tools run in a daemon worker thread and are abandoned after VIBE_TRADING_TOOL_TIMEOUT_SECONDS (default 1800s), returning a JSON error with error_code tool_timeout; late results and progress events are suppressed. Write tools are never cancelled: a watchdog thread emits a single timeout_warning and the loop waits for completion.",
+      "function_in_system": "Wraps every tool execution in _invoke_tool. Turns a hung side-effect-free tool (stalled data API, web fetch) into a bounded error observation the model can react to, while protecting write tools from being killed mid-side-effect. Otherwise one hanging read tool blocks the agent loop indefinitely.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "51",
+          "snippet": "TOOL_TIMEOUT_SECONDS = float(os.getenv(\"VIBE_TRADING_TOOL_TIMEOUT_SECONDS\", \"1800\"))"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "1198-1213",
+          "snippet": "if not readonly:\n    # Write tools are never killed: a watchdog warns once past the\n    # timeout, then the result is awaited to completion.\n    finished = threading.Event()\n\n    def _warn_if_stale() -> None:\n        if timeout is None or finished.wait(timeout):\n            return\n        _emit_timeout_progress(\n            \"timeout_warning\",\n            (\n                f\"Write tool exceeded {timeout_label} timeout; \"\n                \"waiting for completion because it cannot be safely cancelled\"\n            ),\n            readonly=False,\n        )"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "1250-1270",
+          "snippet": "with _heartbeat_timer():\n    try:\n        result, exc = result_queue.get(timeout=timeout)\n    except queue.Empty:\n        timed_out.set()\n        elapsed_ms = _emit_timeout_progress(\n            \"timeout\", f\"Tool exceeded {timeout_label} timeout\"\n        )\n        return (\n            json.dumps(\n                {\n                    \"status\": \"error\",\n                    \"error_code\": \"tool_timeout\",\n                    \"tool\": tool_name,\n                    \"timeout_seconds\": timeout,\n                    \"message\": f\"Tool exceeded {timeout_label} timeout\",\n                },\n                ensure_ascii=False,\n            ),\n            elapsed_ms,\n        )"
+        }
+      ]
+    },
+    {
+      "name": "tool exceptions returned as error observations",
+      "what_it_is": "ToolRegistry.execute catches every exception raised by a tool (and unknown tool names) and returns a JSON {\"status\": \"error\", \"tool\": ..., \"error\": ...} string; exceptions from parallel worker futures are converted the same way.",
+      "function_in_system": "Boundary between the agent loop and tool code. The failure becomes a tool message the model reads in the next iteration and can correct (other arguments, other tool). Otherwise a single failing tool aborts the whole run via the outer exception handler.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/tools.py",
+          "lines": "72-84",
+          "snippet": "def execute(self, name: str, params: Dict[str, Any]) -> str:\n    \"\"\"Execute a tool and guarantee a valid JSON return value.\"\"\"\n    tool = self._tools.get(name)\n    if not tool:\n        return json.dumps({\"status\": \"error\", \"error\": f\"Tool '{name}' not found\"}, ensure_ascii=False)\n    try:\n        return tool.execute(**params)\n    except Exception as exc:\n        logger.exception(\"Tool %s failed\", name)\n        return json.dumps({\n            \"status\": \"error\", \"tool\": name,\n            \"error\": str(exc),\n        }, ensure_ascii=False)"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "1078-1083",
+          "snippet": "for i, f in enumerate(futures):\n    try:\n        results.append(f.result())\n    except Exception as exc:\n        tc = runnable[i][0]\n        results.append((tc, json.dumps({\"status\": \"error\", \"error\": str(exc)}), 0))"
+        }
+      ]
+    },
+    {
+      "name": "tool result truncation before context insertion",
+      "what_it_is": "Each tool result is cut to TOOL_RESULT_LIMIT = 10,000 characters before it is appended to the message list; the full (redacted) result is written to the trace, with results above 50k chars offloaded to sidecar files. Swarm workers apply the same 10,000-character cap.",
+      "function_in_system": "Applied in _finalize_tool_result for every tool call. Caps the per-observation context cost so one large output (CSV dump, web page) cannot flood the window. Otherwise a single tool result can exhaust the context budget and trigger costly compaction or provider errors.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "47",
+          "snippet": "TOOL_RESULT_LIMIT = 10_000"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "1316-1317",
+          "snippet": "truncated = result[:TOOL_RESULT_LIMIT]\nmessages.append(context.format_tool_result(tc.id, tc.name, truncated))"
+        },
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "632-634",
+          "snippet": "messages.append(\n    ContextBuilder.format_tool_result(tc.id, tc.name, result[:10_000])\n)"
+        }
+      ]
+    },
+    {
+      "name": "parallel execution of read-only tool batches",
+      "what_it_is": "Tool calls of one response are split into batches: consecutive tools flagged is_readonly run in parallel in a ThreadPoolExecutor (max 8 workers), write tools run serially between them; results are appended in original order.",
+      "function_in_system": "Tool execution stage of each iteration (_batch_execute). Reduces wall-clock time of multi-fetch turns while keeping side-effecting tools ordered. Otherwise independent data fetches run one after another and a turn takes the sum of all latencies.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "10-11",
+          "snippet": "Tool execution:\n  - Read/write batching: consecutive readonly tools run in parallel via threads"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "1017-1027",
+          "snippet": "for tc in tool_calls:\n    tool_def = self.registry.get(tc.name)\n    if tool_def and tool_def.is_readonly:\n        current_ro.append(tc)\n    else:\n        if current_ro:\n            batches.append((\"parallel\", current_ro))\n            current_ro = []\n        batches.append((\"serial\", [tc]))\nif current_ro:\n    batches.append((\"parallel\", current_ro))"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "1075-1076",
+          "snippet": "with concurrent.futures.ThreadPoolExecutor(max_workers=min(len(runnable), 8)) as pool:\n    futures = [pool.submit(_run, item) for item in runnable]"
+        }
+      ]
+    },
+    {
+      "name": "bounded goal continuation with no-progress stop",
+      "what_it_is": "When the model gives a final answer while a session research goal is active and goal_needs_continuation(snapshot) is true, the loop records the answer as intermediate and injects a continuation prompt built from the goal snapshot. This happens at most VIBE_TRADING_GOAL_MAX_CONTINUATIONS (default 3) times and is suppressed when goal progress (goal_progress_tuple) stays at or below the value of the last continuation.",
+      "function_in_system": "Termination check in AgentLoop.run at the point where a text-only response would end the run. Counters premature stopping on multi-criteria research goals and prevents endless continuation loops when the agent makes no progress. Otherwise the agent either stops with open acceptance criteria or keeps re-prompting itself without bound.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "52",
+          "snippet": "GOAL_MAX_CONTINUATIONS = int(os.getenv(\"VIBE_TRADING_GOAL_MAX_CONTINUATIONS\", \"3\"))"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "767-775",
+          "snippet": "if should_continue_goal and continuation_snapshot is not None:\n    current_progress = goal_progress_tuple(continuation_snapshot)\n    no_new_progress = (\n        goal_last_progress is not None\n        and current_progress <= goal_last_progress\n    )\n    if goal_continuations >= GOAL_MAX_CONTINUATIONS or (\n        no_new_progress and goal_continuations > 0\n    ):"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "806-818",
+          "snippet": "messages.append({\"role\": \"assistant\", \"content\": final_content})\nmessages.append(\n    {\n        \"role\": \"user\",\n        \"content\": format_goal_continuation_prompt(\n            continuation_snapshot,\n            previous_answer=final_content,\n        ),\n    }\n)\ngoal_last_progress = current_progress\ngoal_continuations += 1\ncontinue"
+        }
+      ]
+    },
+    {
+      "name": "per-iteration LLM token accounting with goal budget charging",
+      "what_it_is": "Provider-reported usage (input/output/total tokens) is normalized after every LLM call, accumulated per run and per iteration, and written atomically (tmp file + replace) to llm_usage.json in the run dir; with an active research goal the token and turn deltas are charged to the goal via GoalStore.account_usage. GoalStore.account_usage sums the deltas and switches the goal to budget_limited once tokens, turns or time reach an optional budget (opt-in, set via goal tool, API or MCP). budget_limited ends runtime-driven goal continuation and leaves the current run running; the time budget is declared but no caller charges time deltas.",
+      "function_in_system": "Runs after each stream_chat call in AgentLoop.run. Makes cost visible per run and feeds the goal budget ledger. Otherwise token spend of long agent runs stays invisible and goal budgets have no input.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "142-149",
+          "snippet": "try:\n    path = run_dir / LLM_USAGE_ARTIFACT\n    tmp_path = path.with_suffix(path.suffix + \".tmp\")\n    tmp_path.write_text(\n        json.dumps(summary, ensure_ascii=False, indent=2, sort_keys=True) + \"\\n\",\n        encoding=\"utf-8\",\n    )\n    tmp_path.replace(path)"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "687-693",
+          "snippet": "usage = getattr(response, \"usage_metadata\", None)\nusage_delta = _record_llm_usage(\n    run_dir,\n    llm_usage_summary,\n    usage,\n    current_iter,\n)"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "711-717",
+          "snippet": "goal_store.account_usage(\n    session_id=session_id,\n    goal_id=active_goal_id,\n    expected_goal_id=active_goal_id,\n    token_delta=token_delta,\n    turn_delta=turn_delta,\n)"
+        },
+        {
+          "file": "agent/src/goal/store.py",
+          "lines": "784-795",
+          "snippet": "tokens_used = goal.tokens_used + token_delta\ntime_used_seconds = goal.time_used_seconds + time_delta_seconds\nturns_used = goal.turns_used + turn_delta\ncrosses_budget = (\n    (goal.token_budget is not None and tokens_used >= goal.token_budget)\n    or (\n        goal.time_budget_seconds is not None\n        and time_used_seconds >= goal.time_budget_seconds\n    )\n    or (goal.turn_budget is not None and turns_used >= goal.turn_budget)\n)\nnext_status = GoalStatus.BUDGET_LIMITED if crosses_budget else goal.status"
+        },
+        {
+          "file": "agent/src/goal/context.py",
+          "lines": "8, 82-87",
+          "snippet": "CONTINUABLE_GOAL_STATUSES = {\"active\", \"needs_refresh\", \"insufficient_evidence\"}\n...\ndef goal_needs_continuation(snapshot: dict[str, Any]) -> bool:\n    \"\"\"Return whether the runtime should keep working on this goal.\"\"\"\n    goal = snapshot.get(\"goal\") or {}\n    status = str(goal.get(\"status\") or \"\").lower()\n    if status not in CONTINUABLE_GOAL_STATUSES:\n        return False"
+        }
+      ]
+    },
+    {
+      "name": "cache-stable system prompt with per-query memory recall",
+      "what_it_is": "The persistent cross-session memory snapshot is frozen at session start and placed in the system prompt; query-specific memories (top 3 via find_relevant, 500 chars each) are injected into the user message inside <recalled-memories>.",
+      "function_in_system": "Context construction in ContextBuilder before the first LLM call of a run. Keeps the system prompt byte-stable across turns so provider prompt caching applies. Otherwise every turn with different recalled memories invalidates the cached prefix and pays full input cost.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/context.py",
+          "lines": "169-170",
+          "snippet": "Injects one-line skill summaries via get_descriptions; full docs loaded on demand by load_skill.\nPersistentMemory snapshot is frozen at session start (preserves prompt cache)."
+        },
+        {
+          "file": "agent/src/agent/context.py",
+          "lines": "217-219, 236-245",
+          "snippet": "Auto-recalls relevant persistent memories and injects them into the\nuser message as context. This keeps the system prompt stable (cacheable)\nwhile providing per-query relevant memories.\n...\nif self._persistent_memory:\n    try:\n        recalls = self._persistent_memory.find_relevant(user_message, max_results=3)\n        if recalls:\n            lines = [f\"- **{r.title}** ({r.memory_type}): {r.body[:500]}\" for r in recalls]\n            recall_block = \"\\n\".join(lines)\n            enriched = (\n                f\"<recalled-memories>\\n{recall_block}\\n</recalled-memories>\\n\\n\"\n                f\"{user_message}\"\n            )"
+        }
+      ]
+    },
+    {
+      "name": "progressive skill disclosure",
+      "what_it_is": "The system prompt lists only one-line descriptions of all specialist skills; the full skill documentation (API contracts, examples) is loaded into context on demand when the model calls load_skill.",
+      "function_in_system": "System prompt construction in ContextBuilder. Keeps dozens of long skill documents out of every request and pulls in only the ones needed for the task. Otherwise the full skill corpus inflates every LLM call's input tokens.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/context.py",
+          "lines": "31",
+          "snippet": "## Skills (use load_skill to read full docs)"
+        },
+        {
+          "file": "agent/src/agent/context.py",
+          "lines": "169",
+          "snippet": "Injects one-line skill summaries via get_descriptions; full docs loaded on demand by load_skill."
+        },
+        {
+          "file": "agent/src/agent/context.py",
+          "lines": "192",
+          "snippet": "skill_descriptions=self.skills_loader.get_descriptions(),"
+        }
+      ]
+    },
+    {
+      "name": "prompted self-check and anti-fabrication rules",
+      "what_it_is": "The system prompt requires a three-rule self-check before output (data fidelity, logical consistency across analysis layers, risk disclosure), forbids fabricating metrics, tells the agent to skip an analysis layer with an explicit note when a data file is missing or a tool fails, and to ask the user when critical information is missing.",
+      "function_in_system": "Applies to the final-answer step of backtest and research workflows. Targets hallucinated metrics and contradictory conclusions in the agent's report, and replaces silent guessing with explicit skip notes or clarification questions. Its effect depends on model compliance.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent/src/agent/context.py",
+          "lines": "46",
+          "snippet": "5. Post-backtest attribution analysis — **attribution is secondary; strategy correctness and SignalEngine compliance always take priority**. Run each layer whose condition is met. If a layer is skipped, append one line: `ℹ️ Layer N (name): skipped — [reason]`. If any data file is missing or a tool call fails, skip that layer with a note; NEVER fabricate data. Present all results as markdown pipe tables."
+        },
+        {
+          "file": "agent/src/agent/context.py",
+          "lines": "83-86",
+          "snippet": "**Self-check before output** (3 rules):\n- Data fidelity: every conclusion must reference specific data points; never fabricate metrics\n- Logical consistency: layer analyses must not contradict each other\n- Risk disclosure: always identify the strategy's primary risk; never report only positives"
+        },
+        {
+          "file": "agent/src/agent/context.py",
+          "lines": "120",
+          "snippet": "- Ask the user if critical info is missing (assets, dates, strategy type). Never guess."
+        }
+      ]
+    },
+    {
+      "name": "crash-safe JSONL trace with large-field offloading",
+      "what_it_is": "TraceWriter appends one JSON record per line and flushes after each write; text fields and tool results above 50k chars are written to hash-named sidecar files with a 500-char preview inline; the reader skips corrupted lines. The loop logs start, thinking, tool calls/results, compaction, skips, timeouts and end status into it.",
+      "function_in_system": "Observability layer around every AgentLoop step. Preserves a complete, readable record of the run after a crash or kill, which is needed to diagnose failures and resume sessions. Otherwise a crash mid-run loses the history of what the agent did.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/agent/trace.py",
+          "lines": "1-5",
+          "snippet": "\"\"\"TraceWriter: crash-safe JSONL trace writer.\n\nOne JSON record per line; append + flush keeps the trace useful after crashes.\nLarge fields are written to sidecar files so traces can preserve full content\nwithout turning every CLI/history read into a giant file load."
+        },
+        {
+          "file": "agent/src/agent/trace.py",
+          "lines": "74-77",
+          "snippet": "if \"ts\" not in entry:\n    entry[\"ts\"] = time.time()\nself._file.write(json.dumps(entry, ensure_ascii=False) + \"\\n\")\nself._file.flush()"
+        },
+        {
+          "file": "agent/src/agent/trace.py",
+          "lines": "162-173",
+          "snippet": "if len(value) <= threshold:\n    entry[field] = value\n    return\n\noffload_dir = self.dir_path / offload_dir_name\noffload_dir.mkdir(parents=True, exist_ok=True)\ndigest = hashlib.sha256(f\"{offload_kind}\\0{value}\".encode(\"utf-8\")).hexdigest()\npath = offload_dir / f\"{digest[:24]}.txt\"\npath.write_text(value, encoding=\"utf-8\")\nentry[f\"{field}_path\"] = f\"{offload_dir_name}/{path.name}\"\nentry[preview_field or f\"{field}_preview\"] = value[:OFFLOAD_PREVIEW_CHARS]\nentry[f\"{field}_size\"] = len(value)"
+        }
+      ]
+    },
+    {
+      "name": "multi-engine web search with retry and backend fallback",
+      "what_it_is": "web_search passes an ordered list of free engines (duckduckgo, google, bing, brave, mojeek, yahoo; overridable via VIBE_TRADING_SEARCH_BACKENDS) so ddgs falls through a throttled engine to the next, and wraps the call in up to 3 attempts with linear backoff (0.8s x attempt). A 'no results' answer returns immediately as an empty ok result. After exhaustion the error message tells the agent to retry later, switch engines or use read_url.",
+      "function_in_system": "Inside the web_search tool, called from the agent loop's tool stage. Absorbs rate limiting of single free search engines from cloud/shared IPs (issue #231) and steers the agent to an alternative on final failure. Otherwise research runs lose their web search on the first throttled request.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/tools/web_search_tool.py",
+          "lines": "26-30",
+          "snippet": "# Free, no-key engines aggregated by ddgs, tried in order. A single engine\n# returning nothing or being rate-limited no longer fails the whole search.\n# Override (or pin to one engine) via VIBE_TRADING_SEARCH_BACKENDS.\n_DEFAULT_BACKENDS = \"duckduckgo, google, bing, brave, mojeek, yahoo\"\n_MAX_ATTEMPTS = 3\n_BACKOFF_BASE_SECONDS = 0.8"
+        },
+        {
+          "file": "agent/src/tools/web_search_tool.py",
+          "lines": "103-107",
+          "snippet": "for attempt in range(1, _MAX_ATTEMPTS + 1):\n    try:\n        with DDGS() as client:\n            if supports_backend:\n                raw = list(client.text(query, max_results=max_results, backend=backends))"
+        },
+        {
+          "file": "agent/src/tools/web_search_tool.py",
+          "lines": "129-131",
+          "snippet": "logger.warning(\"web_search attempt %d/%d failed: %s\", attempt, _MAX_ATTEMPTS, exc)\nif attempt < _MAX_ATTEMPTS:\n    time.sleep(_BACKOFF_BASE_SECONDS * attempt)"
+        },
+        {
+          "file": "agent/src/tools/web_search_tool.py",
+          "lines": "158-162",
+          "snippet": "f\"Web search failed after {_MAX_ATTEMPTS} attempts \"\nf\"(backends: {backends if supports_backend else 'duckduckgo'}): {last_error}. \"\n\"Free search engines rate-limit aggressively from cloud/shared IPs — \"\n\"retry shortly, set VIBE_TRADING_SEARCH_BACKENDS to a different engine \"\n\"list (e.g. 'google, bing'), or read a known URL directly with read_url.\""
+        }
+      ]
+    },
+    {
+      "name": "per-tool execution timeouts and output caps",
+      "what_it_is": "Execution tools carry their own hard limits: bash kills commands after 120s and caps stdout/stderr at 50k chars each; background_run tasks time out after 300s with output capped at 50k; backtest runs the engine via Runner(timeout=300) and returns only the last 2000 chars of stdout/stderr; read_url times out after 30s and truncates page text to 8000 chars. Timeouts are returned as JSON errors.",
+      "function_in_system": "Inside the individual tools, below the loop-level 1800s tool timeout. Bounds model-issued shell commands, generated backtest code and web fetches that hang or loop, and limits how much raw output reaches the context. Otherwise an infinite loop in generated code or a stalled fetch blocks the agent for the full loop timeout and floods the transcript.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/tools/bash_tool.py",
+          "lines": "11-12",
+          "snippet": "_OUTPUT_LIMIT = 50_000\n_DEFAULT_TIMEOUT = 120"
+        },
+        {
+          "file": "agent/src/tools/bash_tool.py",
+          "lines": "62-66",
+          "snippet": "except subprocess.TimeoutExpired:\n    return json.dumps({\n        \"status\": \"error\",\n        \"error\": f\"Command timed out after {_DEFAULT_TIMEOUT}s\",\n    }, ensure_ascii=False)"
+        },
+        {
+          "file": "agent/src/tools/background_tools.py",
+          "lines": "41-47",
+          "snippet": "r = subprocess.run(command, shell=True, cwd=WORKDIR,\n                   capture_output=True, text=True, timeout=300,\n                   encoding=\"utf-8\", errors=\"replace\")\noutput = (r.stdout + r.stderr).strip()[:50000]\nstatus = \"completed\"\nexcept subprocess.TimeoutExpired:\noutput, status = \"Timeout (300s)\", \"timeout\""
+        },
+        {
+          "file": "agent/src/tools/backtest_tool.py",
+          "lines": "57, 69-70",
+          "snippet": "runner = Runner(timeout=300)\n...\n\"stdout\": result.stdout[-2000:] if len(result.stdout) > 2000 else result.stdout,\n\"stderr\": result.stderr[-2000:] if len(result.stderr) > 2000 else result.stderr,"
+        },
+        {
+          "file": "agent/src/tools/web_reader_tool.py",
+          "lines": "19-20, 109-110",
+          "snippet": "_TIMEOUT = 30\n_MAX_LENGTH = 8000\n...\nif len(text) > _MAX_LENGTH:\n    text = text[:_MAX_LENGTH] + f\"\\n\\n... (truncated, total {len(resp.text)} chars)\""
+        }
+      ]
+    },
+    {
+      "name": "background task execution with loop notification injection",
+      "what_it_is": "background_run starts a shell command in a daemon thread and returns a task_id immediately; on completion, timeout or error a notification is queued. At the start of every ReAct iteration the loop drains the queue and injects the results as a <background-results> user message; check_background lets the agent poll status explicitly.",
+      "function_in_system": "Connects long-running tool work (training, large data processing) to the agent loop asynchronously. The agent keeps working while the command runs and receives the outcome automatically. Otherwise long commands block the whole loop or hit the synchronous tool timeouts.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/tools/background_tools.py",
+          "lines": "34-37",
+          "snippet": "task_id = uuid.uuid4().hex[:8]\nself.tasks[task_id] = {\"status\": \"running\", \"result\": None, \"command\": command}\nthreading.Thread(target=self._execute, args=(task_id, command), daemon=True).start()\nreturn json.dumps({\"status\": \"ok\", \"task_id\": task_id, \"message\": f\"Started: {command[:80]}\"})"
+        },
+        {
+          "file": "agent/src/tools/background_tools.py",
+          "lines": "51-55",
+          "snippet": "with self._lock:\n    self._notifications.append({\n        \"task_id\": task_id, \"status\": status,\n        \"command\": command[:80], \"result\": (output or \"\")[:500],\n    })"
+        },
+        {
+          "file": "agent/src/agent/loop.py",
+          "lines": "557-562",
+          "snippet": "# Inject background task notifications\nbg = get_background_manager()\nnotifs = bg.drain_notifications()\nif notifs:\n    notif_text = \"\\n\".join(f\"[bg:{n['task_id']}] {n['status']}: {n['result']}\" for n in notifs)\n    messages.append({\"role\": \"user\", \"content\": f\"<background-results>\\n{notif_text}\\n</background-results>\\n\\n<system>Continue processing with the background results above.</system>\"})"
+        }
+      ]
+    },
+    {
+      "name": "idempotency-aware MCP retry policy with separate init timeout",
+      "what_it_is": "For external MCP servers, list_tools is retried once on transient failures (timeouts, connection reset/closed, EOF, 'try again', unavailable), while call_tool is deliberately never retried because the remote action may already have been committed. Calls use a per-server tool_timeout; connection setup uses init_timeout, defaulting to at least 30s for cold-start servers. The OAuth authorize bootstrap sets attempts=1.",
+      "function_in_system": "MCP client adapter behind every remote tool the agent or swarm workers call. Absorbs flaky server discovery and slow cold starts while preventing duplicated side effects (e.g. broker actions) from blind retries. Otherwise transient discovery errors drop whole tool sets, and retried calls can execute a remote action twice.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/tools/mcp.py",
+          "lines": "34-44",
+          "snippet": "_TRANSIENT_ERROR_TOKENS = (\n    \"broken pipe\",\n    \"connection closed\",\n    \"connection reset\",\n    \"eof\",\n    \"temporar\",\n    \"timed out\",\n    \"timeout\",\n    \"try again\",\n    \"unavailable\",\n)"
+        },
+        {
+          "file": "agent/src/tools/mcp.py",
+          "lines": "447-457",
+          "snippet": "init_timeout = (\n    self.server_config.init_timeout\n    if self.server_config.init_timeout is not None\n    else max(self.server_config.tool_timeout, 30.0)\n)\nreturn Client(\n    transport,\n    name=self.server_name,\n    timeout=self.server_config.tool_timeout,\n    init_timeout=init_timeout,\n)"
+        },
+        {
+          "file": "agent/src/tools/mcp.py",
+          "lines": "508-511",
+          "snippet": "# Remote MCP tools are arbitrary and may mutate external state. If a\n# timeout / connection drop happens after the server has already\n# committed the action, retrying here would duplicate the side effect.\nreturn await _invoke()"
+        },
+        {
+          "file": "agent/src/tools/mcp.py",
+          "lines": "536-542",
+          "snippet": "attempts = max(1, attempts)\nfor attempt in range(1, attempts + 1):\n    try:\n        return await operation()\n    except Exception as exc:\n        if attempt >= attempts or not _is_retryable_error(exc):\n            raise"
+        }
+      ]
+    },
+    {
+      "name": "prompt-injection warning scanner for external content",
+      "what_it_is": "Regex rules (instruction override, system-prompt or secret exfiltration, privileged role claims, shell/tool execution requests) scan selected fields of web search and web reader results; matches are attached as security_warnings metadata with rule id, severity and excerpt while the content itself stays unchanged.",
+      "function_in_system": "Applied to tool results that carry untrusted external text before they enter the agent context. Flags injected instructions so the model can treat them as untrusted data. Otherwise instructions embedded in fetched pages reach the model unmarked and can hijack tool use.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/security/scanner.py",
+          "lines": "1-6",
+          "snippet": "\"\"\"Prompt-injection warning scanner for external tool content.\n\nThe scanner is intentionally conservative in action: it never rewrites or\ndrops fetched content. It only adds warning metadata to the JSON envelopes\nreturned by reader/search tools so downstream agents can treat external text\nas untrusted instructions."
+        },
+        {
+          "file": "agent/src/security/scanner.py",
+          "lines": "137-142",
+          "snippet": "if warnings:\n    existing = payload.get(\"security_warnings\", [])\n    if isinstance(existing, list):\n        payload[\"security_warnings\"] = [*existing, *warnings]\n    else:\n        payload[\"security_warnings\"] = warnings"
+        },
+        {
+          "file": "agent/src/tools/web_search_tool.py",
+          "lines": "147-150",
+          "snippet": "payload = with_security_warnings(\n    payload,\n    fields=(\"results.*.title\", \"results.*.snippet\"),\n)"
+        }
+      ]
+    },
+    {
+      "name": "file-path sandbox for tool file access",
+      "what_it_is": "All file-access tools resolve paths through path_utils: read/write/edit stay inside the current run dir (safe_path), run_dir-based tools such as backtest must resolve under allowed run roots (safe_run_dir), and user or document files must lie under explicit import roots; UNC paths and escapes raise ValueError, returned to the agent as a JSON error. Roots are extendable via VIBE_TRADING_ALLOWED_FILE_ROOTS / VIBE_TRADING_ALLOWED_RUN_ROOTS.",
+      "function_in_system": "Guard at the start of every file and run-dir tool. Contains model-chosen paths to the workspace so a wrong or manipulated path cannot read or overwrite files elsewhere on the host. Otherwise a hallucinated or injected path can corrupt project files or leak local data.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/tools/path_utils.py",
+          "lines": "3-7",
+          "snippet": "Three helpers, three threat models:\n\n* `safe_path(p, workdir)` — tool-controlled sandbox. Resolves `p` under\n  `workdir` and rejects any escape. Used by `read_file` / `write_file` /\n  `edit_file` where the LLM must stay inside the current run dir."
+        },
+        {
+          "file": "agent/src/tools/path_utils.py",
+          "lines": "226-236",
+          "snippet": "_rejects_unc(p)\nresolved = Path(p).expanduser().resolve()\n\nfor root in _allowed_run_roots():\n    if resolved.is_relative_to(root):\n        return resolved\n\nraise ValueError(\n    f\"run_dir {p!r} is outside allowed run roots. \"\n    f\"Set {_ALLOWED_RUN_ROOTS_ENV} to add a run directory.\"\n)"
+        },
+        {
+          "file": "agent/src/tools/edit_file_tool.py",
+          "lines": "54-64",
+          "snippet": "try:\n    run_root = _safe_run_dir(str(run_dir))\n    resolved = _safe_path(file_path, run_root)\nexcept ValueError as exc:\n    return json.dumps(\n        {\n            \"status\": \"error\",\n            \"error\": str(exc),\n        },\n        ensure_ascii=False,\n    )"
+        }
+      ]
+    },
+    {
+      "name": "swarm tool wait budget without run cancellation",
+      "what_it_is": "run_swarm starts the swarm in a background thread and polls every 5s, reconciling the run state from task files (reconcile_run), for at most SWARM_TIMEOUT (default 1800s). When the wait budget elapses, the run keeps executing; the tool returns the reconciled status with wait_budget_exhausted: true and the run_id so the agent can wait again or report partial state.",
+      "function_in_system": "Bridge between the main agent loop and the swarm runtime inside the run_swarm tool. Bounds how long the main agent blocks on a team run while preserving the work already paid for. Otherwise the main agent either blocks indefinitely or, as before this change, cancels the swarm and throws away minutes of LLM cost.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/tools/swarm_tool.py",
+          "lines": "21-22",
+          "snippet": "_POLL_INTERVAL_SECONDS = 5\n_MAX_WAIT_SECONDS = int(os.getenv(\"SWARM_TIMEOUT\", \"1800\"))"
+        },
+        {
+          "file": "agent/src/tools/swarm_tool.py",
+          "lines": "789-813",
+          "snippet": "t0 = time.monotonic()\nwhile time.monotonic() - t0 < _MAX_WAIT_SECONDS:\n    time.sleep(_POLL_INTERVAL_SECONDS)\n\n    loaded = store.load_run(run_id)\n    if loaded is None:\n        return json.dumps(\n            {\"status\": \"error\", \"error\": f\"Run {run_id} disappeared\"},\n            ensure_ascii=False,\n        )\n\n    reconciled = store.reconcile_run(loaded, write=True)\n    if reconciled.status.value in (\"completed\", \"failed\", \"cancelled\"):\n        return _format_result(reconciled, preset, variables)\n\n# Wait budget elapsed but the run is still in flight. Do NOT cancel —\n# the daemon thread keeps working and the agent can decide to wait\n# more (re-invoke with the returned run_id) or hand off partial state\n# to the user. Cancelling here used to throw away minutes of LLM cost\n# whenever a preset legitimately ran past the budget.\nloaded = store.load_run(run_id)\nif loaded is not None:\n    return _format_result(\n        store.reconcile_run(loaded, write=True), preset, variables, timed_out=True\n    )"
+        },
+        {
+          "file": "agent/src/tools/swarm_tool.py",
+          "lines": "846-849",
+          "snippet": "result = {\n    \"status\": run.status.value,\n    \"wait_budget_exhausted\": timed_out,\n    \"run_id\": run.id,"
+        }
+      ]
+    },
+    {
+      "name": "task-level worker retry",
+      "what_it_is": "A swarm worker whose result status is 'failed' is re-run from scratch up to agent_spec.max_retries times (default 2), emitting a task_retry event with the previous error; token counts accumulate across attempts. Results with status timeout, token_limit, incomplete or completed end the retry loop.",
+      "function_in_system": "Wraps each worker dispatch in the swarm runtime (_run_worker_with_retries). Recovers from crashed worker attempts (LLM call failure, prompt rendering error) before the task is marked failed and its downstream tasks get blocked. Otherwise one transient worker failure fails the whole DAG branch.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "agent/src/swarm/models.py",
+          "lines": "85",
+          "snippet": "max_retries: int = 2"
+        },
+        {
+          "file": "agent/src/swarm/runtime.py",
+          "lines": "672-717",
+          "snippet": "for attempt in range(max_retries + 1):\n    if attempt > 0:\n        self._emit_event(\n            run_id,\n            self._make_event(\n                \"task_retry\",\n...\n    result = run_worker(\n...\n    cumulative_input_tokens += result.input_tokens\n    cumulative_output_tokens += result.output_tokens\n\n    if result.status != \"failed\":\n        # Success (or timeout/token_limit/completed) — no more retries"
+        }
+      ]
+    },
+    {
+      "name": "upstream-failure blocking of downstream tasks",
+      "what_it_is": "Before dispatching a task, the runtime checks every depends_on task; if any is missing or has a status other than completed, the task is marked blocked with the reason, a task_blocked event is emitted, and the task is skipped. Blocked tasks count as unsuccessful, so the run ends as failed.",
+      "function_in_system": "Dependency gate in _execute_layer between DAG layers. Stops downstream agents from acting on missing inputs, e.g. a portfolio manager deciding while the risk officer's assessment is absent. Otherwise a failed upstream agent silently yields an empty context and the run can end as completed with an unfounded final report.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/swarm/runtime.py",
+          "lines": "509-547",
+          "snippet": "# Dependency-aware gating: without this check, a failed upstream\n# silently produces an empty task_summaries entry (the worker\n# upstream loop below only copies summaries that exist) and the\n# downstream worker runs with no upstream context. For an\n# investment-committee preset where portfolio_manager\n# depends_on=[\"task-risk\"], a failed risk_officer would let PM\n# produce a \"decision\" with no risk input — which is\n# safety-critical. Mark blocked and skip dispatch; same-layer\n# peers with no shared upstream are unaffected.\nblocked_upstreams: list[tuple[str, str]] = []\nfor dep_id in task.depends_on:\n...\n    if dep_task.status != TaskStatus.completed:\n        blocked_upstreams.append((dep_id, dep_task.status.value))\n\nif blocked_upstreams:\n...\n    task_store.update_status(\n        tid,\n        TaskStatus.blocked,\n        error=f\"Blocked: upstream not completed ({reason})\",\n...\n    continue"
+        },
+        {
+          "file": "agent/src/swarm/runtime.py",
+          "lines": "349-351",
+          "snippet": "for tid in layer_task_ids:\n    if tid not in layer_results:\n        all_succeeded = False"
+        }
+      ]
+    },
+    {
+      "name": "per-worker budgets with partial-result return",
+      "what_it_is": "Each swarm worker checks a wall-clock limit (timeout_seconds, default 300s), an estimated context size limit (60k tokens) and an iteration limit (max_iterations, default 25). On hitting a limit it returns the best available summary (report.md content or last substantive assistant text) with status timeout, token_limit or iteration-limit completion, and persists its messages and summary.",
+      "function_in_system": "Checked at the top of every worker iteration and after the loop. Caps cost and time per agent role and converts exhaustion into a usable partial deliverable for downstream agents. Otherwise a single worker can run unbounded or end with nothing to pass on.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "agent/src/swarm/models.py",
+          "lines": "82-83",
+          "snippet": "max_iterations: int = 25\ntimeout_seconds: int = 300"
+        },
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "68",
+          "snippet": "_MAX_TOKEN_ESTIMATE = 60_000"
+        },
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "405-414",
+          "snippet": "# Check timeout\nelapsed = time.monotonic() - t0\nif elapsed > timeout:\n    summary = _best_summary(messages, last_assistant_content) or f\"Worker timed out after {elapsed:.0f}s ({iteration} iterations)\"\n    summary = _resolve_summary(artifact_dir, summary)\n    _emit(event_callback, \"worker_timeout\", agent_id, task_id, {\"elapsed\": elapsed})\n    _write_summary(artifact_dir, summary)\n    _persist_messages(artifact_dir, messages)\n    return WorkerResult(\n        status=\"timeout\","
+        },
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "422-430",
+          "snippet": "# Check token estimate\ntoken_estimate = len(json.dumps(messages, ensure_ascii=False)) // 4\nif token_estimate > _MAX_TOKEN_ESTIMATE:\n    summary = last_assistant_content or f\"Worker context too large (~{token_estimate} tokens, {iteration} iterations)\"\n    summary = _resolve_summary(artifact_dir, summary)\n    _emit(event_callback, \"worker_token_limit\", agent_id, task_id, {\"tokens\": token_estimate})\n    _write_summary(artifact_dir, summary)\n    return WorkerResult(\n        status=\"token_limit\","
+        },
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "636-640",
+          "snippet": "# Hit iteration limit — use last meaningful content as summary\nsummary = _best_summary(messages, last_assistant_content) or f\"Worker hit iteration limit ({max_iterations} iterations)\"\nsummary = _resolve_summary(artifact_dir, summary)\n_write_summary(artifact_dir, summary)\n_persist_messages(artifact_dir, messages)"
+        }
+      ]
+    },
+    {
+      "name": "hard layer-level deadline for worker threads",
+      "what_it_is": "Results of a DAG layer are collected with as_completed(timeout=layer_deadline), where the deadline is the largest per-task budget timeout_seconds x (max_retries + 1) in the layer plus 60s. Workers still pending at the deadline are cancelled where possible and recorded as status timeout; the executor shuts down without waiting.",
+      "function_in_system": "Outer bound around the parallel execution of one layer in the swarm runtime, above the per-worker in-loop timeout. Handles worker threads stuck in C extensions or blocking I/O that never reach their own timeout check (issue #42). Otherwise one hung thread stalls the whole swarm run forever.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/swarm/runtime.py",
+          "lines": "588-589",
+          "snippet": "per_task_budget = agent_spec.timeout_seconds * (agent_spec.max_retries + 1)\nlayer_budget = max(layer_budget, per_task_budget)"
+        },
+        {
+          "file": "agent/src/swarm/runtime.py",
+          "lines": "591-598",
+          "snippet": "# Collect results with a hard layer-level deadline — defends against\n# worker threads stuck in C extensions / blocked I/O that bypass the\n# in-loop timeout check (issue #42).\ndeadline_buffer = 60\nlayer_deadline = layer_budget + deadline_buffer if layer_budget else None\n\ntry:\n    for future in as_completed(futures, timeout=layer_deadline):"
+        },
+        {
+          "file": "agent/src/swarm/runtime.py",
+          "lines": "609-623",
+          "snippet": "except FuturesTimeoutError:\n    for pending, tid in futures.items():\n        if tid in results:\n            continue\n        pending.cancel()\n...\n        results[tid] = WorkerResult(\n            status=\"timeout\",\n            summary=\"\",\n            error=f\"Worker exceeded layer deadline of {layer_deadline}s\",\n        )"
+        }
+      ]
+    },
+    {
+      "name": "deterministic worker deliverable contract check",
+      "what_it_is": "When a worker finishes, _classify_deliverable inspects its summary: empty output, unparsed tool-call markup, explicit fabricated/mock-data markers, a raw tool-result JSON envelope, a plan-only stub, or a data agent with zero successful data tool calls and no report.md each yield a reason. With a reason the worker returns status incomplete with 'output contract not met', which the runtime records as a failed task.",
+      "function_in_system": "Quality gate between a worker's final answer and its hand-off to downstream agents. Catches hollow or fabricated deliverables and, through the task failure, triggers upstream-failure blocking downstream. Otherwise downstream agents and the final report build on empty, placeholder or invented content.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "811-831",
+          "snippet": "text = (summary or \"\").strip()\nif not text:\n    return \"empty deliverable\"\nlow = text.lower()\nif any(m in low for m in _UNPARSED_TOOL_MARKERS):\n    return \"unparsed tool-call markup (provider did not parse tool calls)\"\nif any(m in low for m in _FABRICATION_MARKERS):\n    return \"explicitly fabricated / mock data\"\nif text.startswith(\"{\") and '\"status\"' in text[:40] and (\n    '\"content\"' in text[:300] or '\"ok\"' in text[:40]\n):\n    return \"raw tool-result envelope, not analysis\"\nif low.startswith(_PLAN_PREFIXES):\n...\n        return \"plan-only stub (no executed analysis / conclusion)\"\nif is_data_agent and not report_written and data_tool_calls == 0:\n    return \"data agent produced no tool calls and no report.md\"\nreturn None"
+        },
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "554-571",
+          "snippet": "reason = _classify_deliverable(\n    summary,\n    is_data_agent=_is_data_agent(agent_spec),\n    report_written=_report_written(artifact_dir),\n    data_tool_calls=data_tool_calls,\n)\nif reason:\n    _emit(event_callback, \"worker_incomplete\", agent_id, task_id,\n          {\"iterations\": iteration + 1, \"reason\": reason})\n    return WorkerResult(\n        status=\"incomplete\",\n...\n        error=f\"output contract not met: {reason}\","
+        },
+        {
+          "file": "agent/src/swarm/runtime.py",
+          "lines": "321-327",
+          "snippet": "else:\n    all_succeeded = False\n    task_store.update_status(\n        tid,\n        TaskStatus.failed,\n        error=redact_internal_paths(result.error)\n        or f\"worker did not complete (status={result.status})\","
+        }
+      ]
+    },
+    {
+      "name": "market-data grounding block injected into worker prompts",
+      "what_it_is": "At run start the runtime extracts symbols from user_vars (max 8, SWARM_GROUNDING_MAX_SYMBOLS), fetches the last 30 days of OHLCV via the loader registry, and renders a 'Ground Truth' markdown table that is spliced into every worker's system prompt with the instruction to cite only these prices or fetch more via get_market_data. Fetch failures are skipped per symbol.",
+      "function_in_system": "Context preparation before any worker runs. Supplies verified recent prices so workers have real data to cite, targeting hallucinated prices from training data. Otherwise workers quote stale or invented market figures that propagate into the committee's final report.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/swarm/grounding.py",
+          "lines": "4-9",
+          "snippet": "Swarm workers are LLMs. Without explicit grounding they cheerfully quote\nprices from their training data — which is wrong by definition for any\nasset that has traded since the model's cutoff. The fix can only be\nstructural: feed the worker the real recent prices before it starts\nreasoning, and tell it those are the only prices it may cite."
+        },
+        {
+          "file": "agent/src/swarm/grounding.py",
+          "lines": "202-211",
+          "snippet": "for code in symbols_list:\n    try:\n        market = _detect_market(code)\n        loader = resolve_loader(market)  # already a ready-to-use instance\n        df_map = loader.fetch([code], start_str, end_str, interval=\"1D\")\n    except Exception as exc:  # pragma: no cover — depends on network\n        logger.warning(\n            \"grounding: failed to fetch %s — %s\", code, exc, exc_info=False\n        )\n        continue"
+        },
+        {
+          "file": "agent/src/swarm/grounding.py",
+          "lines": "273-280",
+          "snippet": "header = (\n    \"## Ground Truth — Recent Market Data\\n\\n\"\n    \"**These are the authoritative current prices for this run.** Do NOT \"\n    \"cite prices, valuations, multiples, or returns from your training \"\n    \"data — markets have moved. If you need a price outside this window, \"\n    \"call `get_market_data` for the relevant range. When you state a \"\n    \"price, cite the date from this table.\"\n)"
+        },
+        {
+          "file": "agent/src/swarm/runtime.py",
+          "lines": "240, 253",
+          "snippet": "self._prefetch_grounding_data(run)\n...\ngrounding_block = grounding.format_grounding_block(run.grounding_data or {})"
+        }
+      ]
+    },
+    {
+      "name": "prompted data-citation discipline for workers",
+      "what_it_is": "Every worker system prompt carries a HARD RULE: each specific number must be traceable to a tool result of this run, the Ground Truth block, or upstream context sourced from those; otherwise the worker must fetch the data or omit the number and mark the statement as unverified. The rule applies unconditionally, including synthesis and editor roles without data tools.",
+      "function_in_system": "Worker prompt construction, active for every agent in the swarm. Targets fabricated figures in free-form prompts where no grounding block is rendered and in aggregator roles that could invent numbers. Its effect depends on model compliance.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "231-237",
+          "snippet": "# Universal anti-fabrication rule. The grounding_block carries a similar\n# instruction but only renders when user_vars supplies explicit symbols.\n# Free-form prompts (\"look at A-share short-term sentiment\") otherwise\n# leave the worker with no guardrail and it cheerfully cites training-data\n# prices and sector weights. This block applies the rule unconditionally\n# — including to aggregator / synthesis agents that have no data tools\n# and previously had no instruction against inventing numbers."
+        },
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "239-249",
+          "snippet": "\"## Data Citation Discipline (HARD RULE)\\n\\n\"\n\"Every specific number you cite in your output — prices, percentages, \"\n\"volumes, fund flows, market-cap rankings, sector weights, ETF codes, \"\n\"ticker recommendations — MUST be traceable to one of:\\n\"\n\"  (a) a tool call result obtained in THIS run,\\n\"\n\"  (b) the Ground Truth block above (if present),\\n\"\n\"  (c) the Upstream Context above (if present and the upstream agent \"\n\"itself sourced it from (a) or (b)).\\n\\n\"\n\"You may NOT cite numbers from memory or training data. Markets have \"\n\"moved since your cutoff; any specific price/percentage you recall is \"\n\"wrong by default.\\n\\n\""
+        }
+      ]
+    },
+    {
+      "name": "heartbeat-based stale-run reaper with terminal-state recovery",
+      "what_it_is": "Workers emit task_heartbeat events every SWARM_HEARTBEAT_INTERVAL_S (3s) during LLM streaming, tool execution and grounding fetches. reconcile_run, applied on every status read, hydrates task files into the run, derives the run status from tasks when all are terminal, and reaps a running run whose last event is older than max(60, min(10 x heartbeat, max agent timeout x (retries+1) + 60)) seconds by marking non-terminal tasks failed. A sweep over all runs happens at every start_run and via the reap_stale_runs MCP tool.",
+      "function_in_system": "Persistence layer of the swarm runtime, read by run_swarm polling, API, MCP and SSE views. Detects runs whose host process died and repairs runs that finished between the last layer sync and finalization. Otherwise crashed runs stay 'running' forever and callers wait on work that will never complete.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/swarm/store.py",
+          "lines": "330-342",
+          "snippet": "try:\n    interval = float(os.getenv(\"SWARM_HEARTBEAT_INTERVAL_S\", \"3.0\"))\nexcept ValueError:\n    interval = 3.0\nheartbeat_floor = max(60.0, interval * 10.0)\n\nagent_budgets = [\n    max(1, int(agent.timeout_seconds or 300)) * (max(0, int(agent.max_retries)) + 1)\n    for agent in run.agents\n]\nretry_ceiling = (max(agent_budgets) if agent_budgets else 300) + 60\n\nreturn float(max(60.0, min(heartbeat_floor, retry_ceiling)))"
+        },
+        {
+          "file": "agent/src/swarm/store.py",
+          "lines": "403-420",
+          "snippet": "all_terminal = bool(hydrated.tasks) and all(t.status in terminal_task for t in hydrated.tasks)\nif all_terminal:\n    recovered = self._recover_terminal(hydrated, now=now)\n    if write and recovered is not hydrated:\n        self._persist_recovery(recovered, kind=\"run_recovered_terminal\", reason=\"all tasks terminal\")\n    return recovered\n\nif self.is_run_stale(hydrated, now=now):\n    reaped = self._reap_stale(hydrated, now=now)\n    if write and reaped is not hydrated:\n        threshold = int(self.compute_stale_threshold(hydrated))\n        self._persist_recovery(\n            reaped,\n            kind=\"run_reaped\",\n            reason=f\"no event for >{threshold}s; host process likely exited\",\n            extra={\"stale_seconds\": threshold},\n        )\n    return reaped"
+        },
+        {
+          "file": "agent/src/swarm/runtime.py",
+          "lines": "112-116",
+          "snippet": "reaped = self._store.reap_stale_running_runs()\nif reaped:\n    logger.info(\"Reaped %d stale swarm run(s): %s\", len(reaped), reaped)\nexcept Exception:\nlogger.warning(\"Stale-run reaper failed\", exc_info=True)"
+        },
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "603-621",
+          "snippet": "# Wrap tool execution in a heartbeat so the events.jsonl tail has a\n# fresh timestamp every few seconds. The stale-run reaper relies on\n# this signal to tell a hung tool call apart from a dead host; the\n# CLI dashboard / SSE clients also get live \"still working\" ticks.\n...\nwith HeartbeatTimer(\n    tool_name=tc.name,\n    interval=_HEARTBEAT_INTERVAL_S,\n    emit=_on_heartbeat,\n):\n    result = registry.execute(tc.name, args)"
+        }
+      ]
+    },
+    {
+      "name": "prompted worker execution rules (tool-call budget, retry cap, mandatory report)",
+      "what_it_is": "The worker system prompt states a HARD LIMIT of 20 tool calls, a plan-first phase with zero tool calls, at most 15 execution calls, at most 2 fix-and-rerun retries per failing script, and a mandatory write_file of report.md. The 20-call limit is only stated in the prompt; code enforces the iteration limit.",
+      "function_in_system": "Worker prompt construction for every swarm role. Aims to keep workers efficient, stop endless debug loops on failing scripts and guarantee a persisted deliverable. Its effect depends on model compliance.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent/src/swarm/worker.py",
+          "lines": "262-273",
+          "snippet": "\"## Execution Rules\\n\\n\"\n\"You have a HARD LIMIT of 20 tool calls. After that you will be cut off. Work efficiently.\\n\\n\"\n\"**Phase 1 — Plan (0 tool calls):** Before calling any tool, state your plan in 3-5 bullet points.\\n\\n\"\n\"**Phase 2 — Execute (≤15 tool calls):**\\n\"\n...\n\"- If a script fails, read the error, fix with `edit_file`, re-run. Max 2 retries per script.\\n\\n\"\n\"**Phase 3 — Summarize (MUST use write_file):**\\n\"\n\"- You MUST call `write_file` with path `report.md` to save your final report as a markdown file.\\n\""
+        }
+      ]
+    },
+    {
+      "name": "evidence-gated goal completion audit",
+      "what_it_is": "Setting a research goal to complete requires a completion audit: every required criterion needs an audit row with result satisfied, satisfied_with_caveat or not_applicable_user_accepted (the latter only with acceptance notes); cited evidence_ids must belong to the goal and to that criterion, and at least one must be verified. Verification is deterministic at evidence insertion: the artifact file exists under the document root and its sha256 matches the supplied hash, or the run_id resolves to an existing run directory. Violations raise ValueError, which the goal tool returns as a JSON error.",
+      "function_in_system": "Sits in the update_research_goal_status tool path, when the agent declares a goal finished. Acts as an external check on the agent's completion claim and feeds the rejection back as a tool observation. Otherwise the agent can close a multi-criteria research goal with fabricated or unlinked evidence, and the continuation mechanism stops driving the open criteria.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/goal/store.py",
+          "lines": "46-50",
+          "snippet": "_COMPLETION_RESULTS = {\n    \"satisfied\",\n    \"satisfied_with_caveat\",\n    \"not_applicable_user_accepted\",\n}"
+        },
+        {
+          "file": "agent/src/goal/store.py",
+          "lines": "711-712",
+          "snippet": "if status is GoalStatus.COMPLETE:\n    self._validate_completion_audit(goal, audit or [])"
+        },
+        {
+          "file": "agent/src/goal/store.py",
+          "lines": "899-925",
+          "snippet": "criteria = self.list_criteria(goal.goal_id)\nrows_by_criterion = {row.criterion_id: row for row in audit}\nfor criterion in criteria:\n    if not criterion.required:\n        continue\n    row = rows_by_criterion.get(criterion.criterion_id)\n    if row is None:\n        raise ValueError(f\"missing audit row for criterion {criterion.criterion_id}\")\n    if row.result not in _COMPLETION_RESULTS:\n        raise ValueError(f\"criterion {criterion.criterion_id} is not satisfied\")\n    if row.result in {\"satisfied\", \"satisfied_with_caveat\"} and not row.evidence_ids:\n        raise ValueError(\"complete goals require verified evidence\")\n    if row.result == \"not_applicable_user_accepted\" and not row.notes.strip():\n        raise ValueError(\"not-applicable criteria require acceptance notes\")\n    has_verified_evidence = False\n    for evidence_id in row.evidence_ids:\n        evidence = self._get_evidence(evidence_id)\n        if evidence is None or evidence.goal_id != goal.goal_id:\n            raise ValueError(f\"unknown evidence_id: {evidence_id}\")\n        if evidence.criterion_id != criterion.criterion_id:\n            raise ValueError(\n                f\"evidence {evidence_id} does not match criterion {criterion.criterion_id}\"\n            )\n        if evidence.verification_status == \"verified\":\n            has_verified_evidence = True\n    if row.result in {\"satisfied\", \"satisfied_with_caveat\"} and not has_verified_evidence:\n        raise ValueError(\"complete goals require verified evidence\")"
+        },
+        {
+          "file": "agent/src/goal/store.py",
+          "lines": "843-858",
+          "snippet": "if evidence.artifact_path:\n    try:\n        artifact = safe_document_path(evidence.artifact_path)\n    except ValueError:\n        artifact = None\n    if artifact and artifact.is_file():\n        if GoalStore._artifact_hash_matches(artifact, evidence.artifact_hash):\n            return \"verified\"\nif evidence.run_id:\n    try:\n        run_dir = safe_run_id(evidence.run_id)\n    except ValueError:\n        run_dir = None\n    if run_dir and run_dir.is_dir():\n        return \"verified\"\nreturn \"unverified\""
+        },
+        {
+          "file": "agent/src/tools/goal_tool.py",
+          "lines": "305-308",
+          "snippet": "except StaleGoalError as exc:\n    return _json_error(str(exc), error_type=\"stale_goal\")\nexcept (json.JSONDecodeError, TypeError, ValueError) as exc:\n    return _json_error(str(exc))"
+        }
+      ]
+    },
+    {
+      "name": "stale-goal write guard with expected_goal_id",
+      "what_it_is": "Every goal mutation (update_goal, append_evidence, update_status, account_usage) runs inside a BEGIN IMMEDIATE transaction and first calls _require_mutable_goal, which checks that expected_goal_id equals goal_id, that the goal belongs to the session, that its status is mutable and that it is still the current goal of the session; any mismatch raises StaleGoalError. A partial unique index allows only one current goal per session. The goal tools return the error with error_type stale_goal.",
+      "function_in_system": "Guards the goal ledger that the agent writes to during its turns, while the user can replace or cancel the goal in parallel via UI, API or MCP. Detects writes that target a superseded goal and surfaces them to the model as a typed error. Otherwise evidence and status updates from an in-flight turn silently land on a replaced goal and corrupt the ledger of the new one.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/goal/store.py",
+          "lines": "826-838",
+          "snippet": "if expected_goal_id != goal_id:\n    raise StaleGoalError(\"expected_goal_id does not match target goal\")\nsession_id = normalize_required_text(session_id, \"session_id\")\ngoal_id = normalize_required_text(goal_id, \"goal_id\")\ngoal = self.get_goal(goal_id)\nif goal is None or goal.session_id != session_id:\n    raise StaleGoalError(\"goal is not available for this session\")\nif goal.status not in _CURRENT_STATUSES:\n    raise StaleGoalError(f\"goal status {goal.status.value!r} is not mutable\")\ncurrent = self.get_current_goal(session_id)\nif current is None or current.goal_id != goal_id:\n    raise StaleGoalError(\"goal is not current for this session\")\nreturn goal"
+        },
+        {
+          "file": "agent/src/goal/store.py",
+          "lines": "149-159",
+          "snippet": "CREATE UNIQUE INDEX IF NOT EXISTS idx_goals_one_current_per_session\n    ON goals(session_id)\n    WHERE status IN (\n        'active',\n        'paused',\n        'waiting_user',\n        'needs_refresh',\n        'insufficient_evidence',\n        'compliance_blocked',\n        'budget_limited'\n    );"
+        },
+        {
+          "file": "agent/src/goal/store.py",
+          "lines": "244-253",
+          "snippet": "def _write_transaction(self):\n    \"\"\"Open an immediate write transaction for cross-connection safety.\"\"\"\n    self._conn.execute(\"BEGIN IMMEDIATE\")\n    try:\n        yield\n    except Exception:\n        self._conn.rollback()\n        raise\n    else:\n        self._conn.commit()"
+        },
+        {
+          "file": "agent/src/goal/store.py",
+          "lines": "621-622",
+          "snippet": "with self._write_transaction():\n    goal = self._require_mutable_goal(session_id, goal_id, expected_goal_id)"
+        },
+        {
+          "file": "agent/src/tools/goal_tool.py",
+          "lines": "467-468",
+          "snippet": "except StaleGoalError as exc:\n    return _json_error(str(exc), error_type=\"stale_goal\")"
+        }
+      ]
+    },
+    {
+      "name": "regex rejection of live-execution research goals",
+      "what_it_is": "reject_live_execution_objective matches goal objectives and each criterion against English and Chinese regex patterns for order placement or immediate buy/sell requests and raises ValueError on a match; goals with RiskTier.LIVE_TRADING_OR_EXECUTION are refused as well. The check runs on goal creation and on objective edits.",
+      "function_in_system": "Input boundary of the goal subsystem, before a goal becomes the target of runtime-driven continuation. Keeps the autonomous goal loop confined to research. Otherwise a goal like 'buy BTC now' would be pursued across continuation prompts and could push the agent toward trade execution.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/goal/policy.py",
+          "lines": "7-14",
+          "snippet": "_EXECUTION_PATTERNS = (\n    re.compile(r\"\\b(place|submit|execute|send)\\b.{0,40}\\b(order|trade)\\b\", re.I),\n    re.compile(\n        r\"\\b(buy|sell|short|long)\\b.{0,40}\\b(now|immediately|market order|limit order|shares?|contracts?|btc|eth|usdt)\\b\",\n        re.I,\n    ),\n    re.compile(r\"(下单|市价单|限价单|马上买|立即买|现在买|马上卖|立即卖|现在卖)\"),\n)"
+        },
+        {
+          "file": "agent/src/goal/policy.py",
+          "lines": "45-48",
+          "snippet": "text = objective.strip()\nfor pattern in _EXECUTION_PATTERNS:\n    if pattern.search(text):\n        raise ValueError(\"live trading or execution goals are not supported\")"
+        },
+        {
+          "file": "agent/src/goal/store.py",
+          "lines": "292-299",
+          "snippet": "reject_live_execution_objective(objective)\nif risk_tier is RiskTier.LIVE_TRADING_OR_EXECUTION:\n    raise ValueError(\"live trading or execution goals are not supported\")\ncleaned_criteria = [item.strip() for item in criteria if item.strip()]\nif not cleaned_criteria:\n    raise ValueError(\"at least one goal criterion is required\")\nfor criterion in cleaned_criteria:\n    reject_live_execution_objective(criterion)"
+        },
+        {
+          "file": "agent/src/goal/store.py",
+          "lines": "415-417",
+          "snippet": "if objective is not None:\n    next_objective = normalize_required_text(objective, \"goal objective\")\n    reject_live_execution_objective(next_objective)"
+        }
+      ]
+    },
+    {
+      "name": "fsync'd append-only session message log with corrupt-line skipping",
+      "what_it_is": "Session chat messages are appended as one JSON line each to messages.jsonl, followed by flush and os.fsync; the reader skips lines that fail JSON decoding and logs a warning.",
+      "function_in_system": "Persistence layer for the conversation history that SessionService reloads as agent history for every new attempt. Makes each message durable before execution continues and tolerates a torn last line. Otherwise a crash or kill during a write loses history or makes the whole session unreadable.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/session/store.py",
+          "lines": "150-153",
+          "snippet": "with path.open(\"a\", encoding=\"utf-8\") as f:\n    f.write(json.dumps(message.to_dict(), ensure_ascii=False) + \"\\n\")\n    f.flush()\n    os.fsync(f.fileno())"
+        },
+        {
+          "file": "agent/src/session/store.py",
+          "lines": "169-178",
+          "snippet": "for line in path.read_text(encoding=\"utf-8\").strip().splitlines():\n    if line.strip():\n        try:\n            messages.append(Message.from_dict(json.loads(line)))\n        except json.JSONDecodeError:\n            logger.warning(\n                \"Skipping corrupted message line in session %s: %s\",\n                session_id,\n                line[:200],\n            )"
+        }
+      ]
+    },
+    {
+      "name": "character-budgeted session history for new attempts",
+      "what_it_is": "Before each new attempt, prior session messages are reduced to user/assistant turns, 'Run directory: <path>' strings are shortened to '[prev_run: <run_id>]', and the history is trimmed from the newest message backwards to MAX_HISTORY_CHARS = 12000 characters (roughly 3000 tokens).",
+      "function_in_system": "Context construction at the start of every AgentLoop run in a multi-turn session. Caps the input tokens spent on prior turns while keeping references to earlier run artifacts for iterative strategy updates. Otherwise long sessions carry their full history into every run and inflate cost and context usage.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/session/service.py",
+          "lines": "303-316",
+          "snippet": "def _shorten_run_dir(match: re.Match) -> str:\n    path_str = match.group(0).replace(\"Run directory:\", \"\").strip()\n    run_id = Path(path_str).name if path_str else \"\"\n    return f\"[prev_run: {run_id}]\" if run_id else \"\"\n\nhistory = []\nfor msg in messages[:-1]:\n    role = msg.role if hasattr(msg, \"role\") else msg.get(\"role\", \"user\")\n    content = msg.content if hasattr(msg, \"content\") else msg.get(\"content\", \"\")\n    if not content.strip() or role not in (\"user\", \"assistant\"):\n        continue\n    content = re.sub(r\"Run directory:\\s*\\S+\", _shorten_run_dir, content).strip()\n    if content:\n        history.append({\"role\": role, \"content\": content})"
+        },
+        {
+          "file": "agent/src/session/service.py",
+          "lines": "318-328",
+          "snippet": "# Trim from the newest messages within a character budget of roughly 3000 tokens.\nMAX_HISTORY_CHARS = 12000\ntotal_chars = 0\ntrimmed: list = []\nfor msg in reversed(history):\n    msg_len = len(msg.get(\"content\", \"\"))\n    if total_chars + msg_len > MAX_HISTORY_CHARS:\n        break\n    trimmed.append(msg)\n    total_chars += msg_len\nreturn list(reversed(trimmed))"
+        }
+      ]
+    },
+    {
+      "name": "fail-closed pre-trade mandate gate",
+      "what_it_is": "Every live order passes a fixed check chain before any broker call: load the mandate and verify its schema version, check expiry, check the HALT sentinel, parse the order intent, normalize the notional to the larger of the explicit notional and quantity x live quote (broker quote tool first, data loaders second, deny when unpriceable), read positions and balance, then check_mandate in fixed order (exclude list, instrument type, asset class, single-order notional, post-trade exposure, gross leverage, daily trade count, funding, market-cap and liquidity floors). Any unparseable input or missing market data yields a breach. Structural breaches (universe, instrument) are denied, quantitative breaches return pause_for_reauth with the full BreachEvent. The refusal is returned to the agent as a status 'blocked' JSON envelope. The gate exists as an MCP tool wrapper (LiveOrderGuardTool) and as a function for direct-SDK connectors (execute_live_order); paper profiles skip it.",
+      "function_in_system": "Sits between the agent's order tool call and the broker in the live trading channel. Keeps autonomous trading inside user-set limits even when positions, quotes or fundamentals cannot be read, and tells the model why the order was refused. Otherwise an erroneous or hallucinated order moves real money past the user's caps.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/live/order_guard.py",
+          "lines": "122-128, 138-143, 179-184",
+          "snippet": "mandate = load_mandate(self.broker)\nif mandate is None or mandate.schema_version != MANDATE_SCHEMA_VERSION:\n    return self._deny(\n        reason=\"no valid mandate on file\",\n        checked=[\"mandate\"],\n        mandate=mandate,\n    )\n...\nif halt_flag_set(self.broker):\n    return self._deny(\n        reason=\"live trading halted\",\n        checked=[\"mandate\", \"expiry\", \"halt_flag\"],\n        mandate=mandate,\n    )\n...\nif breach is None:\n    return self._allow(mandate=mandate, intent=intent, kwargs=kwargs)\n\nif breach.kind in (BREACH_KIND_UNIVERSE, BREACH_KIND_INSTRUMENT):\n    return self._deny_breach(breach, mandate=mandate, intent=intent, reauth=False)\nreturn self._deny_breach(breach, mandate=mandate, intent=intent, reauth=True)"
+        },
+        {
+          "file": "agent/src/live/order_guard.py",
+          "lines": "213-224",
+          "snippet": "if intent.quantity is None:\n    return intent\n\nprice = self._quote_price(intent)\nif price is None:\n    return None\nimplied = intent.quantity * price\nif implied != implied or implied <= 0:  # NaN / non-positive → fail-closed\n    return None\n\nexplicit = intent.notional_usd if intent.notional_usd is not None else 0.0\nenforced = max(float(explicit), implied)"
+        },
+        {
+          "file": "agent/src/live/enforcement.py",
+          "lines": "472-481",
+          "snippet": "# 5–6. Exposure + leverage need observable positions; fail-closed on any\n#      unparseable position. A sell reduces gross exposure (signed by side).\ncurrent_exposure = _positions_market_value(positions)\nif current_exposure is None:\n    return _breach(\n        broker=broker, remote_tool=remote_tool, intent=intent,\n        kind=BREACH_KIND_QUANTITATIVE, limit=\"max_total_exposure_usd\",\n        limit_value=caps.max_total_exposure_usd, attempted_value=0.0,\n        detail=\"current positions could not be read (fail-closed)\",\n    )"
+        },
+        {
+          "file": "agent/src/live/sdk_order_gate.py",
+          "lines": "110-114",
+          "snippet": "if breach is None:\n    return _allow(broker, session_id, connector_module, config, intent, place_kwargs, mandate)\n\nreauth = breach.kind not in (BREACH_KIND_UNIVERSE, BREACH_KIND_INSTRUMENT)\nreturn _deny_breach(broker, session_id, breach, mandate, intent, reauth)"
+        },
+        {
+          "file": "agent/src/trading/service.py",
+          "lines": "274-279",
+          "snippet": "if profile.environment == \"paper\":\n    return _with_profile(profile, module.place_order(config, **place_kwargs))\n\n# Live: pre-trade mandate gate.\nfrom src.live.enforcement import OrderIntent\nfrom src.live.sdk_order_gate import execute_live_order"
+        }
+      ]
+    },
+    {
+      "name": "one-shot preemptive cancel and optional flatten on halt",
+      "what_it_is": "When the live runner observes a tripped HALT sentinel it runs flatten_and_cancel once per runner lifetime (_flatten_fired latch): it cancels every resting order first and closes open positions with market orders only when the mandate sets flatten_on_halt (default False, cancel-only). Every broker call is audited, errors are recorded and never retried. The API server wires the broker submit callable into the runner.",
+      "function_in_system": "Runs in the live runner tick when the kill switch is set, before the tick aborts. Turns the halt from refusing the next order into actively quiescing the book. Otherwise resting orders keep filling after a halt, and repeated ticks of a halted runner could submit closing orders twice.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/live/runtime/flatten.py",
+          "lines": "115-127",
+          "snippet": "_cancel_resting_orders(broker, submit, read_open_orders, report)\n\ndo_flatten = _resolve_allow_flatten(broker, allow_flatten)\nif not do_flatten:\n    report[\"flatten_skipped_reason\"] = \"mandate forbids flatten (cancel-only)\"\n    logger.warning(\n        \"live preemptive sweep (broker=%s): cancel-only, flatten not permitted\",\n        broker,\n    )\n    return report\n\n_flatten_open_positions(broker, submit, read_positions, report)\nreturn report"
+        },
+        {
+          "file": "agent/src/live/runtime/flatten.py",
+          "lines": "145-151",
+          "snippet": "if allow_flatten is not None:\n    return allow_flatten\nmandate = load_mandate(broker)\nif mandate is None:\n    # No valid mandate on file → fail-closed to cancel-only.\n    return False\nreturn bool(getattr(mandate, \"flatten_on_halt\", False))"
+        },
+        {
+          "file": "agent/src/live/runtime/runner.py",
+          "lines": "577-594",
+          "snippet": "if self._flatten_fired or self._submit_fn is None:\n    return\nself._flatten_fired = True\ntry:\n    self._flatten_fn(\n        self.broker,\n        self._submit_fn,\n        self._read_positions,\n        self._read_open_orders,\n    )\nexcept Exception as exc:  # noqa: BLE001 — surfaced via audit, never retried\n    logger.exception(\"preemptive flatten failed for %s\", self.broker)\n    self._audit(\n        kind=\"breach\",\n        outcome=\"error\",\n        intent=\"preemptive halt sweep failed — not retried (no-retry §8.5)\",\n        error=str(exc),\n    )"
+        },
+        {
+          "file": "agent/api_server.py",
+          "lines": "3193",
+          "snippet": "submit_fn=_submit,"
+        }
+      ]
+    },
+    {
+      "name": "default-deny read/write classification of broker tools",
+      "what_it_is": "Each discovered live-broker MCP tool is classified by a three-tier ladder: a curated per-broker name map wins; otherwise an explicit readOnlyHint annotation decides; everything else is UNKNOWN. Only READ tools are registered as plain tools; WRITE and UNKNOWN tools are wrapped in the mandate gate.",
+      "function_in_system": "Runs at tool registration for live broker servers, before the model sees the tool list. Ensures that tools of an untrusted remote server reach the model only behind the order gate unless they are positively identified as read-only. Otherwise a new, renamed or mis-annotated order tool bypasses every pre-trade check.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/live/classification.py",
+          "lines": "74-89",
+          "snippet": "# Tier 2 wins whenever the map names the tool.\nif curated is not None:\n    pinned = curated.get(name)\n    if pinned is not None:\n        return pinned\n\n# Tier 1: explicit annotation. Absent (None) hint falls through.\nif annotations is not None:\n    hint = getattr(annotations, \"readOnlyHint\", None)\n    if hint is True:\n        return ToolClass.READ\n    if hint is False:\n        return ToolClass.WRITE\n\n# Tier 3: default-deny.\nreturn ToolClass.UNKNOWN"
+        },
+        {
+          "file": "agent/src/live/registry.py",
+          "lines": "209-223",
+          "snippet": "tool_class = classify_tool(spec.remote_name, spec.annotations, curated)\nif tool_class is ToolClass.READ:\n    tool.is_readonly = True\n    result.append(tool)\nelif halted:\n    # WRITE/UNKNOWN + halt tripped -> do not even hand it to the model.\n    logger.warning(\n        \"live kill switch tripped for broker '%s' — omitting order tool \"\n        \"'%s' from the registry\",\n        broker,\n        spec.remote_name,\n    )\nelse:\n    # WRITE or UNKNOWN -> mandate-gated (fail-closed for UNKNOWN).\n    result.append(LiveOrderGuardTool(tool._adapter, spec, broker=broker))"
+        }
+      ]
+    },
+    {
+      "name": "pre-tick broker reconciliation with halt on ambiguous fills",
+      "what_it_is": "Before every autonomous tick the runner diffs broker truth (positions, open orders via read-only callables) against the last persisted runtime_state.json. Recorded orders the broker no longer shows are classified orphan_order (confirmed) or mid_order_ambiguous (submitted but unconfirmed); unrecorded broker positions are unknown_fill. Either of the latter two sets requires_halt and the tick aborts with no resend. New state is persisted atomically only after a clean reconcile; a corrupt state file is renamed aside. Reconcile exceptions and unrecognized report shapes also abort the tick.",
+      "function_in_system": "First step of each live runner tick after the halt and expiry checks, before the agent is invoked. Handles crashes between order submission and audit write by surfacing the ambiguity to a human. Otherwise a restarted runner re-sends an order that may already have filled and double-trades real money.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/live/runtime/reconcile.py",
+          "lines": "342-362",
+          "snippet": "# Persist fresh last-known state ONLY on a clean reconcile. We never\n# overwrite the durable record of an unresolved ambiguity — the runner needs\n# the original recorded order to surface it to a human.\nif report.is_safe:\n    _persist_state(broker, broker_orders, broker_positions, balance, report.ts)\n    report = ReconcileReport(\n        broker=report.broker,\n        ts=report.ts,\n        deltas=report.deltas,\n        recorded_client_order_ids=report.recorded_client_order_ids,\n        state_persisted=True,\n        had_prior_state=report.had_prior_state,\n    )\nelse:\n    logger.warning(\n        \"reconcile(%s): UNSAFE — %d halting delta(s); state NOT advanced\",\n        broker,\n        sum(1 for d in report.deltas if d.kind in _HALTING_KINDS),\n    )\n\nreturn report"
+        },
+        {
+          "file": "agent/src/live/runtime/reconcile.py",
+          "lines": "422-437",
+          "snippet": "else:\n    deltas.append(\n        ReconcileDelta(\n            kind=DeltaKind.MID_ORDER_AMBIGUOUS,\n            subject=\"order\",\n            identity=identity or (coid or \"<unknown>\"),\n            client_order_id=coid,\n            detail=(\n                \"submitted-but-unconfirmed order: may have filled before \"\n                \"the audit write; no-retry rule forbids resend — surfaced \"\n                \"for halt\"\n            ),\n            recorded=dict(recorded),\n            broker=None,\n        )\n    )"
+        },
+        {
+          "file": "agent/src/live/runtime/reconcile.py",
+          "lines": "529-543",
+          "snippet": "try:\n    raw = json.loads(path.read_text(encoding=\"utf-8\"))\nexcept (OSError, ValueError) as exc:\n    corrupt = path.with_name(f\"{path.name}.corrupt-{int(datetime.now().timestamp())}\")\n    try:\n        os.replace(path, corrupt)\n    except OSError:\n        pass\n    logger.warning(\n        \"reconcile(%s): runtime_state.json unreadable (%s); renamed to %s, cold start\",\n        broker,\n        exc,\n        corrupt.name,\n    )\n    return None"
+        },
+        {
+          "file": "agent/src/live/runtime/runner.py",
+          "lines": "147-158",
+          "snippet": "if report is None:\n    return True\n# Positive-safety attributes: present + truthy means safe.\nfor safe_attr in (\"safe_to_trade\", \"is_safe\", \"safe\", \"ok\", \"clean\"):\n    if hasattr(report, safe_attr):\n        return not bool(getattr(report, safe_attr))\n# Negative attributes: present + truthy means unsafe.\nfor unsafe_attr in (\"unsafe\", \"ambiguous\", \"has_discrepancies\", \"discrepancies\"):\n    if hasattr(report, unsafe_attr):\n        return bool(getattr(report, unsafe_attr))\n# An unrecognized report shape cannot be proven safe.\nreturn True"
+        },
+        {
+          "file": "agent/src/live/runtime/runner.py",
+          "lines": "473-485",
+          "snippet": "if self._report_unsafe(report):\n    logger.warning(\"live reconcile unsafe for %s — aborting tick\", self.broker)\n    audit_id = self._audit(\n        kind=\"breach\",\n        outcome=\"blocked\",\n        intent=\"reconcile flagged unsafe/ambiguous — no auto-resend\",\n    )\n    return TickResult(\n        outcome=TICK_RECONCILE_UNSAFE,\n        broker=self.broker,\n        reason=\"reconcile flagged unsafe/ambiguous broker state\",\n        audit_id=audit_id,\n    ).to_dict()"
+        }
+      ]
+    },
+    {
+      "name": "time-bounded mandate with proactive expiry stop",
+      "what_it_is": "Committed mandates carry expires_at, defaulting to 30 days after commit. The order gate denies at or after expiry and treats an unparseable expiry as expired. The live runner checks expiry on every tick before invoking the agent, trips a per-broker HALT on expiry, and refuses to start its loop with an expired mandate.",
+      "function_in_system": "Checked at order time and at the start of every autonomous tick. Limits how long a single user authorization can drive autonomous trading. Otherwise a stale authorization keeps the agent trading indefinitely after the user has lost track of it.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/live/order_guard.py",
+          "lines": "545-552",
+          "snippet": "raw = mandate.consent.expires_at\ntry:\n    expires = datetime.fromisoformat(raw)\nexcept (TypeError, ValueError):\n    return True\nif expires.tzinfo is None:\n    expires = expires.replace(tzinfo=timezone.utc)\nreturn datetime.now(timezone.utc) >= expires"
+        },
+        {
+          "file": "agent/src/live/runtime/runner.py",
+          "lines": "434-435",
+          "snippet": "if _mandate_is_expired(mandate, now):\n    return self._expired_result()"
+        },
+        {
+          "file": "agent/src/live/runtime/runner.py",
+          "lines": "618-623",
+          "snippet": "try:\n    self._trip_halt(\n        _RUNNER_TRIP_SOURCE,\n        \"mandate expired — proactive runner stop\",\n        broker=self.broker,\n    )"
+        },
+        {
+          "file": "agent/src/live/mandate/commit.py",
+          "lines": "380-381",
+          "snippet": "created = _utcnow()\nexpires = created + timedelta(days=max(1, int(lifetime_days)))"
+        }
+      ]
+    },
+    {
+      "name": "structural isolation of mandate writes from the agent",
+      "what_it_is": "The mandate store exposes only load_mandate, which reads a fixed user-side path and returns None on any missing, malformed or structurally invalid file (the gate then denies). The only writer, commit_mandate, is a plain function called by the API commit endpoint, outside the tool registry; it requires consent_ack is True, reloads the live proposal, re-validates the chosen profile against the ceilings the user saw and invalidates the proposal.",
+      "function_in_system": "Guards the authority source that the order gate trusts. Keeps limit changes on a human-only path. Otherwise a hallucinating or prompt-injected model could create or widen its own trading mandate.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/live/mandate/store.py",
+          "lines": "3-11",
+          "snippet": "This module exposes exactly ONE public function, :func:`load_mandate`. There is\ndeliberately NO ``save_mandate`` / ``set_mandate`` here or in any module\nimportable by the agent loop or registered as a tool — mandate writes happen\nonly in the consent UX commit path (``src.live.mandate.commit``, owned by a\nseparate parcel), which is not reachable from ``loop.py`` / ``worker.py`` /\nany ``BaseTool.execute()``. This mirrors the #142 swarm-config trust template:\nthe protected file is resolved at boot from a fixed user-side path, never from\ncaller input, agent tool args, or session ``variables`` (see\nthe live-trading SPEC §3 trust invariant, Mandate §2)."
+        },
+        {
+          "file": "agent/src/live/mandate/store.py",
+          "lines": "58-70",
+          "snippet": "path = broker_dir(broker) / _MANDATE_FILENAME\nif not path.is_file():\n    return None\ntry:\n    raw = json.loads(path.read_text(encoding=\"utf-8\"))\nexcept (OSError, ValueError) as exc:\n    logger.warning(\"live mandate for %s is unreadable/invalid JSON: %s\", broker, exc)\n    return None\ntry:\n    return _parse_mandate(raw)\nexcept (KeyError, TypeError, ValueError) as exc:\n    logger.warning(\"live mandate for %s failed structural validation: %s\", broker, exc)\n    return None"
+        },
+        {
+          "file": "agent/src/live/mandate/commit.py",
+          "lines": "367-378",
+          "snippet": "if consent_ack is not True:\n    raise CommitError(\"commit requires an explicit consent_ack=true\")\n\nproposal = _load_proposal(broker, proposal_id)\nif proposal is None:\n    raise CommitError(f\"proposal {proposal_id!r} is not live (already committed, expired, or unknown)\")\n\nresolved = _resolve_profile(proposal, ordinal, adjustments)\n\nceilings = dict(ceilings_ref) if ceilings_ref is not None else dict(proposal.get(\"ceilings\") or {})\nif ceilings and not _profile_fits_ceilings(resolved, ceilings):\n    raise CommitError(\"resolved profile exceeds the account ceilings — refusing to commit\")"
+        }
+      ]
+    },
+    {
+      "name": "redacted append-only live-action audit ledger",
+      "what_it_is": "Every gate decision, placed or failed order, live cancel, halt sweep call and runner tick outcome is written as one record to live/audit.jsonl in append mode, optionally mirrored to the run trace and the SSE bus. Records are passed through redact_payload before any sink. Audit write failures are logged and never block the decision.",
+      "function_in_system": "Observability layer around all live-trading actions, separate from per-run traces so it survives run cleanup. Provides the record needed to diagnose and reconstruct what happened with real money after a failure. Otherwise gate refusals, broker errors and sweep actions leave no durable trail.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/live/audit.py",
+          "lines": "220-238",
+          "snippet": "record = event.to_record()\n\n# Sink 1: dedicated compliance ledger (always, append-only).\npath = audit_ledger_path()\npath.parent.mkdir(parents=True, exist_ok=True, mode=0o700)\nline = json.dumps(record, ensure_ascii=False)\nwith path.open(\"a\", encoding=\"utf-8\") as handle:\n    handle.write(line + \"\\n\")\n\n# Sink 2: per-run trace (optional). type=\"live_action\" sits alongside\n# tool_call / tool_result for this run.\nif trace_writer is not None:\n    trace_writer.write({\"type\": _LIVE_ACTION_TRACE_TYPE, **record})\n\n# Sink 3: surface / SSE bus (optional, non-blocking notification).\nif event_callback is not None:\n    event_callback(_LIVE_ACTION_EVENT, record)\n\nreturn record"
+        },
+        {
+          "file": "agent/src/live/audit.py",
+          "lines": "163-179",
+          "snippet": "record: dict[str, Any] = {\n    \"audit_id\": self.audit_id,\n    \"ts\": self.ts,\n    \"session_id\": self.session_id,\n    \"kind\": self.kind,\n    \"intent_normalized\": self.intent_normalized,\n    \"mandate_snapshot_ref\": self.mandate_snapshot_ref,\n    \"consent_record_ref\": self.consent_record_ref,\n    \"broker_request\": self.broker_request,\n    \"broker_response\": self.broker_response,\n    \"outcome\": self.outcome,\n    \"gate_decision\": self.gate_decision,\n    \"server\": self.server,\n    \"remote_tool\": self.remote_tool,\n    \"error\": self.error,\n}\nreturn redact_payload(record)"
+        },
+        {
+          "file": "agent/src/live/order_guard.py",
+          "lines": "535-537",
+          "snippet": "except Exception as exc:  # auditing must never block a decision\n    logger.warning(\"live-action audit write failed (%s): %s\", kind, exc)\n    return None"
+        }
+      ]
+    },
+    {
+      "name": "mandate pinned inline in the autonomous runner prompt",
+      "what_it_is": "The live runner builds each tick prompt with the full mandate inline (hard caps, universe, expiry) and instructs the agent to trade inside the limits and defer on any action that would breach them.",
+      "function_in_system": "Prompt construction for every autonomous tick. Keeps the limits visible to the model even after loop context compaction, so the agent avoids proposing orders the gate would refuse. Otherwise the model plans against limits it no longer sees and burns turns on refused orders.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent/src/live/runtime/runner.py",
+          "lines": "9-12",
+          "snippet": "``halt → proactive expiry → reconciliation → autonomous turn → audit``. The\nmandate is **pinned inline** into the turn prompt this runner constructs so it\nsurvives ``loop.py`` 5-layer compaction — done in the runner-owned prompt\nstring, never by editing the protected ``src/agent/context.py``."
+        },
+        {
+          "file": "agent/src/live/runtime/runner.py",
+          "lines": "232-236",
+          "snippet": "return (\n    \"You are running an AUTONOMOUS live-trading tick under a bounded \"\n    \"mandate. Trade freely INSIDE the limits below; you must NEVER place an \"\n    \"order that would breach any limit — defer instead. The enforcement \"\n    \"gate and kill switch are hard backstops outside your control.\\n\\n\""
+        }
+      ]
+    },
+    {
+      "name": "market-level data-loader fallback chain with runtime empty-result fallback",
+      "what_it_is": "FALLBACK_CHAINS fixes an ordered source list per market, ranked by IP-ban risk first and data quality second. resolve_loader walks the chain and skips loaders whose constructor raises or whose is_available() returns False. An explicitly requested but unavailable source falls back to the chain of its market, with 'local' excluded so it fails loudly. When the chosen loader returns an empty result at fetch time, the runner tries the remaining sources of the chain (single-source and auto paths).",
+      "function_in_system": "Runs inside the backtest subprocess launched by the backtest tool, before data loading; the live mandate gate reuses resolve_loader. Absorbs missing API keys, uninstalled packages, IP bans and empty responses from a single provider. Otherwise the backtest ends with 'No data fetched' and the agent receives an error observation although another source could serve the same symbols.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/backtest/loaders/registry.py",
+          "lines": "119-133",
+          "snippet": "# Chains are ordered by IP-ban risk first (lighter, throttle-tolerant public\n# endpoints lead; key-gated REST and rate-limit-prone sources trail), then by\n# data quality. Eastmoney/Sina/Stooq/Yahoo are unauthenticated public sources\n# that must be politely throttled; Finnhub/AlphaVantage/Tiingo/FMP are key-gated\n# REST fallbacks placed deeper in the chain.\nFALLBACK_CHAINS: dict[str, list[str]] = {\n    \"a_share\":   [\"tencent\", \"mootdx\", \"eastmoney\", \"baostock\", \"akshare\", \"tushare\", \"local\"],\n    \"us_equity\": [\"yahoo\", \"stooq\", \"sina\", \"eastmoney\", \"yfinance\", \"tiingo\", \"fmp\", \"finnhub\", \"alphavantage\", \"akshare\", \"local\"],\n    \"hk_equity\": [\"eastmoney\", \"yahoo\", \"futu\", \"yfinance\", \"akshare\", \"local\"],\n    \"crypto\":    [\"okx\", \"ccxt\", \"yfinance\", \"local\"],\n    \"futures\":   [\"tushare\", \"akshare\", \"local\"],\n    \"fund\":      [\"tushare\", \"akshare\", \"local\"],\n    \"macro\":     [\"akshare\", \"tushare\", \"local\"],\n    \"forex\":     [\"akshare\", \"yfinance\", \"local\"],\n}"
+        },
+        {
+          "file": "agent/backtest/loaders/registry.py",
+          "lines": "154-167",
+          "snippet": "for name in chain:\n    if name not in LOADER_REGISTRY:\n        continue\n    tried.append(name)\n    # Issue #50 — some loaders (e.g. Tushare) call into the SDK during\n    # __init__ and raise on missing credentials. Treat that the same as\n    # is_available()=False so the fallback chain keeps walking.\n    try:\n        loader = LOADER_REGISTRY[name]()\n    except Exception as exc:\n        logger.debug(\"loader %s failed to construct: %s\", name, exc)\n        continue\n    if loader.is_available():\n        return loader"
+        },
+        {
+          "file": "agent/backtest/loaders/registry.py",
+          "lines": "204-222",
+          "snippet": "if source in _NO_NETWORK_FALLBACK_SOURCES:\n    raise NoAvailableSourceError(\n        f\"Data source '{source}' is unavailable and does not fall back to a \"\n        f\"network source. Check your local Data Bridge config \"\n        f\"(~/.vibe-trading/data-bridge/config.yaml) — it must exist and list \"\n        f\"at least one source.\"\n    )\n\n# Source unavailable — try same-market fallback\nfor market in loader_cls.markets:\n    try:\n        fallback = resolve_loader(market)\n        logger.warning(\n            \"%s is unavailable, falling back to %s for market %s\",\n            source, fallback.name, market,\n        )\n        return type(fallback)\n    except NoAvailableSourceError:\n        continue"
+        },
+        {
+          "file": "agent/backtest/runner.py",
+          "lines": "484-502",
+          "snippet": "# Runtime fallback: try next sources in chain when primary returns empty\nif not data_map and codes:\n    market = _detect_market(codes[0])\n    for fb_name in FALLBACK_CHAINS.get(market, []):\n        if fb_name == source or fb_name not in LOADER_REGISTRY:\n            continue\n        fb_loader = LOADER_REGISTRY[fb_name]()\n        if not fb_loader.is_available():\n            continue\n        fb_codes = _normalize_codes(codes, fb_name)\n        data_map = fb_loader.fetch(\n            fb_codes, config.get(\"start_date\", \"\"),\n            config.get(\"end_date\", \"\"), interval=interval,\n        )\n        if data_map:\n            logger.info(\"Runtime fallback: %s -> %s\", source, fb_name)\n            source = fb_name\n            loader = fb_loader\n            break"
+        },
+        {
+          "file": "agent/backtest/runner.py",
+          "lines": "649-661",
+          "snippet": "# Runtime fallback: try remaining sources when primary returns empty\nif not result:\n    for fb_name in FALLBACK_CHAINS.get(market, []):\n        if fb_name == src_name or fb_name not in LOADER_REGISTRY:\n            continue\n        fb_loader = LOADER_REGISTRY[fb_name]()\n        if not fb_loader.is_available():\n            continue\n        fb_codes = _normalize_codes(market_codes, fb_name)\n        result = fb_loader.fetch(fb_codes, start_date, end_date, interval=interval)\n        if result:\n            logger.info(\"Runtime fallback: %s -> %s for %s\", src_name, fb_name, market)\n            break"
+        }
+      ]
+    },
+    {
+      "name": "bounded retry with wall-clock fetch budget for market-data APIs",
+      "what_it_is": "retry_with_budget retries only exception classes the caller declares transient, up to 3 retries with backoff (0.5, 1.5, 4.0) s capped at the remaining budget, and raises TimeoutError at the end. check_budget aborts paginated fetches once a per-fetch deadline passes (OKX_FETCH_BUDGET_S / CCXT_FETCH_BUDGET_S, default 60 s).",
+      "function_in_system": "Wraps each page request of the OKX and ccxt loaders inside the backtest subprocess. Absorbs transient API failures and caps the time a slow provider can consume. Otherwise a single network hiccup aborts the fetch, or a stalled pagination eats the whole 300 s runner timeout of the backtest tool call.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/backtest/loaders/base.py",
+          "lines": "108-109",
+          "snippet": "DEFAULT_BACKOFF: tuple[float, ...] = (0.5, 1.5, 4.0)\nDEFAULT_MAX_RETRIES = 3"
+        },
+        {
+          "file": "agent/backtest/loaders/base.py",
+          "lines": "157-159",
+          "snippet": "if time.monotonic() > deadline:\n    suffix = f\" exceeded {budget_s:.0f}s budget\" if budget_s is not None else \" exceeded budget\"\n    raise TimeoutError(f\"{label}{suffix}\")"
+        },
+        {
+          "file": "agent/backtest/loaders/base.py",
+          "lines": "203-216",
+          "snippet": "if len(backoff) < max_retries:\n    raise ValueError(\n        f\"backoff has {len(backoff)} entries; need >= max_retries ({max_retries})\"\n    )\nfor attempt in range(max_retries + 1):\n    try:\n        return fn()\n    except transient as exc:\n        remaining = deadline - time.monotonic()\n        if attempt == max_retries or remaining <= 0:\n            raise TimeoutError(\n                f\"{label} failed after {attempt + 1} attempt(s): {exc}\"\n            ) from exc\n        time.sleep(min(backoff[attempt], max(0.0, remaining)))"
+        },
+        {
+          "file": "agent/backtest/loaders/okx.py",
+          "lines": "125-129, 145-150",
+          "snippet": "deadline = time.monotonic() + _OKX_FETCH_BUDGET_S\nlabel = f\"OKX fetch for {inst_id}\"\n\nfor _ in range(max_pages):\n    check_budget(deadline, label, budget_s=_OKX_FETCH_BUDGET_S)\n...\ndata = retry_with_budget(\n    _do_request,\n    transient=requests.RequestException,\n    deadline=deadline,\n    label=label,\n)"
+        }
+      ]
+    },
+    {
+      "name": "per-host request throttling with jitter for ban-prone data sources",
+      "what_it_is": "A process-wide HostThrottle enforces a minimum spacing between requests per host bucket (e.g. Eastmoney 1.0 s, overridable per env var) plus up to 0.4 s random jitter, and reuses one requests.Session per bucket. About ten loaders and clients route their calls through throttled_get.",
+      "function_in_system": "Sits under every fetch of the free public data loaders in the backtest subprocess. Prevents request bursts that trigger temporary IP bans by providers such as Eastmoney. Otherwise one burst locks the source for all following backtests and pushes every fetch onto the fallback chain.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/backtest/loaders/_http.py",
+          "lines": "1-8",
+          "snippet": "\"\"\"Shared HTTP helpers for direct-API loaders: per-host throttling + JSON/CSV GET.\n\nSeveral free providers — Eastmoney most notably — rate-limit by source IP and\nwill temporarily ban a client that bursts requests. Rather than scatter sleep\ncalls across loaders, every ban-prone call routes through :func:`throttled_get`\nhere, which enforces a minimum spacing between consecutive requests to the same\n*host bucket* (plus a little jitter so concurrent workers don't lock-step) and\nreuses one :class:`requests.Session` per process so TCP/TLS setup is amortized."
+        },
+        {
+          "file": "agent/backtest/loaders/_http.py",
+          "lines": "70-85",
+          "snippet": "if min_interval <= 0:\n    return\nwith self._lock:\n    now = time.monotonic()\n    last = self._last.get(bucket)\n    if last is None or now >= last + min_interval:\n        # Slot is free right now — fire immediately, no jitter needed.\n        fire_at = now\n    else:\n        # Chain off the previous reservation and add jitter to desync\n        # concurrent callers, baking the jitter into the stored slot.\n        fire_at = last + min_interval + random.uniform(0.0, _JITTER_MAX_S)\n    self._last[bucket] = fire_at\nsleep_for = fire_at - time.monotonic()\nif sleep_for > 0:\n    time.sleep(sleep_for)"
+        },
+        {
+          "file": "agent/backtest/loaders/_http.py",
+          "lines": "147-152",
+          "snippet": "merged_headers = {\"User-Agent\": DEFAULT_USER_AGENT}\nif headers:\n    merged_headers.update(headers)\n_THROTTLE.wait(host_key, min_interval)\nsession = _session_for(host_key)\nreturn session.get(url, params=params, headers=merged_headers, timeout=timeout)"
+        },
+        {
+          "file": "agent/backtest/loaders/eastmoney_client.py",
+          "lines": "39-40",
+          "snippet": "_MIN_INTERVAL_ENV = \"VIBE_TRADING_EASTMONEY_MIN_INTERVAL\"\n_DEFAULT_MIN_INTERVAL = 1.0"
+        }
+      ]
+    },
+    {
+      "name": "pre-execution validation of agent-authored backtest config and signal engine",
+      "what_it_is": "Before any data is fetched, the runner validates config.json against a Pydantic schema (non-empty codes, date format, start <= end, interval, engine, source in the shared VALID_SOURCES set). It then AST-parses the agent-written signal_engine.py and rejects executable top-level statements, decorators, non-literal defaults, unsafe annotations and circular self-imports, and checks that SignalEngine() is constructible with no arguments and has a callable generate. Each failure is printed as a JSON error envelope for the tool result.",
+      "function_in_system": "Sits between the agent writing config.json and code/signal_engine.py and the backtest execution, inside the backtest tool call. Catches malformed LLM-generated artifacts early and returns an actionable message so the next turn can fix them. Otherwise the run fails deep inside a loader or engine after network cost with a raw traceback, or agent code executes at import time.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/backtest/loaders/registry.py",
+          "lines": "27-33",
+          "snippet": "# Canonical set of accepted data-source names: every registered loader plus the\n# ``\"auto\"`` cross-market selector. Single source of truth shared by the backtest\n# config schema (``backtest.runner.BacktestConfigSchema``) and the agent-facing\n# backtest tool (``src.tools.backtest_tool``) so the two can never drift apart.\n# Keep in sync with ``_loader_modules`` below — the regression test\n# ``test_valid_sources_covers_all_registered_loaders`` enforces full coverage.\nVALID_SOURCES: set[str] = {"
+        },
+        {
+          "file": "agent/backtest/runner.py",
+          "lines": "99-104, 136-142",
+          "snippet": "@field_validator(\"source\")\n@classmethod\ndef valid_source(cls, v: str) -> str:\n    if v not in VALID_SOURCES:\n        raise ValueError(f\"unsupported source {v!r}, must be one of {VALID_SOURCES}\")\n    return v\n...\n@model_validator(mode=\"after\")\ndef start_before_end(self) -> \"BacktestConfigSchema\":\n    if pd.Timestamp(self.start_date) > pd.Timestamp(self.end_date):\n        raise ValueError(\n            f\"start_date ({self.start_date}) must be <= end_date ({self.end_date})\"\n        )\n    return self"
+        },
+        {
+          "file": "agent/backtest/runner.py",
+          "lines": "423-429",
+          "snippet": "# Validate config schema\ntry:\n    BacktestConfigSchema(**raw_config)\nexcept Exception as exc:\n    errors = str(exc)\n    print(json.dumps({\"error\": f\"Invalid config: {errors}\"}))\n    sys.exit(1)"
+        },
+        {
+          "file": "agent/backtest/runner.py",
+          "lines": "243-270",
+          "snippet": "def _validate_signal_engine_source(file_path: Path) -> None:\n    \"\"\"Reject import-time executable statements before loading signal_engine.py.\"\"\"\n    try:\n        tree = ast.parse(file_path.read_text(encoding=\"utf-8\"), filename=str(file_path))\n    except SyntaxError as exc:\n        raise ValueError(f\"Invalid signal_engine.py syntax: {exc}\") from exc\n\n    for node in tree.body:\n        if isinstance(node, ast.Expr) and isinstance(node.value, ast.Constant):\n            continue\n        if isinstance(node, ast.ImportFrom) and node.module == \"signal_engine\":\n            raise ValueError(\n                \"Circular import: 'from signal_engine import ...' imports the file from itself. \"\n                \"Remove this import — SignalEngine is defined in this same file.\"\n            )\n        if isinstance(node, (ast.Import, ast.ImportFrom)):\n            continue\n        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):\n            _validate_function_def(node)\n            continue\n        if isinstance(node, ast.ClassDef):\n            _validate_class_body(node)\n            continue\n        if _is_safe_constant_assignment(node):\n            continue\n        raise ValueError(\n            f\"Executable top-level statement {type(node).__name__} is not allowed\"\n        )"
+        },
+        {
+          "file": "agent/backtest/runner.py",
+          "lines": "273-290",
+          "snippet": "def _validate_signal_engine_class(engine_cls) -> None:\n    \"\"\"Pre-flight check: SignalEngine can be instantiated with no args and has generate().\"\"\"\n    sig = inspect.signature(engine_cls.__init__)\n    required = [\n        p.name for p in sig.parameters.values()\n        if p.name != \"self\" and p.default is inspect.Parameter.empty\n        and p.kind not in (inspect.Parameter.VAR_POSITIONAL, inspect.Parameter.VAR_KEYWORD)\n    ]\n    if required:\n        raise ValueError(\n            f\"SignalEngine.__init__() has required arguments {required}. \"\n            \"All parameters must have default values so the runner can call SignalEngine().\"\n        )\n    if not callable(getattr(engine_cls, \"generate\", None)):\n        raise ValueError(\n            \"SignalEngine must have a callable 'generate' method. \"\n            \"Expected: def generate(self, data_map: Dict[str, pd.DataFrame]) -> Dict[str, pd.Series]\"\n        )"
+        },
+        {
+          "file": "agent/backtest/runner.py",
+          "lines": "441-449",
+          "snippet": "try:\n    signal_module = _load_module_from_file(signal_path, \"signal_engine\")\nexcept ValueError as exc:\n    # Source-level AST validation (circular self-import, unsafe imports,\n    # decorators, top-level statements) raises ValueError. Surface it as a\n    # clean JSON envelope instead of a raw traceback so the agent gets an\n    # actionable message.\n    print(json.dumps({\"error\": f\"SignalEngine source error: {exc}\"}))\n    sys.exit(1)"
+        }
+      ]
+    },
+    {
+      "name": "centralized OHLC sanity filter at the loader boundary",
+      "what_it_is": "validate_ohlc drops bars with high < low, a high/low that fails to bracket open/close, or non-positive prices. The runner applies it once at the point where all fetch paths converge (auto, single source, runtime fallback).",
+      "function_in_system": "Between data fetch and the backtest engine. Stops dirty provider data from turning into NaN/inf metrics, which break the strict allow_nan=False JSON serializers that produce the tool output. Otherwise a single corrupt bar yields a crashed or meaningless backtest result for the agent.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/backtest/loaders/base.py",
+          "lines": "53-58",
+          "snippet": "Loaders only drop NaN rows, so structurally dirty bars — ``high < low``,\na non-positive price, or a high/low that fails to bracket open/close —\nflow straight into the backtest and surface downstream as NaN/inf metrics\nthat break the strict (``allow_nan=False``) JSON serializers. This is the\ncanonical loader-boundary check; call it after the existing ``dropna`` so a\nsingle sanity pass guards every source."
+        },
+        {
+          "file": "agent/backtest/loaders/base.py",
+          "lines": "78-100",
+          "snippet": "open_, high, low, close = (frame[c] for c in required)\ninvalid = (\n    (high < low)\n    | (high < open_)\n    | (high < close)\n    | (low > open_)\n    | (low > close)\n    | (open_ <= 0)\n    | (high <= 0)\n    | (low <= 0)\n    | (close <= 0)\n)\nn_invalid = int(invalid.sum())\nif n_invalid == 0:\n    return frame\n\nif strategy == \"raise\":\n    raise ValueError(f\"{n_invalid} bar(s) violate OHLC invariants\")\nif strategy == \"warn\":\n    logger.warning(\"OHLC validation: %d bar(s) violate invariants (kept)\", n_invalid)\n    return frame\nlogger.warning(\"OHLC validation: dropping %d invalid bar(s)\", n_invalid)\nreturn frame[~invalid]"
+        },
+        {
+          "file": "agent/backtest/runner.py",
+          "lines": "504-509",
+          "snippet": "# Loader-boundary OHLC sanity for every source, centralized at the one\n# point all fetch paths converge (auto / single / runtime fallback).\ndata_map = _sanitize_data_map(data_map)\nif not data_map:\n    print(json.dumps({\"error\": \"No data fetched\"}))\n    sys.exit(1)"
+        }
+      ]
+    },
+    {
+      "name": "statistical validation of backtest results (Monte Carlo, bootstrap, walk-forward)",
+      "what_it_is": "When config.json carries a 'validation' key, the engine runs a Monte Carlo permutation test of trade PnL order (default 1000 simulations, fixed seed), a bootstrap Sharpe confidence interval and a walk-forward consistency check, and writes the results to artifacts/validation.json. The system prompt tells the agent to request the Monte Carlo test for strategies expected to produce 10 or more trades and to report the p-values, warning when p > 0.05.",
+      "function_in_system": "Runs after metric calculation inside the backtest tool call and feeds Layer 4 of the post-backtest analysis. Guards against the domain failure mode of reporting a strategy whose performance is indistinguishable from random ordering or concentrated in one period. Otherwise the agent presents overfitted or lucky backtest numbers as a working strategy.",
+      "activation": "default_on",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent/src/agent/context.py",
+          "lines": "43",
+          "snippet": "2. `write_file(\"config.json\", ...)` — source, codes, dates, parameters. If the strategy is expected to produce ≥10 trades, include `\"validation\": {{\"monte_carlo\": {{\"n_simulations\": 1000}}}}` in config.json for Monte Carlo testing"
+        },
+        {
+          "file": "agent/src/agent/context.py",
+          "lines": "78-81",
+          "snippet": "**Layer 4 — Monte Carlo Permutation Test** (if `artifacts/validation.json` exists and contains `monte_carlo`):\n- Read `artifacts/validation.json` → `monte_carlo` section\n- Report: actual Sharpe, p-value, actual max drawdown, p-value\n- If p-value > 0.05, warn \"strategy performance is not statistically distinguishable from random trade ordering\""
+        },
+        {
+          "file": "agent/backtest/engines/base.py",
+          "lines": "469-478",
+          "snippet": "# 7. Validation (optional — triggered by config[\"validation\"])\nif config.get(\"validation\"):\n    from backtest.validation import run_validation\n    v_results = run_validation(\n        config, equity_series, self.trades, self.initial_capital, bars_per_year,\n    )\n    m[\"validation\"] = v_results\n    # Write validation.json artifact\n    v_path = run_dir / \"artifacts\" / \"validation.json\"\n    v_path.write_text(json.dumps(v_results, indent=2, ensure_ascii=False), encoding=\"utf-8\")"
+        },
+        {
+          "file": "agent/backtest/validation.py",
+          "lines": "261-294",
+          "snippet": "v_cfg = config.get(\"validation\", {})\nresults: Dict[str, Any] = {}\n\nif \"monte_carlo\" in v_cfg:\n    mc_cfg = v_cfg[\"monte_carlo\"] if isinstance(v_cfg[\"monte_carlo\"], dict) else {}\n    results[\"monte_carlo\"] = monte_carlo_test(\n        trades,\n        initial_capital,\n        n_simulations=mc_cfg.get(\"n_simulations\", 1000),\n        seed=mc_cfg.get(\"seed\", 42),\n    )\n\nif \"bootstrap\" in v_cfg:\n    bs_cfg = v_cfg[\"bootstrap\"] if isinstance(v_cfg[\"bootstrap\"], dict) else {}\n    results[\"bootstrap\"] = bootstrap_sharpe_ci(\n        equity_curve,\n        bars_per_year=bars_per_year,\n        n_bootstrap=bs_cfg.get(\"n_bootstrap\", 1000),\n        confidence=bs_cfg.get(\"confidence\", 0.95),\n        seed=bs_cfg.get(\"seed\", 42),\n    )\n\nif \"walk_forward\" in v_cfg:\n    wf_cfg = v_cfg[\"walk_forward\"] if isinstance(v_cfg[\"walk_forward\"], dict) else {}\n    results[\"walk_forward\"] = walk_forward_analysis(\n        equity_curve,\n        trades,\n        n_windows=wf_cfg.get(\"n_windows\", 5),\n        bars_per_year=bars_per_year,\n    )\n\nreturn results"
+        },
+        {
+          "file": "agent/backtest/validation.py",
+          "lines": "49-66",
+          "snippet": "if len(trades) < 3:\n    return {\"error\": \"need at least 3 trades\", \"p_value_sharpe\": 1.0}\n\npnls = np.array([t.pnl for t in trades])\nactual = _path_metrics(pnls, initial_capital)\n\nrng = np.random.default_rng(seed)\nsharpe_count = 0\ndd_count = 0\nsim_sharpes = []\n\nfor _ in range(n_simulations):\n    shuffled = rng.permutation(pnls)\n    sim = _path_metrics(shuffled, initial_capital)\n    sim_sharpes.append(sim[\"sharpe\"])\n    if sim[\"sharpe\"] >= actual[\"sharpe\"]:\n        sharpe_count += 1\n    if sim[\"max_dd\"] >= actual[\"max_dd\"]:  # less negative = \"better\""
+        }
+      ]
+    },
+    {
+      "name": "startup preflight with critical LLM-provider gate",
+      "what_it_is": "At startup, checks probe the LLM provider (env vars, OAuth login or a 10 s ping of the base URL) and the data sources (OKX, yfinance, Tushare, akshare, ccxt). Only the LLM check is critical; the CLI run and interactive commands return early when it fails, data-source failures are shown as degraded functionality. The API server runs the checks for display only.",
+      "function_in_system": "Before the first loop invocation. Detects a misconfigured or unreachable provider up front and tells the user which capabilities are degraded. Otherwise the agent starts and fails on the first LLM call, or backtests fail later with opaque data errors.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/preflight.py",
+          "lines": "1-5",
+          "snippet": "\"\"\"Startup preflight checks for data sources and LLM provider.\n\nRuns connectivity checks at startup and prints a status table.\nNon-critical failures are warnings (degraded functionality),\nLLM provider failure is critical (blocks startup)."
+        },
+        {
+          "file": "agent/src/preflight.py",
+          "lines": "104-126",
+          "snippet": "# Ping the base URL\ntry:\n    import requests\n\n    # Strip /v1 suffix for health check, just test TCP+SSL\n    ping_url = base_url.rstrip(\"/\")\n    if ping_url.endswith(\"/v1\"):\n        ping_url = ping_url[:-3]\n    resp = requests.get(ping_url, timeout=10)\n    return CheckResult(\n        name=f\"LLM ({provider})\",\n        status=\"ready\",\n        message=f\"{model} via {diagnostics['base_url']} | {diag_hint}\",\n        impact=\"\",\n    )\nexcept Exception as exc:\n    return CheckResult(\n        name=f\"LLM ({provider})\",\n        status=\"error\",\n        message=f\"{type(exc).__name__}: {exc} | {diag_hint}\",\n        impact=\"agent cannot function\",\n        critical=True,\n    )"
+        },
+        {
+          "file": "agent/src/preflight.py",
+          "lines": "288-291",
+          "snippet": "has_critical = any(r.critical and r.status != \"ready\" for r in results)\nif has_critical:\n    console.print(\"\\n[bold red]Critical check failed - agent cannot start without a working LLM provider.[/bold red]\")\n    console.print(\"[dim]  See: agent/.env.example for configuration reference[/dim]\")"
+        },
+        {
+          "file": "agent/cli/_legacy.py",
+          "lines": "1350-1353",
+          "snippet": "from src.preflight import run_preflight\nresults = run_preflight(console)\nif any(r.critical and r.status != \"ready\" for r in results):\n    return EXIT_RUN_FAILED"
+        }
+      ]
+    },
+    {
+      "name": "opt-in local parquet cache for loader fetches",
+      "what_it_is": "With VIBE_TRADING_DATA_CACHE enabled, per-symbol fetches are cached as parquet under ~/.vibe-trading/cache/loaders, keyed by source, symbol, timeframe, date range and fields with a versioned key. Cache read or write failures fall back to the live fetch.",
+      "function_in_system": "Wraps the per-symbol fetch loop of loaders such as OKX and Yahoo. Saves repeated network requests when the agent iterates on the same strategy and data window, which also lowers IP-ban exposure and backtest latency. Otherwise every iteration refetches identical data.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/backtest/loaders/base.py",
+          "lines": "221-233",
+          "snippet": "# Opt-in local loader cache.\n# ---------------------------------------------------------------------------\n\nLOADER_CACHE_ENV = \"VIBE_TRADING_DATA_CACHE\"\n_LOADER_CACHE_TRUE_VALUES = {\"1\", \"true\", \"yes\", \"on\"}\n# Bump when the key payload or on-disk layout changes so stale entries are\n# simply never matched (old files become unreachable garbage, safe to delete).\n_LOADER_CACHE_VERSION = 2\n\n\ndef loader_cache_enabled() -> bool:\n    \"\"\"Return whether the local market-data cache is explicitly enabled.\"\"\"\n    return os.getenv(LOADER_CACHE_ENV, \"\").strip().lower() in _LOADER_CACHE_TRUE_VALUES"
+        },
+        {
+          "file": "agent/backtest/loaders/base.py",
+          "lines": "363-391",
+          "snippet": "\"\"\"Fetch one DataFrame through the opt-in local cache.\n\nConvenience wrapper over :func:`loader_cache_get` / :func:`loader_cache_put`\nfor the common per-symbol loader loop: return the cached frame when present,\notherwise call ``fetch`` and cache a non-empty result. Cache read/write\nfailures are non-fatal and fall back to ``fetch``.\n\"\"\"\ncached = loader_cache_get(\n    source=source,\n    symbol=symbol,\n    timeframe=timeframe,\n    start_date=start_date,\n    end_date=end_date,\n    fields=fields,\n)\nif cached is not None:\n    return cached\n\nframe = fetch()\nloader_cache_put(\n    source=source,\n    symbol=symbol,\n    timeframe=timeframe,\n    start_date=start_date,\n    end_date=end_date,\n    fields=fields,\n    frame=frame,\n)\nreturn frame"
+        },
+        {
+          "file": "agent/backtest/loaders/okx.py",
+          "lines": "88-92",
+          "snippet": "for symbol in codes:\n    try:\n        df = cached_loader_fetch(\n            source=self.name,\n            symbol=symbol,"
+        }
+      ]
+    },
+    {
+      "name": "crash-safe scheduled research job lifecycle",
+      "what_it_is": "The job store writes atomically (temp file, fsync, os.replace, fsync of the parent dir) and quarantines an unparsable store file, raising CorruptStoreError. On startup the executor resets jobs left RUNNING by a dead process to PENDING once. FAILED is terminal, so a job whose run or schedule advancement failed stays out of dispatch. Before marking a job RUNNING and before persisting its completion, the executor re-reads the record and compares id and created_at, so a job deleted or replaced during dispatch stays deleted or replaced. Tick exceptions are logged and the poll loop continues. COMPLETED means the agent session was enqueued successfully.",
+      "function_in_system": "Runs outside the agent loop in the API server, where a background poller starts a new agent session per due job via send_message. Protects unattended recurring research against process crashes and concurrent edits. Otherwise a SIGKILL mid-write corrupts the job set, a crashed run leaves its job stuck in RUNNING forever, or a broken job is re-dispatched every tick.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/scheduled_research/store.py",
+          "lines": "1-9",
+          "snippet": "\"\"\"Crash-safe store for scheduled research jobs.\n\nUses the same atomic write pattern as ``src.live.runtime.jobstore`` (write a\ntemp file in the same directory, fsync, replace, fsync the parent dir) so the\nstore survives a SIGKILL at any point without corruption.\n\nA missing store file is the only clean empty result. A file that exists but\nfails to parse is quarantined and ``load`` raises ``CorruptStoreError`` instead\nof silently returning an empty list."
+        },
+        {
+          "file": "agent/src/scheduled_research/store.py",
+          "lines": "94-107",
+          "snippet": "if not self.path.exists():\n    return {}\ntry:\n    raw = self.path.read_text(encoding=\"utf-8\")\n    envelope = json.loads(raw)\n    jobs_raw = self._extract_jobs(envelope)\n    result: Dict[str, ScheduledResearchJob] = {}\n    for item in jobs_raw:\n        job = ScheduledResearchJob.from_dict(item)\n        result[job.id] = job\n    return result\nexcept (OSError, ValueError, KeyError, TypeError) as exc:\n    quarantined = self._quarantine(str(exc))\n    raise CorruptStoreError(self.path, quarantined, str(exc)) from exc"
+        },
+        {
+          "file": "agent/src/scheduled_research/store.py",
+          "lines": "126-135",
+          "snippet": "tmp = target.with_name(f\".{target.name}.{os.getpid()}.tmp\")\nfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)\ntry:\n    os.write(fd, payload.encode(\"utf-8\"))\n    os.fsync(fd)\nfinally:\n    os.close(fd)\n\nos.replace(tmp, target)\nself._fsync_dir(target.parent)"
+        },
+        {
+          "file": "agent/src/scheduled_research/executor.py",
+          "lines": "61-63",
+          "snippet": "if job.status in {JobStatus.CANCELLED, JobStatus.RUNNING, JobStatus.FAILED}:\n    return False\nreturn job.next_run_at <= now_ms"
+        },
+        {
+          "file": "agent/src/scheduled_research/executor.py",
+          "lines": "207-229",
+          "snippet": "def recover_stale_running(self) -> int:\n    \"\"\"Reset jobs left ``RUNNING`` by a previous executor process.\n\n    This runs at most once per executor instance. Jobs that become\n    ``RUNNING`` after this recovery step are treated as live in-flight work\n    and remain skipped by :func:`is_due`.\n    \"\"\"\n    if self._recovered_stale_running:\n        return 0\n\n    jobs = self._store.load()\n    recovered = 0\n    for job in jobs.values():\n        if job.status != JobStatus.RUNNING:\n            continue\n        job.status = JobStatus.PENDING\n        recovered += 1\n        logger.warning(\"recovering stale scheduled research job %s from running to pending\", job.id)\n\n    if recovered:\n        self._store.save(jobs)\n    self._recovered_stale_running = True\n    return recovered"
+        },
+        {
+          "file": "agent/src/scheduled_research/executor.py",
+          "lines": "231-241",
+          "snippet": "async def _run(self) -> None:\n    while not self._stopping:\n        try:\n            await self.tick(self._now_fn())\n        except asyncio.CancelledError:\n            raise\n        except Exception:\n            logger.error(\"scheduled research executor tick failed\", exc_info=True)\n        if self._stopping:\n            break\n        await self._sleep_or_wake(self._tick_interval_ms)"
+        },
+        {
+          "file": "agent/src/scheduled_research/executor.py",
+          "lines": "259-270",
+          "snippet": "async def _run_job(self, job: ScheduledResearchJob, now_ms: int) -> None:\n    # The tick snapshot may be stale by the time we reach this job (an\n    # earlier dispatch was awaited). Re-read and confirm identity before\n    # marking it RUNNING so a job the user deleted or replaced in the\n    # meantime is not resurrected or dispatched.\n    current = self._store.get(job.id)\n    if current is None or not self._same_record(current, job) or not is_due(current, now_ms):\n        return\n    job = current\n\n    job.status = JobStatus.RUNNING\n    self._store.upsert(job)"
+        },
+        {
+          "file": "agent/src/scheduled_research/executor.py",
+          "lines": "313-320",
+          "snippet": "current = self._store.get(job.id)\nif current is None:\n    logger.info(\"scheduled research job %s deleted during dispatch; skipping completion write\", job.id)\n    return\nif not self._same_record(current, job):\n    logger.info(\"scheduled research job %s replaced during dispatch; skipping completion write\", job.id)\n    return\nself._store.upsert(job)"
+        },
+        {
+          "file": "agent/api_server.py",
+          "lines": "3342-3356",
+          "snippet": "async def _dispatch_scheduled_research_job(job: \"ScheduledResearchJob\") -> None:\n    \"\"\"Enqueue one scheduled research job through the session runtime.\n\n    ``send_message`` queues the agent attempt and returns once accepted; it\n    does not wait for that agent run to reach a terminal status. The executor's\n    ``COMPLETED`` state for this dispatch path means \"successfully enqueued.\"\n    \"\"\"\n    svc = _get_session_service()\n    if not svc:\n        raise RuntimeError(\"Session runtime not enabled\")\n    # Pass a copy so the session runtime's internal config writes (e.g.\n    # include_shell_tools) do not mutate the persisted scheduled-run config.\n    session = svc.create_session(title=f\"scheduled-research:{job.id}\", config=dict(job.config))\n    logger.info(\"dispatching scheduled research job %s via session %s\", job.id, session.session_id)\n    await svc.send_message(session.session_id, job.prompt)"
+        }
+      ]
+    },
+    {
+      "name": "structural lookahead ban in the factor operator library",
+      "what_it_is": "The shared factor operator library raises ValueError when delta is called with a lag below 1 and deliberately omits a negative-shift Ref(df, -n) operator. Its NaN policy propagates NaN through every operator, with zero-filling excluded.",
+      "function_in_system": "Sits under every factor computed from the factor zoo, whose IC results reach the agent through the alpha bench tool. Blocks the domain failure mode of factors that read future bars. Otherwise a lookahead factor produces inflated IC values that the agent reports as a genuine alpha.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent/src/factors/base.py",
+          "lines": "8-12",
+          "snippet": "NaN policy: every operator propagates NaN; no silent ``fillna(0)``. A constant\nwindow for ``ts_corr`` / ``ts_cov`` returns NaN, not zero.\n\nLookahead ban: ``delta(df, d)`` requires ``d >= 1``; the negative-shift\n``Ref(df, -n)`` form is intentionally absent."
+        },
+        {
+          "file": "agent/src/factors/base.py",
+          "lines": "194-199",
+          "snippet": "Lookahead ban: ``d >= 1`` strictly. Negative lag forbidden.\n\"\"\"\nif d < 1:\n    raise ValueError(f\"delta lag must be >= 1 (lookahead ban), got {d}\")\nreturn df - df.shift(d)"
+        }
+      ]
+    }
+  ]
+}

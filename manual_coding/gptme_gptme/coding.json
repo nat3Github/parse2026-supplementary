@@ -1,0 +1,1206 @@
+{
+  "repo": "gptme/gptme",
+  "commit": "f3bdf806f2",
+  "system_type": "application",
+  "system_type_reason": "Terminal-first personal AI agent used directly by end users.",
+  "repo_overview": {
+    "summary": "gptme is a terminal-first personal AI agent. The LLM emits tool calls as markdown codeblocks or native tool-calls (shell, python, patch, browser, ...), which run in the local environment and whose output is fed back into the conversation. Around the core loop sit an extensive hook system, context compression, lessons injection, subagents, an HTTP/ACP server and an eval harness.",
+    "components": [
+      {
+        "path": "gptme/chat.py, gptme/executor.py, gptme/message.py, gptme/codeblock.py",
+        "purpose": "core loop: _run_chat_loop / _process_message_conversation / step(), message model, codeblock parsing"
+      },
+      {
+        "path": "gptme/circuit_breaker.py, gptme/checkpoint.py, gptme/workspace_snapshot.py, gptme/prompt_queue.py, gptme/session.py",
+        "purpose": "cross-cutting single modules: circuit breaker for tool/MCP calls, checkpoints/snapshots, prompt queue"
+      },
+      {
+        "path": "gptme/llm/",
+        "purpose": "provider backends (Anthropic, OpenAI, Responses API, plugins), model metadata/resolution, validation"
+      },
+      {
+        "path": "gptme/tools/",
+        "purpose": "tool implementations: shell, python, patch/save/read, browser, subagent/, autocompact/, todo, complete, mcp adapter, precommit, ..."
+      },
+      {
+        "path": "gptme/hooks/",
+        "purpose": "hook registry and built-in hooks: confirmation, cost/token/time/cache awareness, injection screening, markdown validation, auto snapshots"
+      },
+      {
+        "path": "gptme/context/",
+        "purpose": "context compression (adaptive compressor), context selector (rule/LLM/hybrid)"
+      },
+      {
+        "path": "gptme/logmanager/",
+        "purpose": "conversation persistence, event log, conversation checkpoints"
+      },
+      {
+        "path": "gptme/lessons/",
+        "purpose": "lessons/skills system: matching and auto-inclusion of guidance into context"
+      },
+      {
+        "path": "gptme/prompts/",
+        "purpose": "system prompt construction, workspace/chat-history context"
+      },
+      {
+        "path": "gptme/util/",
+        "purpose": "helpers: cost tracking, token counting, context dedup/reduce, output storage, interrupt handling, ask_execute"
+      },
+      {
+        "path": "gptme/commands/",
+        "purpose": "slash commands (/undo, backtrack, checkpoint, snapshot, ...)"
+      },
+      {
+        "path": "gptme/config/",
+        "purpose": "user/project/chat config (toml)"
+      },
+      {
+        "path": "gptme/mcp/, gptme/plugins/, gptme/oauth/, gptme/credentials.py",
+        "purpose": "MCP client, plugin loader, auth"
+      },
+      {
+        "path": "gptme/cli/, gptme/agent/, gptme/acp/, gptme/server/",
+        "purpose": "entry points: CLI, persistent autonomous agents (service), Agent Client Protocol, Flask HTTP API/web UI"
+      },
+      {
+        "path": "gptme/eval/",
+        "purpose": "benchmark harness (SWE-bench, tbench, suites), pass-rate gate"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "gptme/chat.py",
+        "lines": "355, 367-376",
+        "snippet": "while True:\n    ...\n            response_msgs = list(\n                step(\n                    manager.log,\n                    stream,\n                    tool_format=tool_format,\n                    workspace=manager.workspace,\n                    model=model,\n                    output_schema=output_schema,\n                )\n            )"
+      },
+      {
+        "file": "gptme/chat.py",
+        "lines": "554-562, 576-578",
+        "snippet": "msg_response = reply(\n    msgs,\n    get_model(model).full,\n    stream,\n    tools,\n    workspace,\n    output_schema,\n    on_token=on_token,\n)\n...\nif msg_response:\n    yield msg_response.replace(quiet=True)\n    yield from execute_msg(msg_response, log=log, workspace=workspace)"
+      },
+      {
+        "file": "gptme/chat.py",
+        "lines": "428-437",
+        "snippet": "# Check if there are any runnable tools left\nlast_content = next(\n    (m.content for m in reversed(manager.log) if m.role == \"assistant\"),\n    \"\",\n)\nhas_runnable = any(\n    tooluse.is_runnable for tooluse in ToolUse.iter_from_content(last_content)\n)\nif not has_runnable:\n    break"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "step() calls reply() for the model response and then execute_msg() on it (chat.py:554-578); the tool calls the LLM writes into its response are what gets executed.",
+      "consumes_feedback": "Tool outputs yielded by execute_msg are appended to manager.log (chat.py:385-386), and the next step() builds its prompt from log.messages via prepare_messages (chat.py:546).",
+      "multi_turn_until_termination": "_process_message_conversation loops with while True (chat.py:355) and breaks once the last assistant message contains no runnable tool use (chat.py:428-437), on the step limit, or on interrupt/decline."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent (opt-in)",
+    "evidence": [
+      {
+        "file": "gptme/chat.py",
+        "lines": "554-562",
+        "snippet": "msg_response = reply(\n    msgs,\n    get_model(model).full,\n    stream,\n    tools,\n    workspace,\n    output_schema,\n    on_token=on_token,\n)"
+      },
+      {
+        "file": "gptme/tools/subagent/execution.py",
+        "lines": "321-331",
+        "snippet": "chat(\n    prompt_msgs,\n    initial_msgs,\n    logdir=logdir,\n    workspace=workspace,\n    model=model,\n    stream=False,\n    no_confirm=True,\n    interactive=False,\n    show_hidden=False,\n    tool_format=\"markdown\","
+      },
+      {
+        "file": "gptme/tools/subagent/__init__.py",
+        "lines": "384",
+        "snippet": "disabled_by_default=True,"
+      }
+    ],
+    "justification": "The default system is one agent: a single chat() loop with one model and one system prompt calling tools via step()/reply() (chat.py:554-562). The opt-in subagent tool (disabled_by_default, subagent/__init__.py:384) adds an orchestrator-worker structure: each subagent runs its own chat() loop with its own model, profile/system prompt and tool set in a thread, subprocess or ACP process (subagent/execution.py:321-331), and its result returns to the parent via the LOOP_CONTINUE completion hook. These subagents are full agents, so with the tool enabled the system is multi-agent.",
+    "verdict_raw": "single-agent, multi-agent (subagent tool)"
+  },
+  "resilience": [
+    {
+      "name": "MCP call protection: reconnect-retry and per-server circuit breaker",
+      "what_it_is": "Two layers around MCP tool calls. On a connection error the MCP client is restarted and the call retried once. Around the call sits a CLOSED/OPEN/HALF_OPEN circuit breaker, one instance per MCP server: after 5 consecutive failures the breaker opens and every call fails fast with CircuitOpenError(retry_after) for a 30 s cooldown; afterwards a single probe call is let through, which either resets to CLOSED or restarts the cooldown. User cancellations (MCPInterruptedError) are excluded from failure counting.",
+      "function_in_system": "Wraps MCPClient.call_tool, i.e. the execution of an MCP tool inside a step. Contains a failing or hanging MCP server so that repeated tool calls return immediately with an error the agent can see. Otherwise every call to a broken server would block on the transport again and burn time and turns.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/circuit_breaker.py",
+          "lines": "130-148",
+          "snippet": "with self._lock:\n    if self._state == CircuitState.OPEN:\n        elapsed = time.monotonic() - (self._opened_at or 0.0)\n        remaining = self.cooldown - elapsed\n        if remaining > 0:\n            raise CircuitOpenError(self.name, retry_after=remaining)\n        # Cooldown elapsed — allow one probe\n        logger.debug(\n            \"CircuitBreaker '%s': cooldown elapsed, transitioning to HALF_OPEN\",\n            self.name,\n        )\n        self._state = CircuitState.HALF_OPEN\n        self._probing = False\n\n    if self._state == CircuitState.HALF_OPEN:\n        if self._probing:\n            # Another probe is already in flight — reject until it resolves\n            raise CircuitOpenError(self.name, retry_after=self.cooldown)\n        self._probing = True"
+        },
+        {
+          "file": "gptme/circuit_breaker.py",
+          "lines": "212-222",
+          "snippet": "if (\n    self._failure_count >= self.failure_threshold\n    and self._state == CircuitState.CLOSED\n):\n    logger.warning(\n        \"CircuitBreaker '%s': threshold reached (%d), transitioning to OPEN\",\n        self.name,\n        self._failure_count,\n    )\n    self._state = CircuitState.OPEN\n    self._opened_at = time.monotonic()"
+        },
+        {
+          "file": "gptme/mcp/client.py",
+          "lines": "275-276, 317-321",
+          "snippet": "# Create a per-server circuit breaker (default: 5 failures / 30s cooldown).\nself._circuit_breaker = CircuitBreaker(name=f\"mcp:{server_name}\")\n...\nif self._circuit_breaker is not None:\n    return self._circuit_breaker.call(\n        lambda: self._run_async(_call_tool()),\n        ignore_exceptions=(MCPInterruptedError,),\n    )"
+        },
+        {
+          "file": "gptme/tools/mcp_adapter.py",
+          "lines": "151-168",
+          "snippet": "for attempt in range(max_retries + 1):\n    try:\n        # Get the client for this server\n        client = _mcp_clients.get(server_name)\n        if client is None:\n            raise RuntimeError(f\"No MCP client found for server: {server_name}\")\n\n        # Call the tool\n        return client.call_tool(tool_name, arguments)\n\n    except Exception as e:\n        last_error = e\n\n        if _is_connection_error(e) and attempt < max_retries:\n            logger.info(f\"MCP connection failed for {server_name}, restarting...\")\n            _restart_mcp_client(server_name, config)\n            continue\n        break"
+        }
+      ]
+    },
+    {
+      "name": "hard step limit per turn",
+      "what_it_is": "GPTME_MAX_STEPS env variable caps the number of step() iterations inside one user turn; on reaching it the loop breaks and appends a system message 'Stopped: reached max steps limit'.",
+      "function_in_system": "Sits at the end of each iteration of the inner tool loop in _process_message_conversation. Bounds runaway tool loops and the cost and time they consume. Otherwise a model that keeps emitting tool calls runs indefinitely.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/chat.py",
+          "lines": "344-353",
+          "snippet": "max_steps: int | None = None\nmax_steps_str = os.environ.get(\"GPTME_MAX_STEPS\")\nif max_steps_str:\n    try:\n        max_steps = int(max_steps_str)\n    except ValueError:\n        logger.warning(\n            f\"Invalid GPTME_MAX_STEPS value: {max_steps_str!r}, ignoring\"\n        )\nstep_count = 0"
+        },
+        {
+          "file": "gptme/chat.py",
+          "lines": "418-426",
+          "snippet": "# Check step limit (GPTME_MAX_STEPS)\nstep_count += 1\nif max_steps is not None and step_count >= max_steps:\n    if not is_output_json():\n        console.log(f\"Reached max steps limit ({max_steps}), stopping.\")\n    manager.append(\n        Message(\"system\", f\"Stopped: reached max steps limit ({max_steps})\")\n    )\n    break"
+        }
+      ]
+    },
+    {
+      "name": "bounded prompt queue for hook-generated follow-up prompts",
+      "what_it_is": "Messages produced by LOOP_CONTINUE hooks (e.g. auto-reply in autonomous mode) are appended to the prompt queue up to MAX_PROMPT_QUEUE_SIZE = 100; further messages are dropped with a warning. The durable external queue is drained only up to the remaining capacity.",
+      "function_in_system": "Sits in the outer chat loop after each processed turn, where hooks decide whether the agent continues on its own. Caps self-generated continuation so hooks cannot feed the agent an unbounded stream of prompts. Otherwise a misbehaving loop-control hook grows the queue and the session without limit.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/chat.py",
+          "lines": "281-299",
+          "snippet": "if loop_msgs := trigger_hook(\n    HookType.LOOP_CONTINUE,\n    manager=manager,\n    interactive=interactive,\n    prompt_queue=prompt_queue,\n    no_confirm=no_confirm,\n):\n    for msg in loop_msgs:\n        # Add hook-generated messages to prompt queue with size limit\n        if len(prompt_queue) >= MAX_PROMPT_QUEUE_SIZE:\n            logger.warning(\n                f\"Prompt queue limit ({MAX_PROMPT_QUEUE_SIZE}) reached, \"\n                \"dropping message from hook\"\n            )\n            break\n        prompt_queue.append(msg)\n        if not is_output_json():\n            console.log(f\"[Loop control] {msg.content[:100]}...\")\n    continue  # Process the queued messages"
+        },
+        {
+          "file": "gptme/chat.py",
+          "lines": "321-325",
+          "snippet": "capacity = MAX_PROMPT_QUEUE_SIZE - len(prompt_queue)\nif capacity <= 0:\n    return\n\ndrained = drain_prompt_queue(manager.logdir, max_items=capacity)"
+        },
+        {
+          "file": "gptme/constants.py",
+          "lines": "61",
+          "snippet": "MAX_PROMPT_QUEUE_SIZE = 100"
+        }
+      ]
+    },
+    {
+      "name": "user interrupt and decline with feedback to the model",
+      "what_it_is": "Ctrl-C during generation or during a tool run aborts the current step, appends the system message 'Interrupted by user' (with the tool's call_id when inside a tool) and clears the prompt queue. A declined tool confirmation ('Execution declined by user') likewise ends the tool loop and returns to the user prompt. The interactive system prompt instructs the model to ask the user for clarification after an abort.",
+      "function_in_system": "Sits in the outer loop, in the inner tool loop and in execute_msg. Lets the human stop a wrong or runaway action at any point while the session survives, and records the interruption in the log so the next model turn knows the action did not complete. Otherwise an interrupt kills the session or the model assumes the aborted action succeeded.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/chat.py",
+          "lines": "301-307",
+          "snippet": "except KeyboardInterrupt:\n    if not is_output_json():\n        console.log(\"Interrupted.\")\n    manager.append(Message(\"system\", INTERRUPT_CONTENT))\n    # Clear any remaining prompts to avoid confusion\n    prompt_queue.clear()\n    continue"
+        },
+        {
+          "file": "gptme/chat.py",
+          "lines": "377-381, 391-396",
+          "snippet": "except KeyboardInterrupt:\n    if not is_output_json():\n        console.log(\"Interrupted during response generation.\")\n    manager.append(Message(\"system\", INTERRUPT_CONTENT))\n    break\n...\n# Check if user declined execution - return to prompt without generating response\n# This makes \"n\" at confirm prompt behave like Ctrl+C (return to user prompt)\nif any(msg.content == DECLINED_CONTENT for msg in response_msgs):\n    if not is_output_json():\n        console.log(\"Execution declined, returning to prompt.\")\n    break"
+        },
+        {
+          "file": "gptme/tools/__init__.py",
+          "lines": "334-344",
+          "snippet": "try:\n    for tool_response in tooluse.execute(log=log, workspace=workspace):\n        yield tool_response.replace(call_id=tooluse.call_id)\nexcept KeyboardInterrupt:\n    clear_interruptible()\n    yield Message(\n        \"system\",\n        INTERRUPT_CONTENT,\n        call_id=tooluse.call_id,\n    )\n    break"
+        },
+        {
+          "file": "gptme/util/interrupt.py",
+          "lines": "36-41",
+          "snippet": "if _interruptible_var.get() or testing:\n    raise KeyboardInterrupt\n\n_last_interrupt_time_var.set(current_time)\nconsole.print()\nconsole.log(\"Interrupted. Press Ctrl-D to exit.\")"
+        },
+        {
+          "file": "gptme/prompts/templates.py",
+          "lines": "199",
+          "snippet": "If the user aborted or interrupted an operation don't try it again, ask for clarification instead."
+        }
+      ]
+    },
+    {
+      "name": "crash recovery by resuming from log state",
+      "what_it_is": "Before asking for input, the loop inspects the last log message; if it is an unanswered user message (after a crash or a manually edited log), it generates a response directly from the existing log. The conversation config.toml that resume reads model, tools and workspace from is saved atomically via temp file, fsync and rename. In ACP mode the session ID is derived deterministically from a hash of the workspace path, so after an editor restart the existing conversation.jsonl is loaded from disk.",
+      "function_in_system": "Sits at the start of each outer-loop iteration in the interactive path. Continues an aborted session at the point where it stopped, using the persisted conversation. Otherwise the pending request is silently left unanswered after a restart.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/chat.py",
+          "lines": "234-248",
+          "snippet": "user_input = _get_user_input(manager.log, manager.workspace)\nif user_input is None:\n    # Either user wants to exit OR we should generate response directly\n    if _should_prompt_for_input(manager.log):\n        # User wants to exit\n        break\n    # Don't prompt for input, generate response directly (crash recovery, etc.)\n    # Process existing log without adding new message\n    _process_message_conversation(\n        manager,\n        stream,\n        tool_format,\n        model,\n        output_schema,\n    )"
+        },
+        {
+          "file": "gptme/chat.py",
+          "lines": "474-480",
+          "snippet": "return (\n    not last_msg\n    or last_msg.role == \"assistant\"\n    or has_recent_interrupt_or_decline\n    or last_msg.pinned\n    or not any(role == \"user\" for role in [m.role for m in log])\n)"
+        },
+        {
+          "file": "gptme/logmanager/manager.py",
+          "lines": "457-463, 488-491",
+          "snippet": "# write current branch (or main branch if on a view)\n# When on a view, conversation.jsonl must always contain the full main\n# branch history — the view is persisted separately in views/ directory.\nif self.current_view is not None:\n    self._branches[\"main\"].write_jsonl(self.logfile)\nelse:\n    self.log.write_jsonl(self.logfile)\n...\n# Force sync to disk if requested\nif sync:\n    with open(self.logfile, \"rb\") as f:\n        os.fsync(f.fileno())"
+        },
+        {
+          "file": "gptme/config/chat.py",
+          "lines": "277-293",
+          "snippet": "# Use atomic write: write to temp file, then rename\n# This prevents corruption if process is interrupted during write\n# (e.g., daemon thread killed on exit while saving)\nwith tempfile.NamedTemporaryFile(\n    mode=\"w\",\n    dir=self._logdir,\n    suffix=\".toml.tmp\",\n    delete=False,\n) as f:\n    temp_path = Path(f.name)\n    tomlkit.dump(doc, f)\n    # Ensure data is flushed to disk before rename\n    f.flush()\n    os.fsync(f.fileno())\n\n# Atomic rename (POSIX guarantees atomicity, Windows may not)\ntemp_path.replace(chat_config_path)"
+        },
+        {
+          "file": "gptme/acp/agent.py",
+          "lines": "115-123",
+          "snippet": "def _cwd_session_id(cwd: str) -> str:\n    \"\"\"Derive a deterministic session ID from a workspace path.\n\n    Returns a stable ID like ``acp-<hash8>`` so that the same CWD always\n    maps to the same session, enabling session resume across editor restarts.\n    \"\"\"\n    h = hashlib.sha256(str(Path(cwd).resolve()).encode()).hexdigest()[:8]\n    return f\"acp-{h}\""
+        },
+        {
+          "file": "gptme/acp/agent.py",
+          "lines": "569-599",
+          "snippet": "# --- Session resume: derive a deterministic ID from CWD ---\n# This ensures the same workspace always maps to the same session,\n# so editor restarts resume the previous conversation.\nif cwd:\n    session_id = _cwd_session_id(cwd)\n    logdir = logs_dir / session_id\n    logfile = logdir / \"conversation.jsonl\"\n\n    # Already loaded in this server process?\n    existing = self._registry.get(session_id)\n    if existing and existing.log is not None:\n        logger.info(\n            f\"ACP NewSession: reusing in-memory session {session_id} for {cwd}\"\n        )\n        resumed = True\n        log = existing.log\n    elif logfile.exists():\n        # Resume from disk\n        try:\n            log = LogManager.load(\n                logdir=logdir,\n                create=False,\n                lock=False,\n            )\n            resumed = True\n            n_msgs = len(log.log)\n            logger.info(\n                f\"ACP NewSession: resumed session {session_id} from disk \"\n                f\"({n_msgs} messages) for {cwd}\"\n            )"
+        }
+      ]
+    },
+    {
+      "name": "fault-tolerant codeblock tool-call parsing",
+      "what_it_is": "Context-aware markdown fence parser that repairs known model formatting errors: concatenated fences ('``````shell'), a closing fence glued to '<think>', nested blocks, and half-closed blocks while streaming. Codeblocks inside thinking sections, including unclosed ones, are skipped.",
+      "function_in_system": "Sits between the model response and execute_msg: ToolUse.iter_from_content relies on it to find runnable tool calls. Recovers tool calls from malformed output of specific models (comments name Claude and Gemini). Otherwise such tool calls are lost, split wrongly, or code from the model's thinking gets executed.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/codeblock.py",
+          "lines": "117-119, 152-158",
+          "snippet": "# dont extract codeblocks from thinking blocks\n# (since claude sometimes forgets to close codeblocks in its thinking,\n#  and gemini uses </thinking> instead of </think>)\n...\nelse:\n    # if start thinking tag but no end, early exit (only for standalone tags;\n    # concatenated occurrences like \"```<think>\" are handled by inner-loop logic).\n    if not _concatenated_end_found:\n        for _think_start_tag in [\"<thinking>\", \"<think>\"]:\n            if re.search(r\"(?:^|\\n)\" + re.escape(_think_start_tag), markdown):\n                return"
+        },
+        {
+          "file": "gptme/codeblock.py",
+          "lines": "186-193",
+          "snippet": "# Recover from malformed adjacent outer fences where a block closes and the\n# next one opens on the same line, e.g. \"``````patch file.py\" instead of\n# \"```\\n```patch file.py\". ToolUse._to_markdown always emits triple fences,\n# so six leading backticks followed immediately by a language tag is a good\n# signal that the first three backticks belong to the previous block.\nif re.match(r\"^`{6}[^`\\s]\", line):\n    line = line[3:]\n    lines[i] = line"
+        },
+        {
+          "file": "gptme/codeblock.py",
+          "lines": "238-250",
+          "snippet": "# Some models concatenate the closing fence with a thinking tag,\n# e.g. \"```<think>\". Recover by treating the leading fence as the\n# closing delimiter and reprocessing the remainder on the same line.\nif rest.startswith((\"<think>\", \"<thinking>\")):\n    yield Codeblock(\n        lang,\n        \"\\n\".join(content_lines),\n        start=start_line,\n        fence=\"`\" * fence_len,\n    )\n    lines[i] = rest\n    reprocess_current_line = True\n    break"
+        }
+      ]
+    },
+    {
+      "name": "LLM API retry with exponential backoff for transient errors",
+      "what_it_is": "Provider decorators retry_on_overloaded (Anthropic) and retry_on_openai_error (all OpenAI-compatible providers) retry up to 5 times with delay 1s * 2^attempt. Only transient errors are retried: 5xx, 429, connection and httpx protocol errors, and messages containing 'overload'/'internal'/'timeout'; everything else (402, auth) is re-raised immediately. Generator variants for streaming retry only while no chunk has been yielded yet. Underneath, the Anthropic SDK client adds its own max_retries=5 and a configurable LLM_API_TIMEOUT.",
+      "function_in_system": "Wraps the provider chat/stream functions called by reply() inside every step(). Absorbs rate limits, provider overloads and dropped connections before they reach the agent loop, and avoids duplicated output by refusing to retry a stream that already emitted content. Otherwise a single transient provider error aborts the step and the session.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/llm/llm_anthropic.py",
+          "lines": "422-454",
+          "snippet": "# Check if this is a transient error we should retry\nshould_retry = False\nif isinstance(e, APIStatusError):\n    # Retry on all 5xx server errors (transient)\n    if 500 <= e.status_code < 600:\n        should_retry = True\n    # Retry on 429 rate limit (should back off)\n    elif e.status_code == 429:\n        should_retry = True\n    # Also check error message for known transient issues\n    elif hasattr(e, \"message\"):\n        error_msg = str(e.message).lower()\n        if any(\n            keyword in error_msg for keyword in [\"overload\", \"internal\", \"timeout\"]\n        ):\n            should_retry = True\n# Also check for \"httpx.RemoteProtocolError: peer closed connection without sending complete message body\"\nelif isinstance(e, RemoteProtocolError):\n    should_retry = True\n\n# Re-raise if not transient or max retries reached\nif not should_retry or attempt == max_retries - 1:\n    raise e\n\ndelay = base_delay * (2**attempt)\nstatus_code = getattr(e, \"status_code\", \"unknown\")\nlogger.warning(\n    f\"Anthropic API transient error (status {status_code}), \"\n    f\"retrying in {delay}s (attempt {attempt + 1}/{max_retries})\"\n)\nif status_code in [200, \"200\"]:\n    logger.warning(f\"Status code was strangely 200. Error details: {e}\")\ntime.sleep(delay)"
+        },
+        {
+          "file": "gptme/llm/llm_anthropic.py",
+          "lines": "508-514",
+          "snippet": "except Exception as e:\n    if has_yielded:\n        # Can't retry after streaming has started - would cause duplicates\n        raise\n    _handle_anthropic_transient_error(\n        e, attempt, max_retries, base_delay\n    )"
+        },
+        {
+          "file": "gptme/llm/llm_anthropic.py",
+          "lines": "589-594, 674, 773",
+          "snippet": "_anthropic = Anthropic(\n    api_key=api_key,\n    max_retries=5,\n    base_url=proxy_url or None,\n    timeout=timeout,\n)\n...\n@retry_on_overloaded()\n...\n@retry_generator_on_overloaded()"
+        },
+        {
+          "file": "gptme/llm/llm_openai.py",
+          "lines": "607-619, 833, 1139",
+          "snippet": "if isinstance(e, RateLimitError):\n    # 429 rate limit - should back off and retry\n    should_retry = True\nelif isinstance(e, APIConnectionError):\n    # Connection errors are transient\n    should_retry = True\nelif httpx is not None and isinstance(e, httpx.NetworkError | httpx.ProtocolError):\n    # httpx transport/protocol errors (server disconnects mid-stream, incomplete reads)\n    should_retry = True\nelif isinstance(e, APIStatusError):\n    # Retry on all 5xx server errors (transient)\n    if 500 <= e.status_code < 600:\n        should_retry = True\n...\n@retry_on_openai_error()\n...\n@retry_generator_on_openai_error()"
+        }
+      ]
+    },
+    {
+      "name": "prompt caching with targeted cache breakpoints",
+      "what_it_is": "apply_cache_control places Anthropic cache_control 'ephemeral' markers on the system prompt, on the last two user messages, and on the last stable message before the first ephemeral (TTL) message. Applied for the native Anthropic API and for Anthropic models via OpenRouter. The system prompt is ordered static first, with an explicit SYSTEM_PROMPT_CACHE_BOUNDARY message before the session-volatile context_cmd and chat-history sections, and the time section carries only the date to keep the prefix stable.",
+      "function_in_system": "Runs during message preparation for every LLM call. Keeps the stable conversation prefix cached across steps, including when ephemeral context messages expire, which cuts input-token cost and latency of each step. Otherwise every step re-bills the full growing context at the uncached rate.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/llm/utils.py",
+          "lines": "287-297",
+          "snippet": "# Place a cache breakpoint at the stable boundary before the ephemeral block.\n# This keeps the non-ephemeral prefix cached across turns as thinking blocks expire.\nif ephemeral_boundary_idx is not None:\n    _apply_cache_to_message(ephemeral_boundary_idx)\n\n# Set cache points on the last two user messages (multi-turn caching pattern).\n# Skips any index already marked as the ephemeral boundary to avoid redundancy.\nuser_indices = [i for i, m in enumerate(messages) if m.get(\"role\") == \"user\"]\nfor idx in user_indices[-2:]:\n    if idx != ephemeral_boundary_idx:\n        _apply_cache_to_message(idx)"
+        },
+        {
+          "file": "gptme/llm/llm_anthropic.py",
+          "lines": "1427-1433",
+          "snippet": "# Apply cache control for Anthropic prompt caching\n# See: https://docs.anthropic.com/en/docs/build-with-claude/prompt-caching\nmessages_with_cache, system_with_cache = apply_cache_control(\n    cast(list[dict], messages_dicts_new),\n    cast(list[dict] | None, system_messages),\n    ephemeral_boundary_idx=_ephemeral_boundary_output_idx,\n)"
+        },
+        {
+          "file": "gptme/llm/llm_openai.py",
+          "lines": "1895-1899",
+          "snippet": "# Apply cache control for Anthropic models on OpenRouter\nif model.startswith(\"openrouter/anthropic/\"):\n    # apply_cache_control uses dict[Any, Any] internally, cast at boundary\n    cache_result, _ = apply_cache_control(cast(list[dict[str, Any]], messages_list))\n    messages_list = cast(list[MessageDict], cache_result)"
+        },
+        {
+          "file": "gptme/prompts/__init__.py",
+          "lines": "527-535",
+          "snippet": "# Insert an explicit static/dynamic boundary before context_cmd output.\n# This keeps the prompt structure stable and makes the cacheable prefix\n# visible to both humans and providers with block-level prompt caching.\nif dynamic_sections and result:\n    result.append(Message(\"system\", SYSTEM_PROMPT_CACHE_BOUNDARY))\n\n# Dynamic context last (changes every session, least cacheable)\nfor _, msgs in dynamic_sections:\n    result.extend(msgs)"
+        },
+        {
+          "file": "gptme/prompts/templates.py",
+          "lines": "399-400",
+          "snippet": "# we only set the date in order for prompt caching and such to work\ndate_str = datetime.now(timezone.utc).strftime(\"%Y-%m-%d\")"
+        }
+      ]
+    },
+    {
+      "name": "stream cut-off at first complete tool call",
+      "what_it_is": "While streaming, the response is checked at cheap breakpoints (newline, '}' or '>' depending on tool format) for a complete runnable tool use; when one is found, generation stops and the remaining stream is drained only for usage metadata. Default is on for models without parallel tool-call support, overridable via GPTME_BREAK_ON_TOOLUSE.",
+      "function_in_system": "Sits inside _reply_stream, between generation and tool execution. Pauses inference after the first finished tool call so the tool runs before the model continues, which keeps the model from writing on top of unexecuted actions or invented tool output and saves the output tokens of the discarded continuation. Otherwise the model keeps generating past its own tool call.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/llm/__init__.py",
+          "lines": "299-307",
+          "snippet": "_env_break = config.get_env_bool(\"GPTME_BREAK_ON_TOOLUSE\")\nif _env_break is not None:\n    # Explicit env var overrides model-dependent default\n    break_on_tooluse = _env_break\nelse:\n    # Default based on model capability: don't break for models that support\n    # emitting multiple tool calls in a single response (e.g. Sonnet 4.6+)\n    model_meta = get_model(model)\n    break_on_tooluse = not model_meta.supports_parallel_tool_calls"
+        },
+        {
+          "file": "gptme/llm/__init__.py",
+          "lines": "856-872",
+          "snippet": "if break_on_tooluse and _tooluse_break_check_char(char):\n    # TODO: make this more robust/general, maybe with a callback that runs on each char/chunk\n    # pause inference on finished code-block, letting user run the command before continuing\n    # Use streaming=True to require blank line after code blocks during streaming\n    tooluses = [\n        tooluse\n        for tooluse in ToolUse.iter_from_content(output, streaming=True)\n        if tooluse.is_runnable\n    ]\n    if tooluses:\n        logger.debug(\"Found tool use, breaking\")\n        # Drain remaining stream to capture message_delta (output tokens).\n        # When break_on_tooluse fires before message_delta, the\n        # _StreamWithMetadata fallback only has input/cache counts from\n        # message_start — output tokens and cost are lost.\n        _drain_toolbreak_stream(stream)\n        break"
+        }
+      ]
+    },
+    {
+      "name": "human confirmation gate for tool execution",
+      "what_it_is": "Before a tool runs, get_confirmation queries the registered TOOL_CONFIRM hooks in priority order. The CLI hook shows a preview/diff and asks [Y/n/c/e/a]: the user can decline, edit the content before execution, or auto-confirm the next N calls; the server hook blocks on an SSE/HTTP round-trip to the client. An exception inside a confirmation hook results in skipping the call. A skip is returned to the log as a system message; edits are announced with '(content was edited by user)'. A higher-priority allowlist hook auto-confirms read-only shell pipelines (ls, cat, grep, ... without redirections or find -exec), so the human is asked only for risky commands. In the ACP adapter a permission request that times out after 60 s or fails is treated as a denial.",
+      "function_in_system": "Sits between the model's tool call and its execution (ask_execute / ToolUse.execute) in every step. Lets a human stop or correct a harmful or wrong action before it touches the environment, and fails safe when the confirmation path itself breaks. Otherwise every model-generated shell command, patch or file write runs unreviewed.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/hooks/__init__.py",
+          "lines": "231-235",
+          "snippet": "if server and not no_confirm:\n    hooks_to_register.append(\"server_confirm\")\n    hooks_to_register.append(\"server_elicit\")\nelif interactive and not no_confirm:\n    hooks_to_register.append(\"cli_confirm\")"
+        },
+        {
+          "file": "gptme/hooks/confirm.py",
+          "lines": "211-226, 240-243",
+          "snippet": "# Try hooks in priority order, falling through if a hook returns None\nfor hook in enabled_hooks:\n    try:\n        logger.debug(f\"Calling confirmation hook '{hook.name}'\")\n        # Cast to ToolConfirmHook - we know it's this type because we only\n        # get hooks registered for TOOL_CONFIRM\n        confirm_func = cast(ToolConfirmHook, hook.func)\n        result = confirm_func(tool_use, preview, workspace)\n\n        if result is None:\n            # Hook declined to handle this confirmation, try next hook\n            logger.debug(f\"Hook '{hook.name}' returned None, trying next hook\")\n            continue\n\n        if isinstance(result, ConfirmationResult):\n            return result\n...\n    except Exception as e:\n        logger.exception(f\"Error in confirmation hook '{hook.name}'\")\n        # On error, skip to be safe\n        return ConfirmationResult.skip(f\"Error: {e}\")"
+        },
+        {
+          "file": "gptme/hooks/cli_confirm.py",
+          "lines": "99-106",
+          "snippet": "question = f\"Execute {tool_use.tool}?\"\n\nwith terminal_state_title(\"❓ waiting for confirmation\"):\n    prompt = f\"{question} {choicestr}\"\n    answer = prompt_alert(prompt)\n\n# Handle the response\nreturn _handle_response(answer, content, editable, copiable, tool_use)"
+        },
+        {
+          "file": "gptme/util/ask_execute.py",
+          "lines": "118-132",
+          "snippet": "result = get_confirmation(\n    preview=preview_content or content,\n    default_confirm=True,\n)\n\nif result.action == ConfirmAction.SKIP:\n    msg = result.message or \"Operation aborted: user chose not to run.\"\n    yield Message(\"system\", msg)\n    return\n\n# Handle edited content from confirmation result\nwas_edited = False\nif result.action == ConfirmAction.EDIT and result.edited_content:\n    was_edited = content != result.edited_content\n    content = result.edited_content"
+        },
+        {
+          "file": "gptme/tools/shell_validation.py",
+          "lines": "363-369",
+          "snippet": "# Check if command is allowlisted\nif is_allowlisted(cmd):\n    logger.debug(f\"Shell command allowlisted, auto-confirming: {cmd[:50]}...\")\n    return ConfirmationResult.confirm()\n\n# Not allowlisted - fall through to next hook (CLI/server)\nreturn None"
+        },
+        {
+          "file": "gptme/tools/shell_validation.py",
+          "lines": "277-288",
+          "snippet": "# Check if all commands in the pipeline are allowlisted\n# This blocks non-allowlisted commands like: python, perl, xargs, sh, bash, etc.\nfor match in cmd_regex.finditer(cmd):\n    for group in match.groups():\n        if group and group not in allowlist_commands:\n            return False\n\n# Check for file redirections (>, >>)\n# File redirections with allowlisted commands can be used to write malicious content\n# Example: echo \"malicious_code\" > /tmp/exploit.sh\nif _has_file_redirection(cmd):\n    return False"
+        },
+        {
+          "file": "gptme/acp/agent.py",
+          "lines": "412-427",
+          "snippet": "# Use configurable timeout for permission requests (default 60s)\n# Longer timeout allows users time to review complex operations\npermission_timeout = 60.0\nfuture = asyncio.run_coroutine_threadsafe(report_and_request(), loop)\ntry:\n    return future.result(timeout=permission_timeout)\nexcept TimeoutError:\n    logger.warning(\n        f\"Tool permission request timed out after {permission_timeout}s, denying for safety\"\n    )\n    return False\nexcept Exception as e:\n    logger.warning(\n        \"Tool permission check failed: %s, denying for safety\", e\n    )\n    return False"
+        }
+      ]
+    },
+    {
+      "name": "tool errors returned to the model as observations",
+      "what_it_is": "Exceptions raised during tool execution are caught and returned as a system message 'Error during execution: <exception>' in place of a tool result.",
+      "function_in_system": "Wraps the execute_fn of tools inside a step. Turns a crashing tool into feedback the model sees in the next step, so it can correct the call while the loop keeps running. Otherwise a tool exception propagates up and ends the turn or the session.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/util/ask_execute.py",
+          "lines": "135-145, 151-154",
+          "snippet": "try:\n    ex_result = execute_fn(content, path)\n    if isinstance(ex_result, Generator):\n        yield from ex_result\n    else:\n        yield ex_result\nexcept Exception as e:\n    if os.getenv(\"PYTEST_CURRENT_TEST\") and not isinstance(e, ValueError):\n        raise\n    yield Message(\"system\", f\"Error during execution: {e}\")\n    return\n...\nexcept Exception as e:\n    if os.getenv(\"PYTEST_CURRENT_TEST\") and not isinstance(e, ValueError):\n        raise\n    yield Message(\"system\", f\"Error during execution: {e}\")"
+        },
+        {
+          "file": "gptme/tools/base.py",
+          "lines": "771-789",
+          "snippet": "except Exception as e:\n    # Calculate duration even for failed calls\n    duration = time.time() - start_time\n\n    # Record failed tool call with error details and duration\n    record_tool_call(\n        self.tool,\n        duration=duration,\n        success=False,\n        error_type=type(e).__name__,\n        error_message=str(e),\n        tool_format=self._format,\n    )\n\n    # if we are testing, raise the exception\n    logger.exception(e)\n    if \"pytest\" in globals():\n        raise e\n    yield Message(\"system\", f\"Error executing tool '{self.tool}': {e}\")"
+        }
+      ]
+    },
+    {
+      "name": "prompt-injection screening of untrusted tool output",
+      "what_it_is": "TOOL_EXECUTE_POST hook that checks output of tools fetching external content (browser, gh, elicit, URL reads) against 11 regex injection patterns ('ignore previous instructions', '<|im_start|>system', 'your new task is', ...). On a match it appends a system message '[UNTRUSTED: possible prompt injection detected in <tool> output, matching pattern: ...]' right after the tool output.",
+      "function_in_system": "Sits after tool execution, before the next generation. Marks injected instructions from web pages or GitHub content as untrusted data for the model. Otherwise the agent may follow instructions planted in fetched content. Detection is deterministic; the protective effect depends on the model heeding the warning.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/hooks/injection_screening.py",
+          "lines": "20-28",
+          "snippet": "# Tools whose outputs may contain untrusted external content\n_UNTRUSTED_SOURCE_TOOLS = frozenset(\n    {\n        \"browser\",  # Web page fetches\n        \"read\",  # URL reads (not local file reads — checked via content)\n        \"gh\",  # GitHub issue/PR bodies\n        \"elicit\",  # Web research\n    }\n)"
+        },
+        {
+          "file": "gptme/hooks/injection_screening.py",
+          "lines": "108-119",
+          "snippet": "detected, match_text = _has_injection_pattern(output_text)\nif detected:\n    logger.warning(\n        \"Injection pattern detected in %s output: %r\", tool_name, match_text\n    )\n    yield Message(\n        role=\"system\",\n        content=(\n            f\"[UNTRUSTED: possible prompt injection detected in {tool_name} \"\n            f\"output, matching pattern: {match_text!r}]\"\n        ),\n    )"
+        }
+      ]
+    },
+    {
+      "name": "truncated codeblock detection with model feedback",
+      "what_it_is": "TURN_POST hook that inspects the last line of the last markdown tool use in the assistant message; if it starts with '#' (a header start), the block was probably closed early by an inner fence lacking a language tag, and a system warning with fix instructions is appended.",
+      "function_in_system": "Runs after each turn, after tool execution. Makes silently truncated tool payloads (e.g. a half-written file via save) visible to the model so it can redo the call with proper language tags. Otherwise the partial content stays in the workspace unnoticed.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/hooks/markdown_validation.py",
+          "lines": "60-62",
+          "snippet": "# Check for suspicious patterns\nif last_line.startswith(\"#\"):\n    return True, f\"ends with header start: '{last_line}'\""
+        },
+        {
+          "file": "gptme/hooks/markdown_validation.py",
+          "lines": "115-128",
+          "snippet": "# Yield warning message\nwarning = f\"\"\"⚠️  **Potential markdown codeblock cut-off detected**\n\nThe last codeblock in your response {pattern}\n\nThis often happens when markdown codeblocks lack language tags, causing the parser to misinterpret closing backticks and cut content early.\n\n**Fix**: Add explicit language tags to all codeblocks:\n```txt\nPlain text content\n```\n\"\"\"\n\nyield Message(\"system\", warning, hide=False)"
+        }
+      ]
+    },
+    {
+      "name": "token budget awareness for the model",
+      "what_it_is": "At session start a hidden system message '<budget:token_budget>N</budget:token_budget>' gives the model its context window size; after tool executions '<system_warning>Token usage: X/Y; Z remaining</system_warning>' is injected when usage crosses 50/75/90/95 % or every further 10k tokens (incremental counting).",
+      "function_in_system": "Sits at SESSION_START and TOOL_EXECUTE_POST. Gives the model the information to economize on context before it overflows (shorter outputs, earlier wrap-up). Otherwise the model has no signal about remaining context until the window is exhausted. How it reacts is up to the model.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/hooks/token_awareness.py",
+          "lines": "51-53",
+          "snippet": "# Thresholds for showing warnings\nWARNING_INTERVAL = 10000  # Show warning every 10k tokens\nWARNING_PERCENTAGES = [0.5, 0.75, 0.9, 0.95]  # Show at 50%, 75%, 90%, 95%"
+        },
+        {
+          "file": "gptme/hooks/token_awareness.py",
+          "lines": "81-85",
+          "snippet": "yield Message(\n    \"system\",\n    f\"<budget:token_budget>{budget}</budget:token_budget>\",\n    hide=True,\n)"
+        },
+        {
+          "file": "gptme/hooks/token_awareness.py",
+          "lines": "209-215",
+          "snippet": "# Add usage warning as a system message\n# Using hide=True so it doesn't show in terminal but is sent to the model\nyield Message(\n    \"system\",\n    f\"<system_warning>Token usage: {used}/{budget}; {remaining} remaining</system_warning>\",\n    hide=True,\n)"
+        }
+      ]
+    },
+    {
+      "name": "session cost warnings in the model context",
+      "what_it_is": "CostTracker accumulates per-request cost; when the session total crosses a threshold ($0.10, 0.50, 1, 5, 10 ... 100, 200, 500, 1000) a '<system_warning>Session cost reached $X (tokens, cache hit %)</system_warning>' is stored and injected before the next generation. Additionally warns when the last Anthropic turn is older than the 5-minute cache TTL ('prompt cache likely cold'). There is no hard cost cap.",
+      "function_in_system": "Sits at TURN_POST (threshold check) and GENERATION_PRE (injection). Makes accumulated spend and expensive cache-cold turns visible to the model and the user. Otherwise cost grows silently through long autonomous sessions.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/hooks/cost_awareness.py",
+          "lines": "190-201",
+          "snippet": "for threshold in COST_WARNING_THRESHOLDS:\n    if prev_cost < threshold <= total:\n        # Crossed this threshold\n        cache_hit_pct = costs.cache_hit_rate * 100\n        warning_text = (\n            f\"<system_warning>Session cost reached ${total:.2f} \"\n            f\"(tokens: {costs.total_input_tokens:,}/{costs.total_output_tokens:,} in/out, \"\n            f\"cache hit: {cache_hit_pct:.1f}%)</system_warning>\"\n        )\n\n        # Store warning to inject on next user message\n        _pending_warning_var.set(warning_text)"
+        },
+        {
+          "file": "gptme/hooks/cost_awareness.py",
+          "lines": "252-259",
+          "snippet": "# Only inject if there's a pending warning and the last message is from user\nif pending_warning and should_inject:\n    yield Message(\n        \"system\",\n        pending_warning,\n        hide=True,\n    )\n    _pending_warning_var.set(None)  # Clear after injecting"
+        },
+        {
+          "file": "gptme/hooks/cost_awareness.py",
+          "lines": "84-94",
+          "snippet": "last_timestamp = max(entry.timestamp for entry in anthropic_entries)\nage_seconds = (time.time() if now is None else now) - last_timestamp\nif age_seconds <= ANTHROPIC_CACHE_TTL_SECS:\n    return None\n\nage_minutes = age_seconds / 60\nttl_minutes = ANTHROPIC_CACHE_TTL_SECS // 60\nreturn (\n    \"Anthropic prompt cache likely cold \"\n    f\"({age_minutes:.1f} min since last Anthropic turn; TTL {ttl_minutes} min)\"\n)"
+        }
+      ]
+    },
+    {
+      "name": "parallel agent detection in the workspace",
+      "what_it_is": "Process scan at session start finds other agent runtimes (gptme, claude, codex, aider, ...) whose CWD equals the workspace and injects a warning recommending a git worktree; during the session a STEP_PRE hook rescans at most every 60 s and reports arriving and departing agents.",
+      "function_in_system": "Sits at SESSION_START and before each step. Surfaces concurrent agents editing the same files, a source of conflicting writes and confusing tool results. Otherwise the agent works on a tree that another process changes underneath it without any signal.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/hooks/workspace_agents.py",
+          "lines": "1470-1485",
+          "snippet": "lines = []\nif active:\n    lines.append(f\"⚠️  {len(active)} other agent(s) detected in this workspace:\")\n    lines.extend(f\"   {_format_agent_line(a)}\" for a in active)\n    lines.append(\"   Consider using a git worktree to avoid conflicts:\")\n    lines.append(\"   git worktree add /tmp/worktrees/my-feature\")\nif stale:\n    lines.append(f\"   ({len(stale)} stale process(es) also found, likely harmless)\")\n\nif lines:\n    warning = \"\\n\".join(lines)\n    yield Message(\n        \"system\",\n        f\"<workspace-agents-warning>\\n{warning}\\n</workspace-agents-warning>\",\n        hide=True,\n    )"
+        },
+        {
+          "file": "gptme/hooks/workspace_agents.py",
+          "lines": "1529-1532, 1550-1561",
+          "snippet": "now = time.time()\nif now - _last_scan_time < _SCAN_INTERVAL:\n    return\n    yield\n...\nif arrived:\n    for pid in arrived:\n        a = current_by_pid[pid]\n        _known_agents[pid] = a\n        if not a.stale:\n            logger.info(f\"New agent arrived: {a.runtime} PID {a.pid}\")\n            yield Message(\n                \"system\",\n                f\"<workspace-agent-arrived>\\n\"\n                f\"New agent in workspace: {_format_agent_line(a)}\\n\"\n                f\"</workspace-agent-arrived>\",\n            )"
+        }
+      ]
+    },
+    {
+      "name": "automatic workspace snapshots and rollback around mutating tools",
+      "what_it_is": "TOOL_EXECUTE_PRE/POST hooks record snapshots in a shadow git repo around write-capable tool calls (save/append/patch/morph always; shell/tmux/ipython when a conservative regex classifier sees redirections, rm/mv/cp, sed -i, git checkout/reset, installers, ...). The post snapshot is stored only when the tree hash changed; old snapshots are pruned to GPTME_AUTO_SNAPSHOT_MAX. Rollback via /snapshot restore first takes a safety snapshot of the current state (aborting if that fails) and then makes the working tree match the chosen snapshot exactly (git read-tree --reset -u).",
+      "function_in_system": "Wraps every mutating tool execution. Provides reversible restore points so destructive or wrong edits by the agent can be rolled back. Otherwise a bad write or command leaves the workspace in a state that can only be recovered by hand.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/hooks/auto_snapshots.py",
+          "lines": "69-70",
+          "snippet": "ALWAYS_MUTATING: frozenset[str] = frozenset({\"save\", \"append\", \"patch\", \"morph\"})\nCONDITIONALLY_MUTATING: frozenset[str] = frozenset({\"shell\", \"tmux\", \"ipython\"})"
+        },
+        {
+          "file": "gptme/hooks/auto_snapshots.py",
+          "lines": "165-171",
+          "snippet": "def _enabled() -> bool:\n    return os.environ.get(\"GPTME_AUTO_SNAPSHOTS\", \"\").lower() in (\n        \"1\",\n        \"true\",\n        \"yes\",\n        \"on\",\n    )"
+        },
+        {
+          "file": "gptme/hooks/auto_snapshots.py",
+          "lines": "242-249, 272-280",
+          "snippet": "try:\n    _pre_tree_var.set(\n        None\n    )  # reset before work; exception paths must not leak stale hash\n    shadow.run(\"add\", \"-A\")\n    before = tree_hash(shadow, stage=False)\n    snapshot(shadow, label=f\"pre:{tool_name}\", stage=False)\n    _pre_tree_var.set(before)\n...\ntry:\n    before = _pre_tree_var.get()\n    shadow.run(\"add\", \"-A\")\n    after = tree_hash(shadow, stage=False)\n    if before is not None and after is not None and before == after:\n        # No mutation actually happened; skip noise.\n        return\n    snapshot(shadow, label=f\"post:{tool_name}\", stage=False)\n    prune(shadow, keep=_max_snapshots())"
+        },
+        {
+          "file": "gptme/workspace_snapshot.py",
+          "lines": "330-346",
+          "snippet": "if not shadow.initialized():\n    return False\nsafety_sha = snapshot(shadow, label=f\"pre-restore-to-{snapshot_id}\")\nif safety_sha is None:\n    logger.warning(\n        \"restore: safety pre-restore snapshot failed; aborting to protect working tree\"\n    )\n    return False\ntree = shadow.run(\"rev-parse\", f\"{snapshot_id}^{{tree}}\", check=False)\nif tree.returncode != 0:\n    logger.warning(\"restore: cannot resolve tree for %s\", snapshot_id)\n    return False\nresult = shadow.run(\"read-tree\", \"--reset\", \"-u\", tree.stdout.strip(), check=False)\nif result.returncode != 0:\n    logger.warning(\"restore read-tree failed: %s\", result.stderr)\n    return False\nreturn True"
+        }
+      ]
+    },
+    {
+      "name": "rule-based auto-compaction of the conversation",
+      "what_it_is": "TURN_POST hook of the autocompact tool. Triggers when the log exceeds 90 % of the context window, or exceeds 50 % and contains a tool result above 2000 tokens, and only if estimated savings reach MIN_SAVINGS_RATIO = 10 % (to justify cache invalidation). Three phases: (1) strip reasoning tags from messages at least 5 positions back, (2) replace the largest tool results first with short summaries whose full output is saved to a file and referenced by byte range in the untouched master conversation.jsonl, (3) extractively compress long older assistant messages to about 70 %, skipping tool-call messages. The result becomes a view branch while the master branch keeps the full history; a 60 s reentrancy guard prevents repeated triggering.",
+      "function_in_system": "Runs after each turn, between turns of the agent loop. Keeps long sessions with massive tool outputs within the context window while retaining a recoverable pointer to every removed piece. Otherwise the conversation hits the context limit and can no longer be continued or resumed.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/autocompact/decision.py",
+          "lines": "15-17, 144-162",
+          "snippet": "# Minimum savings threshold - don't compact unless we can achieve meaningful savings\n# This prevents triggering compaction that only saves a few percent (not worth cache invalidation)\nMIN_SAVINGS_RATIO = 0.10  # Require at least 10% savings to justify compaction\n...\n# First check: would we trigger based on token count?\nwould_trigger = total_tokens > limit or (close_to_limit and has_massive_tool_result)\n\nif not would_trigger:\n    return \"none\"\n\n# Second check: estimate if savings would be worth it\ntotal, estimated_savings, reasoning_savings = estimate_compaction_savings(\n    log, limit\n)\nsavings_ratio = estimated_savings / total if total > 0 else 0\n\nif savings_ratio < MIN_SAVINGS_RATIO:\n    logger.info(\n        f\"Skipping rule-based auto-compact: estimated savings {savings_ratio:.1%} \"\n        f\"({estimated_savings} tokens) below threshold {MIN_SAVINGS_RATIO:.0%}. \"\n        f\"Will use LLM-powered summarization instead.\"\n    )\n    return \"summarize\""
+        },
+        {
+          "file": "gptme/tools/autocompact/engine.py",
+          "lines": "163-181, 183-196",
+          "snippet": "# Sort by token count descending (largest first)\ncandidates.sort(key=lambda x: x[1], reverse=True)\n\n# Truncate largest outputs until under target\nfor idx, msg_tokens, msg in candidates:\n    if current_tokens <= target_tokens:\n        logger.info(\n            f\"Reached target tokens ({current_tokens} <= {target_tokens}), \"\n            f\"stopping truncation early\"\n        )\n        break\n\n    # Replace with a brief summary message\n    summary_content = create_tool_result_summary(\n        content=msg.content,\n        original_tokens=msg_tokens,\n        logdir=logdir,\n        tool_name=\"autocompact\",\n    )\n\n    # Add master context reference for exact recovery\n    # Note: idx must match the message position in conversation.jsonl\n    # This is safe because Phase 1-2 preserve message positions (1:1 mapping)\n    if master_logfile and idx < len(master_context_index):\n        byte_range = master_context_index[idx]\n        # Get first line as preview\n        preview = msg.content.split(\"\\n\")[0] if msg.content else None\n        master_ref = create_master_context_reference(\n            logfile=master_logfile,\n            byte_range=byte_range,\n            original_tokens=msg_tokens,\n            preview=preview,\n        )\n        summary_content += f\"\\n\\n{master_ref}\""
+        },
+        {
+          "file": "gptme/tools/autocompact/engine.py",
+          "lines": "223-230",
+          "snippet": "# Compress messages >1000 tokens that aren't very recent\nif (\n    distance_from_end >= 3  # Don't compress very recent messages\n    and msg.role == \"assistant\"  # Only compress assistant responses\n    and not message_contains_tool_use(msg)  # Preserve tool-call pairs\n    and msg_tokens > 1000  # Only compress long messages\n):\n    compressed_content = compress_content(msg.content, target_ratio=0.7)"
+        },
+        {
+          "file": "gptme/tools/autocompact/hook.py",
+          "lines": "28-30, 97-104, 128-132",
+          "snippet": "# Reentrancy guard to prevent infinite loops\n_last_autocompact_time = 0.0\n_autocompact_min_interval = 60  # Minimum 60 seconds between autocompact attempts\n...\ncurrent_time = time.time()\nif current_time - _last_autocompact_time < _autocompact_min_interval:\n    logger.debug(\n        f\"Skipping autocompact: {current_time - _last_autocompact_time:.1f}s \"\n        f\"since last attempt (min interval: {_autocompact_min_interval}s)\"\n    )\n    return\n...\n# Create a view branch with compacted content\n# Master branch (main) stays intact with full history\nview_name = manager.get_next_view_name()\nmanager.create_view(view_name, compacted_msgs)\nmanager.switch_view(view_name)"
+        }
+      ]
+    },
+    {
+      "name": "LLM summarization fallback for compaction (resume)",
+      "what_it_is": "When rule-based compaction would save less than 10 %, the model is asked to write a structured resume (summary, technical context, current state, context files). The files it lists are re-read from the workspace (max 2000 tokens each), and the history is replaced in a view branch by the original system messages, these files and the resume; RESUME.md is saved in the logdir.",
+      "function_in_system": "Second stage of the TURN_POST autocompact hook. Allows the session to continue when the log cannot be shrunk by rule-based truncation, while the master branch keeps the full history. Otherwise such sessions end at the context limit. Resume quality depends on the LLM.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/autocompact/hook.py",
+          "lines": "164-170",
+          "snippet": "elif action == \"summarize\":\n    logger.info(\"Auto-summarize triggered: rule-based compaction insufficient\")\n    try:\n        m = get_default_model()\n        original_tokens = len_tokens(messages, m.model) if m else 0\n\n        yield from _resume_via_llm(manager, messages, use_view_branch=True)"
+        },
+        {
+          "file": "gptme/tools/autocompact/resume.py",
+          "lines": "177-183",
+          "snippet": "resume_prompt = \"\"\"Please create a comprehensive resume of this conversation that includes:\n\n1. **Conversation Summary**: Key topics, decisions made, and progress achieved\n2. **Technical Context**: Important code changes, configurations, or technical details\n3. **Current State**: What was accomplished and what remains to be done\n4. **Context Files**: List the specific files that should be included in future context"
+        },
+        {
+          "file": "gptme/tools/autocompact/resume.py",
+          "lines": "229-232, 263-268",
+          "snippet": "# Parse and load context files suggested by the LLM\nsuggested_files = _parse_context_files(resume_content)\nworkspace = manager.workspace\nloaded_files = _load_context_files(suggested_files, workspace=workspace)\n...\nnew_log = original_system_msgs + file_context_msgs + [resume_intro_msg, resume_msg]\n\nif use_view_branch:\n    view_name = manager.get_next_view_name()\n    manager.create_view(view_name, new_log)\n    manager.switch_view(view_name)"
+        }
+      ]
+    },
+    {
+      "name": "per-call context reduction and hard context limit",
+      "what_it_is": "prepare_messages runs before every LLM call. reduce_log repeatedly truncates the longest message (codeblocks and <details> blocks cut to first/last 10 lines with '[...]') until below 90 % of the context window (75 % for Anthropic because of tokenizer undercounting); pinned and tool-call messages are protected and a no-progress guard stops recursion. limit_log then keeps the initial system messages plus the newest messages that fit the context window and drops tool results whose tool-call anchor was cut.",
+      "function_in_system": "Sits in step() right before reply(). Guarantees that each request fits the model's context window while keeping tool call/result pairs coherent. Otherwise long sessions fail with context-length API errors or send orphaned tool results.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/logmanager/manager.py",
+          "lines": "784-791, 805",
+          "snippet": "# Use regular reduction\nmsgs_reduced = list(reduce_log(msgs))\n\n# Prune expired ephemeral messages (e.g. thinking blocks) after reduction\n# but before hard context limiting, so the budget goes to durable content.\n# Adjacent same-role messages created by pruning are merged before provider\n# formatting; strict APIs reject consecutive user/assistant turns.\nmsgs_pruned = prune_ephemeral_messages(msgs_reduced)\n...\nmsgs_limited = limit_log(msgs_pruned)"
+        },
+        {
+          "file": "gptme/util/reduce.py",
+          "lines": "48-53, 62-68, 96-102",
+          "snippet": "if limit is None:\n    # Use more conservative multiplier for Anthropic models due to tokenizer inaccuracy\n    # tiktoken's cl100k_base fallback can undercount tokens for Claude models,\n    # so we trigger reduction earlier to avoid hitting the API limit\n    multiplier = 0.75 if model.provider == \"anthropic\" else 0.9\n    limit = multiplier * model.context\n...\n# Filter out pinned messages and assistant tool-call messages. Tool-call\n# messages must remain parseable so paired tool results keep their anchor.\nnon_pinned = [\n    (i, m)\n    for i, m in enumerate(log)\n    if not m.pinned and not message_contains_tool_use(m)\n]\n...\n# recurse until we are below the limit\n# but if prev_len == tokens, we are not making progress, so just return the log as-is\nif prev_len == tokens:\n    logger.warning(\"Not making progress, returning log as-is\")\n    yield from log\nelse:\n    yield from reduce_log(log, limit, prev_len=tokens)"
+        },
+        {
+          "file": "gptme/util/reduce.py",
+          "lines": "266-278",
+          "snippet": "# Pick the messages in latest-first order\nmsgs = []\nfor msg in reversed(log[len(initial_system_msgs) :]):\n    msgs.append(msg)\n    if len_tokens(msgs, model.model) > model.context:\n        break\n\n# Remove the message that put us over the limit\nif len_tokens(msgs, model.model) > model.context:\n    # skip the last message\n    msgs.pop()\n\nresult = initial_system_msgs + list(reversed(msgs))"
+        }
+      ]
+    },
+    {
+      "name": "time-to-live expiry of ephemeral context messages",
+      "what_it_is": "Messages carrying ephemeral_ttl=N are dropped from the prompt once N later assistant turns exist (they stay in the log on disk); pinned messages never expire, and adjacent same-role messages left by pruning are merged. The core code provides the mechanism; producers of TTL messages are plugins/hooks (the docstring names thinking blocks as an example).",
+      "function_in_system": "Runs inside prepare_messages before the hard context limit, and its boundary feeds the prompt-caching breakpoint. Lets short-lived context (status injections, reasoning) occupy the window only as long as it is useful, so the budget goes to durable content. Otherwise such messages accumulate for the whole session.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/logmanager/manager.py",
+          "lines": "709-731",
+          "snippet": "assistant_turns_after = 0\nkept_reversed: list[Message] = []\n\nfor msg in reversed(msgs):\n    if msg.pinned:\n        kept_reversed.append(msg)\n        if msg.role == \"assistant\":\n            assistant_turns_after += 1\n        continue\n\n    ttl = msg.ephemeral_ttl\n    if ttl is not None and assistant_turns_after > ttl:\n        # Expired — drop from context window (not from the log on disk).\n        # Do NOT increment assistant_turns_after: dropped messages must not\n        # inflate the turn count seen by earlier messages with longer TTLs.\n        continue\n\n    kept_reversed.append(msg)\n    if msg.role == \"assistant\":\n        assistant_turns_after += 1\n\npruned = list(reversed(kept_reversed))\nreturn _merge_consecutive_messages(pruned)"
+        },
+        {
+          "file": "gptme/message.py",
+          "lines": "217-218",
+          "snippet": "# ephemeral_ttl=2 means: keep for 2 more assistant turns, then drop from prepare_messages().\nephemeral_ttl: int | None = None"
+        }
+      ]
+    },
+    {
+      "name": "hard denylist for dangerous shell commands",
+      "what_it_is": "Regex deny groups block bulk git staging (git add ., commit -a), destructive git (reset --hard, clean -f, push --force, reflog expire, filter-branch), rm -rf / and rm -rf *, chmod 777, pkill/killall, and piping into shell or script interpreters. Matches inside quotes or heredocs are ignored. A denied command is never executed; the model gets 'Command denied' with the reason and a safer alternative.",
+      "function_in_system": "Sits in execute_shell before the confirmation gate, so it also applies in autonomous mode without confirmation. Contains irreversible damage to the repository and system from model-generated commands and steers the model to the safe variant. Otherwise a single hallucinated destructive command can wipe work.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/shell_validation.py",
+          "lines": "64-73",
+          "snippet": "(\n    [\n        r\"git\\s+reset\\s+--hard\",\n        r\"git\\s+clean\\s+-[fFdDxX]+\",\n        r\"git\\s+push\\s+(-f|--force)(?!-)\",  # Allow --force-with-lease\n        r\"git\\s+reflog\\s+expire\",\n        r\"git\\s+filter-branch\",\n    ],\n    \"Destructive git operations are blocked. Use safer alternatives: `git stash` to save changes, `git reset --soft` to uncommit without losing changes, `git push --force-with-lease` for safer force pushes.\",\n),"
+        },
+        {
+          "file": "gptme/tools/shell_validation.py",
+          "lines": "325-333",
+          "snippet": "for patterns, reason in deny_groups:\n    for pattern in patterns:\n        match = re.search(pattern, cmd, re.IGNORECASE)\n        if match:\n            # Check if the match is within a safe region (quoted or heredoc)\n            match_start = match.start()\n            if not _is_in_quoted_region(match_start, safe_regions):\n                # Return the matched text to show in error message\n                return True, reason, match.group(0)"
+        },
+        {
+          "file": "gptme/tools/shell.py",
+          "lines": "1650-1654",
+          "snippet": "# Check if command is denylisted - these are blocked entirely\nis_denied, deny_reason, matched_cmd = is_denylisted(cmd)\nif is_denied:\n    yield Message(\"system\", f\"Command denied: `{matched_cmd}`\\n\\n{deny_reason}\")\n    return"
+        }
+      ]
+    },
+    {
+      "name": "static shellcheck validation before execution",
+      "what_it_is": "Every shell command is written to a temp file and checked with shellcheck (5 s timeout). Findings are returned to the model; the blocking codes SC1011, SC1073 and SC2006 (broken quoting, legacy backticks; extensible via GPTME_SHELLCHECK_ERROR_CODES) stop execution.",
+      "function_in_system": "Sits in execute_shell before denylist and confirmation. Catches syntactically broken commands before they run and gives the model concrete diagnostics to fix them. Otherwise malformed quoting executes with unpredictable effects. Runs only when shellcheck is installed.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/shell_validation.py",
+          "lines": "412-416, 463-470",
+          "snippet": "# Default error codes (should block execution)\n# SC1011: This apostrophe terminated the single quoted string!\n# SC1073: Couldn't parse this single quoted string. Fix to allow more checks.\n# SC2006: Use $(...) notation instead of legacy backticks (causes formatting issues in commits/PRs)\ndefault_error_codes = [\"SC1011\", \"SC1073\", \"SC2006\"]\n...\n# Check if any triggered codes are error codes (should block)\nblocking_codes = triggered_codes.intersection(set(error_codes))\n\nif blocking_codes:\n    # Critical issues that should block execution\n    codes_str = \", \".join(sorted(blocking_codes))\n    message = f\"Shellcheck found critical issues that prevent execution:\\n{md_codeblock('', output)}\\n\\nBlocking codes: {codes_str}\"\n    return True, True, message"
+        },
+        {
+          "file": "gptme/tools/shell.py",
+          "lines": "1642-1648",
+          "snippet": "# Check with shellcheck if available\nhas_issues, should_block, shellcheck_msg = check_with_shellcheck(cmd)\nif has_issues:\n    yield Message(\"system\", shellcheck_msg)\n    # Block execution if critical shellcheck errors found\n    if should_block:\n        return"
+        }
+      ]
+    },
+    {
+      "name": "shell command timeout with process-group kill",
+      "what_it_is": "Shell commands time out after 1200 s by default (GPTME_SHELL_TIMEOUT, 0 disables). On timeout the whole process group receives SIGTERM, then SIGKILL; the partial output is returned with exit code -124 and the header 'Command timed out (after Xs)'.",
+      "function_in_system": "Sits in the shell tool's output-reading loop inside a step. Frees the agent from hanging commands (servers, interactive prompts, endless loops) and tells the model what happened. Otherwise one blocking command stalls the whole session.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/shell.py",
+          "lines": "1546-1560",
+          "snippet": "def _get_timeout() -> float | None:\n    timeout: float | None = 1200.0\n    timeout_env = os.environ.get(\"GPTME_SHELL_TIMEOUT\")\n    if timeout_env is not None:\n        try:\n            timeout = float(timeout_env)\n            if timeout <= 0:\n                timeout = None\n        except ValueError:\n            logger.warning(\n                \"Invalid GPTME_SHELL_TIMEOUT value: %s, using default 1200s (20 minutes)\",\n                timeout_env,\n            )\n            timeout = 1200.0\n    return timeout"
+        },
+        {
+          "file": "gptme/tools/shell.py",
+          "lines": "749-768",
+          "snippet": "if elapsed >= timeout:\n    # Timeout exceeded\n    logger.info(f\"Command timed out after {timeout} seconds\")\n    # Terminate the entire process group (bash + all child processes)\n    try:\n        pgid = os.getpgid(self.process.pid)\n        os.killpg(pgid, signal.SIGTERM)\n        time.sleep(0.1)  # Give it a moment to terminate\n        if self.process.poll() is None:\n            os.killpg(pgid, signal.SIGKILL)\n    except Exception as e:\n        logger.warning(f\"Error terminating timed-out process: {e}\")\n\n    partial_stdout = trim_blank_lines(\"\".join(stdout))\n    partial_stderr = trim_blank_lines(\"\".join(stderr))\n    return (\n        -124,\n        partial_stdout,\n        partial_stderr,\n    )  # Use timeout exit code (124)"
+        },
+        {
+          "file": "gptme/tools/shell.py",
+          "lines": "1328-1333",
+          "snippet": "if timed_out:\n    header = (\n        f\"Command timed out (after {timeout_value}s)\"\n        if timeout_value\n        else \"Command timed out\"\n    )"
+        }
+      ]
+    },
+    {
+      "name": "shell output truncation with full output offloaded to file",
+      "what_it_is": "Shell stdout is cut to head/tail token budgets (2000 + 8000; stderr 2000 + 2000; env-overridable); before truncating, the full output is saved in the conversation logdir and the path is included in the message. git log --oneline and gh issue/pr list get a compact preview with a pointer to the saved file.",
+      "function_in_system": "Sits where tool output is formatted into the observation message. Keeps single huge outputs from flooding the context window while the complete data stays retrievable by the agent. Otherwise one verbose command consumes most of the context and triggers compaction or overflow.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/shell.py",
+          "lines": "105-109",
+          "snippet": "# Default token budgets for shell output truncation (overridable via env vars).\n_TRUNC_PRE_TOKENS_DEFAULT = 2000\n_TRUNC_POST_TOKENS_DEFAULT = 8000\n_TRUNC_STDERR_PRE_TOKENS_DEFAULT = 2000\n_TRUNC_STDERR_POST_TOKENS_DEFAULT = 2000"
+        },
+        {
+          "file": "gptme/tools/shell.py",
+          "lines": "1730-1732, 1747-1760",
+          "snippet": "# If truncation will happen, save full output to file\nsaved_path = None\nif will_truncate_by_lines or will_truncate_by_tokens:\n...\n    if logdir is not None:\n        command_info = f\"Command: {cmd}\" if cmd else None\n        original_tokens = (\n            len(tokens)\n            if (will_truncate_by_tokens and tokenizer is not None)\n            else None\n        )\n        _, saved_path = save_large_output(\n            content=stdout,\n            logdir=logdir,\n            output_type=\"shell\",\n            command_info=command_info,\n            original_tokens=original_tokens,\n        )"
+        },
+        {
+          "file": "gptme/tools/shell.py",
+          "lines": "1173-1177",
+          "snippet": "detail = f\"Showing first {_GIT_LOG_PREVIEW_LINES} of {len(lines)} commits.\"\nif saved_path:\n    detail += (\n        f\" Full output saved to {saved_path}; read that file for the complete list.\"\n    )"
+        },
+        {
+          "file": "gptme/tools/tmux.py",
+          "lines": "74-88",
+          "snippet": "# Save full output to file if logdir provided\nsaved_path = None\nif logdir:\n    _, saved_path = save_large_output(\n        content=content,\n        logdir=logdir,\n        output_type=\"tmux\",\n        command_info=context,\n    )\n\n# Build truncation message\ntruncation_msg = f\"... ({truncated_count} lines truncated\"\nif saved_path:\n    truncation_msg += f\", full output saved to {saved_path}\"\ntruncation_msg += \") ...\""
+        }
+      ]
+    },
+    {
+      "name": "automatic restart of a dead shell process",
+      "what_it_is": "When writing to the persistent bash process raises BrokenPipeError (process died), the shell is restarted once and the command is re-run.",
+      "function_in_system": "Sits in ShellSession._run_pipe inside a shell tool call. Recovers the long-lived shell session transparently after it crashed or was killed. Otherwise every subsequent shell call in the session fails.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/shell.py",
+          "lines": "517-528",
+          "snippet": "try:\n    self.process.stdin.write(full_command)\nexcept BrokenPipeError:\n    # process has died\n    if tries == 0:\n        # log warning and restart, once\n        logger.warning(\"Warning: shell process died, restarting\")\n        self.restart()\n        return self._run_pipe(\n            command, output=output, tries=tries + 1, timeout=timeout\n        )\n    raise"
+        }
+      ]
+    },
+    {
+      "name": "patch application safeguards",
+      "what_it_is": "The original chunk must match exactly once (multiple matches are rejected with a request for more context); on no exact match a relaxed matcher treats whitespace-only lines as equal; no-op patches are rejected; multi-hunk failures report which hunk failed and how many were applied before. With GPTME_PATCH_RECOVERY the error contains the actual file content.",
+      "function_in_system": "Sits in the patch tool between the model's edit and the file write. Makes wrong or ambiguous edits fail cleanly with actionable feedback so the model can correct them in the next step. Otherwise an ambiguous search/replace edits the wrong location or silently does nothing.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/patch.py",
+          "lines": "102-127",
+          "snippet": "# Fast path: try exact match first (backward compatible)\nif self.original in content:\n    count = content.count(self.original)\n    if count > 1:\n        raise ValueError(\n            f\"original chunk is not unique ({count} matches found). \"\n            \"Provide more surrounding context to make the match unique.\"\n        )\n    new_content = content.replace(self.original, self.updated, 1)\n    if new_content == content:\n        raise ValueError(\n            \"patch did not change the file \"\n            \"(original and updated chunks are identical)\"\n        )\n    return new_content\n\n# Fallback: try relaxed matching (treat whitespace-only lines as equivalent)\nactual_original = self._find_relaxed_match(content)\nif actual_original is None:\n    # if original chunk not found, include file contents in error for fast recovery\n    file_contents = (\n        f\"Here are the actual file contents:\\n```original\\n{content}\\n```\"\n        if get_config().get_env_bool(\"GPTME_PATCH_RECOVERY\")\n        else \"\"\n    )\n    raise ValueError(f\"original chunk not found in file\\n{file_contents}\")"
+        },
+        {
+          "file": "gptme/tools/patch.py",
+          "lines": "301-308",
+          "snippet": "if total_hunks == 1:\n    raise ValueError(error_msg) from None\nstatus = f\"Hunk {i}/{total_hunks} failed\"\nif i > 1:\n    status += f\" ({i - 1} hunk(s) applied successfully before failure)\"\nraise ValueError(\n    f\"{status}: {error_msg}\\nFailed hunk starts with: {original_preview!r}\"\n) from None"
+        },
+        {
+          "file": "gptme/tools/morph.py",
+          "lines": "197-205",
+          "snippet": "# Verify that the file hasn't changed since we generated the patch\nif current_content != expected_original_content:\n    yield Message(\n        \"system\",\n        f\"Failed morph edit: File `{path}` has been modified since the patch was generated. \"\n        f\"The file content has changed and applying the edit could overwrite recent changes. \"\n        f\"Please retry the morph operation with the current file content.\",\n    )\n    return"
+        }
+      ]
+    },
+    {
+      "name": "placeholder detection in file writes",
+      "what_it_is": "save/append abort when the content contains placeholder lines such as '# ...' or '// ...' and ask for the complete content; patch splits hunks at matching placeholders so they are never written literally.",
+      "function_in_system": "Sits in the file-writing tools before the write. Catches the common LLM failure of abbreviating unchanged code, which would overwrite real code with a comment. Otherwise files silently lose their elided parts.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/save.py",
+          "lines": "113-119",
+          "snippet": "# Regex for detecting placeholder lines like \"# ... rest of content\" or \"// ... content here\"\nre_placeholder = re.compile(r\"^\\s*(#|//|\\\"{3})\\s*\\.{3}.*$\", re.MULTILINE)\n\n\ndef check_for_placeholders(content: str) -> bool:\n    \"\"\"Check if content contains placeholder lines.\"\"\"\n    return bool(re_placeholder.search(content))"
+        },
+        {
+          "file": "gptme/tools/save.py",
+          "lines": "296-301",
+          "snippet": "if check_for_placeholders(code):\n    action = \"Save\" if operation == \"save\" else \"Append\"\n    yield Message(\n        \"system\",\n        f\"{action} aborted: Content contains placeholder lines (e.g. '# ...' or '// ...'). \"\n        \"Please provide the complete content\""
+        },
+        {
+          "file": "gptme/tools/patch.py",
+          "lines": "266-277",
+          "snippet": "re_placeholder = re.compile(r\"^[ \\t]*(#|//|\\\") \\.\\.\\. ?.*$\", re.MULTILINE)\nif re_placeholder.search(original) or re_placeholder.search(updated):\n    originals = re_placeholder.split(original)\n    modifieds = re_placeholder.split(updated)\n    if len(originals) != len(modifieds):\n        raise ValueError(\n            \"different number of placeholders in original and modified chunks\"\n        )\n    for orig, mod in zip(originals, modifieds):\n        if orig == mod:\n            continue\n        yield Patch(orig, mod)"
+        }
+      ]
+    },
+    {
+      "name": "pre-commit checks after turns with feedback to the model",
+      "what_it_is": "TURN_POST hook runs pre-commit on modified files when the last assistant message changed files; failures are returned to the model and StopPropagation prevents autocommit. Only the last assistant message is checked for modifications, so replies to check output do not re-trigger the checks. Optional per-file run after each save (GPTME_CHECK_PER_FILE).",
+      "function_in_system": "Sits after the tool loop of a turn, before autocommit. Adds an external deterministic verifier (formatters, linters, type checkers) whose output drives the next correction step. Otherwise lint and type errors introduced by the agent stay unnoticed or get committed.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/precommit.py",
+          "lines": "61-78",
+          "snippet": "flag = get_config().get_env(\"GPTME_CHECK\", \"\") or \"\"\nexplicit_enabled = flag.lower() in (\"1\", \"true\", \"yes\")\nexplicit_disabled = flag.lower() in (\"0\", \"false\", \"no\")\nif explicit_disabled:\n    return False\n\n# Check for .pre-commit-config.yaml in any parent directory\nhas_config = any(\n    parent.joinpath(\".pre-commit-config.yaml\").exists()\n    for parent in [Path.cwd(), *Path.cwd().parents]\n)\n\nif explicit_enabled and not has_config:\n    logger.warning(\n        \"GPTME_CHECK is enabled but no .pre-commit-config.yaml found in any parent directory\"\n    )\n\nenabled = explicit_enabled or has_config"
+        },
+        {
+          "file": "gptme/tools/precommit.py",
+          "lines": "345-358",
+          "snippet": "# Check if there are modifications\n\nif not check_for_modifications(manager.log):\n    logger.debug(\"No modifications, skipping pre-commit checks\")\n    return\n\ntry:\n    # Run pre-commit checks only on modified files (not --all-files)\n    success, failed_check_message = run_precommit_checks(all_files=False)\n\n    if not success and failed_check_message:\n        yield Message(\"system\", failed_check_message, quiet=False)\n        # Stop propagation to prevent autocommit from running with failed checks\n        yield StopPropagation()"
+        },
+        {
+          "file": "gptme/logmanager/manager.py",
+          "lines": "815-821",
+          "snippet": "\"\"\"Check if the most recent assistant message (since last user) has file modifications.\n\nOnly checks the last assistant message to prevent re-triggering pre-commit/autocommit\nwhen the agent responds to hook output (e.g. pre-commit failure) without making new\nfile changes. Checking all assistant messages since the last user would cause infinite\nloops: the original save is still visible after the agent writes a text response to\nthe failure."
+        }
+      ]
+    },
+    {
+      "name": "stuck-loop detection with root-cause hint",
+      "what_it_is": "LOOP_CONTINUE hook in autonomous mode fingerprints each assistant turn's tool calls (tool, args, body). When the same fingerprint repeats 3 times in a row (GPTME_STUCK_REPEAT_THRESHOLD), the model receives 'You appear stuck ...' with a classified likely cause (permission-denied, tool-error, empty-result) and an evidence excerpt from the tool output; after 2 unsuccessful escalations (GPTME_STUCK_ESCALATE_MAX) the session is ended via SessionCompleteException.",
+      "function_in_system": "Sits in the outer loop after each processed turn, only in non-interactive runs where no human can intervene. Breaks silent failing loops where the agent keeps reissuing the same action, first by redirecting the model with a diagnosis, then by terminating. Otherwise such a loop runs until the budget or timeout is exhausted.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/complete.py",
+          "lines": "381-395",
+          "snippet": "# Only run in non-interactive mode — a human can break their own loop.\nif interactive:\n    return\n\nif not _env_flag(\"GPTME_STUCK_DETECT\", \"1\"):\n    return\n\n# Skip if there are queued prompts (mirrors auto_reply_hook).\nif prompt_queue:\n    return\n\nrepeat_threshold = _env_int(\"GPTME_STUCK_REPEAT_THRESHOLD\", 3)\nescalate_max = _env_int(\"GPTME_STUCK_ESCALATE_MAX\", 2)\nif repeat_threshold < 2:\n    return  # detection disabled by config"
+        },
+        {
+          "file": "gptme/tools/complete.py",
+          "lines": "436-447",
+          "snippet": "if escalation_count >= escalate_max:\n    logger.warning(\n        \"Stuck loop not broken after %d escalations (repeated `%s`). Exiting.\",\n        escalate_max,\n        repeated_tool_str,\n    )\n    raise SessionCompleteException(\n        f\"Stuck loop not broken after {escalate_max} escalations\"\n    )\n\n# Classify the root cause (always on; disable everything with GPTME_STUCK_DETECT=0).\nclassification, evidence = _classify_stuck_reason(manager.log.messages)"
+        },
+        {
+          "file": "gptme/tools/complete.py",
+          "lines": "472-481",
+          "snippet": "yield Message(\n    \"user\",\n    (\n        f\"<system>You appear stuck: the same tool call (`{repeated_tool_str}`) was \"\n        f\"repeated {repeats} times without progress.{rca_hint} Try a different \"\n        f\"approach, fix the underlying error, or use the `complete` tool if you are \"\n        f\"genuinely blocked.</system>\"\n    ),\n    quiet=False,\n)"
+        }
+      ]
+    },
+    {
+      "name": "auto-reply on tool-less turns and explicit completion signal",
+      "what_it_is": "In autonomous mode a turn without tool calls triggers an injected user message: a reminder listing incomplete todos, or otherwise a question whether the task is finished with a pointer to the complete tool; after 2 consecutive auto-replies without tool use the session ends. In interactive -y mode a single quiet nudge is injected. The complete tool is added automatically in non-interactive mode, and a GENERATION_PRE hook stops all further generation once it was called.",
+      "function_in_system": "Sits at LOOP_CONTINUE and GENERATION_PRE, i.e. at the termination decision of the agent loop. Prevents premature stops with open todos, idle turns that burn tokens, and generation after the task is declared done. Otherwise an autonomous run either stalls on a text-only answer or loops without a clear end.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/complete.py",
+          "lines": "213-229",
+          "snippet": "# Exit after 2 consecutive auto-replies without tools\nif auto_reply_count >= 2:\n    logger.warning(\"Autonomous mode: No tools used after 2 confirmations. Exiting.\")\n    raise SessionCompleteException(\"No tools used after 2 auto-reply confirmations\")\n\n# First time - inject auto-reply\n# Check for incomplete todos - if present, remind about them instead of asking about completion\nif has_incomplete_todos():\n    incomplete_summary = get_incomplete_todos_summary()\n    logger.warning(\n        \"Auto-reply: Assistant had no tools but has incomplete todos. Reminding to continue...\"\n    )\n    yield Message(\n        \"user\",\n        f\"<system>No tool call detected in last message. You have incomplete todos:\\n{incomplete_summary}\\n\\nPlease continue working on these tasks, or mark them complete/remove them before finishing.</system>\",\n        quiet=False,\n    )"
+        },
+        {
+          "file": "gptme/tools/complete.py",
+          "lines": "91-96",
+          "snippet": "# Check if the assistant called the complete tool\ntool_uses = list(ToolUse.iter_from_content(last_assistant_msg.content))\nfor tool_use in tool_uses:\n    if tool_use.tool == \"complete\":\n        logger.info(\"Complete tool call detected, stopping session immediately\")\n        raise SessionCompleteException(\"Session completed via complete tool\")"
+        },
+        {
+          "file": "gptme/config/cli_setup.py",
+          "lines": "168-177",
+          "snippet": "# Automatically add 'complete' tool in non-interactive mode\nif not interactive:\n    if resolved_tool_allowlist is None:\n        # Get default tools and add complete to them\n        default_tools = [tool.name for tool in get_toolchain(None)]\n        resolved_tool_allowlist = default_tools\n        if \"complete\" not in resolved_tool_allowlist:\n            resolved_tool_allowlist.append(\"complete\")\n    elif \"complete\" not in resolved_tool_allowlist:\n        resolved_tool_allowlist.append(\"complete\")"
+        }
+      ]
+    },
+    {
+      "name": "browser restart and retry on connection errors",
+      "what_it_is": "The Playwright browser thread retries a command after a connection error by relaunching the browser (max 2 attempts, 20 s command timeout); a failed relaunch is reported as an explicit error.",
+      "function_in_system": "Sits in the browser tool's worker thread, inside a tool call. Recovers from a crashed or disconnected browser so web browsing keeps working within the session. Otherwise every later browser call fails after the first disconnect.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/_browser_thread.py",
+          "lines": "18",
+          "snippet": "TIMEOUT = 20  # seconds - accounts for retry attempts with browser restarts"
+        },
+        {
+          "file": "gptme/tools/_browser_thread.py",
+          "lines": "152-178",
+          "snippet": "# Try to execute command, with retry on connection error\ncommand_name = getattr(cmd.func, \"__name__\", str(cmd.func))\nmax_retries = 2\nfor attempt in range(max_retries):\n    try:\n        result = cmd.func(browser, *cmd.args, **cmd.kwargs)\n        with self.lock:\n            self.results[cmd_id] = (result, None)\n        break  # Success, exit retry loop\n    except Exception as e:\n        if _is_connection_error(e):\n            logger.warning(\n                f\"Connection error in {command_name} (attempt {attempt + 1}/{max_retries}): {e}\"\n            )\n            if attempt < max_retries - 1:\n                # Try to recover by restarting browser\n                logger.info(\"Attempting to restart browser...\")\n                restart_error = launch_browser()\n                if restart_error is None:\n                    logger.info(\"Browser restarted successfully\")\n                    continue  # Retry command\n                restart_error = RuntimeError(\n                    f\"Browser restart failed after connection error in {command_name}: {restart_error}\"\n                )\n                with self.lock:\n                    self.results[cmd_id] = (None, restart_error)\n                break  # Exit retry loop immediately"
+        }
+      ]
+    },
+    {
+      "name": "subagent isolation in a git worktree",
+      "what_it_is": "With isolated=True (and automatically for the verify role) a subagent works in its own git worktree on a fresh branch, or in a temp directory outside git repos; the worktree is cleaned up after completion. Agent profiles hard-restrict the subagent's tool set via set_tools, always keeping the completion/clarification signal tools.",
+      "function_in_system": "Sits at subagent spawn time in the multi-agent path. Contains the file changes and tool permissions of a worker agent so it cannot damage the parent's workspace or exceed its role. Otherwise parallel workers edit the same tree and a faulty worker corrupts the parent's state.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/subagent/api.py",
+          "lines": "264-278",
+          "snippet": "if isolated:\n    from ...util.git_worktree import create_worktree, get_git_root\n\n    repo_path = get_git_root(workspace)\n    if repo_path:\n        try:\n            worktree_path = create_worktree(\n                repo_path,\n                branch_name=f\"subagent-{agent_id}-{uuid.uuid4().hex[:8]}\",\n            )\n            workspace = worktree_path\n            logger.info(\n                f\"Subagent {agent_id} isolated in worktree: {worktree_path}\"\n            )"
+        },
+        {
+          "file": "gptme/tools/subagent/execution.py",
+          "lines": "213-222",
+          "snippet": "# Always include completion/clarification signal tools so restricted\n# subagents can still end cleanly or ask the parent for more context.\nrequired_tools = [\n    tool for tool in loaded_tools if tool.name in _SUBAGENT_SIGNAL_TOOLS\n]\nfor tool in required_tools:\n    if tool not in available_tools:\n        available_tools.append(tool)\n# Hard enforcement: replace loaded tools so execute_msg() only sees allowed tools\nset_tools(available_tools)"
+        },
+        {
+          "file": "gptme/tools/subagent/execution.py",
+          "lines": "492-502",
+          "snippet": "def _cleanup_isolation(subagent: \"Subagent\") -> None:\n    \"\"\"Clean up worktree or temp directory after subagent completes.\"\"\"\n    if not subagent.isolated or not subagent.worktree_path:\n        return\n\n    from ...util.git_worktree import cleanup_worktree\n\n    try:\n        cleanup_worktree(subagent.worktree_path, subagent.repo_path)\n    except Exception as e:\n        logger.warning(f\"Failed to cleanup isolation for {subagent.agent_id}: {e}\")"
+        }
+      ]
+    },
+    {
+      "name": "subagent timeout and concurrency limit",
+      "what_it_is": "Subprocess subagents are killed after timeout = 1800 s and reported to the parent as failure 'Process killed after Ns timeout'. A bounded semaphore limits concurrently running subagents to GPTME_SUBAGENT_MAX_CONCURRENT, [subagent] max_concurrent, or by default min(8, CPU count).",
+      "function_in_system": "Sits in subagent execution and monitoring in the multi-agent path. Keeps hanging workers from blocking the parent indefinitely and caps parallel spend and load. Otherwise a stuck worker never reports back and a burst of spawns exhausts API budget and machine resources.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/subagent/execution.py",
+          "lines": "526-535, 548-551",
+          "snippet": "# Wait for process to complete with timeout to prevent indefinite blocking\ntry:\n    subagent.process.wait(timeout=subagent.timeout)\nexcept subprocess.TimeoutExpired:\n    logger.warning(\n        f\"Subagent {subagent.agent_id} timed out after {subagent.timeout}s, killing\"\n    )\n    _timed_out = True\n    subagent.process.kill()\n    subagent.process.wait()  # reap the killed process\n...\nelif _timed_out:\n    # Process was killed because our timeout expired (not an external SIGKILL)\n    status = \"failure\"\n    result = f\"Process killed after {subagent.timeout}s timeout\""
+        },
+        {
+          "file": "gptme/tools/subagent/concurrency.py",
+          "lines": "49, 57",
+          "snippet": "return min(8, os.cpu_count() or 2)\n...\n_slot_sem = threading.BoundedSemaphore(_max_concurrent())"
+        },
+        {
+          "file": "gptme/tools/subagent/api.py",
+          "lines": "52, 332-333",
+          "snippet": "timeout: int = 1800,\n...\n_sem = get_slot_sem()\n_sem.acquire()"
+        }
+      ]
+    },
+    {
+      "name": "hash-anchored atomic file edits",
+      "what_it_is": "view_anchored renders a file with a content-addressed anchor per line; patch_anchored applies a JSON batch of edits addressed by anchors against the current file. Any unresolved anchor or failing 'expected' guard rejects the whole batch and re-renders the file for a retry.",
+      "function_in_system": "Alternative edit path in the tool layer. Makes edits robust against line-number drift and stale views, applying all-or-nothing. Otherwise edits based on an outdated view land in the wrong place or leave a file half-edited.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/patch_anchored.py",
+          "lines": "9-16",
+          "snippet": "2. ``patch_anchored <path>`` — accepts a JSON array of edit operations\n   (``{anchor, op, text, expected}``), resolves all anchors against the\n   *current* file, then applies the batch atomically.  Any unresolved\n   anchor or failing ``expected`` guard rejects the whole batch and\n   re-renders the file so the model can retry.\n\nBoth tools are disabled by default (enable via allowlist or\n``TOOL_ALLOWLIST`` env var)."
+        }
+      ]
+    },
+    {
+      "name": "conversation backtracking with rewind reason for the model",
+      "what_it_is": "/backtrack mark stores labeled message-index checkpoints in an append-only sidecar file; /backtrack <label|N> truncates the log to that point and appends a system message '[Backtracked N message(s) to index I (checkpoint: ...)]' plus an optional --reason. Every edit and /undo first saves the previous log as a backup branch.",
+      "function_in_system": "User-triggered recovery on the conversation layer, between turns. Rewinds the agent to a known-good state after a failed tool run or a bad exchange and tells the model why, so the retry is informed. Otherwise a derailed trajectory stays in context and biases every following step.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/commands/backtrack.py",
+          "lines": "158-177",
+          "snippet": "# Truncate the log (edit() saves a backup branch automatically)\nnew_messages = list(ctx.manager.log.messages[:rewind_to])\nctx.manager.edit(new_messages)\n\n# Build the corrective summary message\nif reason:\n    # strip surrounding quotes that some shells add\n    reason = re.sub(r'^[\"\\']|[\"\\']$', \"\", reason).strip()\n\nsummary_parts = [\n    f\"[Backtracked {removed} message(s) to index {rewind_to}\",\n    f\" (checkpoint: '{record.label}')\" if not record.label.startswith(\"@\") else \"\",\n    \"]\",\n]\nif reason:\n    summary_parts.append(f\"\\n{reason}\")\nsummary = \"\".join(summary_parts)\n\nsummary_msg = Message(\"system\", summary, hide=True)\nyield summary_msg"
+        },
+        {
+          "file": "gptme/logmanager/manager.py",
+          "lines": "493-498, 515-517",
+          "snippet": "def _save_backup_branch(self, type=\"edit\") -> None:\n    \"\"\"backup the current log to a new branch, usually before editing/undoing\"\"\"\n    branch_prefix = f\"{self.current_branch}-{type}-\"\n    n = len([b for b in self._branches if b.startswith(branch_prefix)])\n    self._branches[f\"{branch_prefix}{n}\"] = self.log\n    self.write()\n...\n# don't save backup branch if undoing a command\nif self.log and not self.log[-1].content.startswith(\"/\"):\n    self._save_backup_branch(type=\"undo\")"
+        }
+      ]
+    },
+    {
+      "name": "git-backed workspace checkpoints with guarded restore",
+      "what_it_is": "gptme checkpoint records the current git HEAD per workspace (stored under $XDG_STATE_HOME, outside the repo), lists and diffs checkpoints, and restores via git reset --hard. Restore is refused for dirty workspaces without --include-dirty and always refused for non-git or multi-root workspaces.",
+      "function_in_system": "User-triggered recovery on the filesystem layer, outside the agent loop. Restores the repository after an agent run touched more than intended, while refusing restores that would silently discard uncommitted work. Otherwise damage from a run has to be undone by hand.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/checkpoint.py",
+          "lines": "1-13",
+          "snippet": "\"\"\"Workspace checkpoint primitives for ``gptme checkpoint``.\n\nLightweight, Git-backed recovery markers for single-root Git workspaces:\nrecord the current ``HEAD``, list previous checkpoints, diff against them,\nand restore by ``git reset --hard <head>``.\n\nThis is **not** conversation backtracking (see gptme/gptme#523) — it is purely\nabout recovering filesystem state when an agent run touches more than the user\nexpected. The implementation is conservative on purpose:\n\n- ``clean_git`` workspaces are checkpointed and restored without ceremony.\n- ``dirty_git`` workspaces require explicit ``--include-dirty``.\n- ``non_git`` and ``multi_root`` workspaces are refused entirely in this MVP."
+        },
+        {
+          "file": "gptme/checkpoint.py",
+          "lines": "374-383, 394-400",
+          "snippet": "elif decision.kind == \"dirty_git\":\n    raise CheckpointError(\n        \"workspace has uncommitted changes — it is not safe to restore \"\n        \"a checkpoint without --include-dirty. Commit or stash your \"\n        \"changes first, or pass --include-dirty to discard them.\"\n    )\nelse:\n    raise CheckpointError(\n        f\"cannot restore checkpoint in {decision.kind} workspace: {decision.reason}\"\n    )\n...\nresult = subprocess.run(\n    [\"git\", \"reset\", \"--hard\", record.head_sha],\n    check=False,\n    cwd=decision.repo_root,\n    capture_output=True,\n    text=True,\n)"
+        }
+      ]
+    },
+    {
+      "name": "context-triggered lesson injection with session cap",
+      "what_it_is": "A STEP_PRE hook matches lesson files against recent user and assistant messages and recently used tools, via frontmatter keywords, regex patterns and skill names, with tool matches weighted 2.0. New matches are injected as a hidden system message. Lessons already present in the log are skipped, and a session cap limits the total to 20 unique lessons (GPTME_LESSONS_MAX_SESSION). Hybrid ranking with embeddings and bandit/judge effectiveness scores is opt-in (GPTME_LESSONS_USE_HYBRID).",
+      "function_in_system": "Runs before each step. Brings documented failure modes and working patterns into the context at the moment the conversation touches the matching topic or tool, steering the model away from known mistakes. The cap and the dedup against the log keep injected guidance from growing the context without bound. Otherwise the model repeats known failure patterns, or unrestricted lesson injection bloats the context.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/tools/lessons.py",
+          "lines": "257-264",
+          "snippet": "# Get configuration\nconfig = get_config()\nauto_include = config.get_env_bool(\"GPTME_LESSONS_AUTO_INCLUDE\", True)\nholdout_lessons = _parse_holdout_lessons(config.get_env(\"GPTME_LESSONS_HOLDOUT\"))\n\nif not auto_include:\n    logger.debug(\"Auto-inclusion disabled\")\n    return"
+        },
+        {
+          "file": "gptme/tools/lessons.py",
+          "lines": "269-273",
+          "snippet": "# Session-wide limit (higher default, applies across entire session)\ntry:\n    max_lessons = int(config.get_env(\"GPTME_LESSONS_MAX_SESSION\") or \"20\")\nexcept (ValueError, TypeError):\n    max_lessons = 20"
+        },
+        {
+          "file": "gptme/tools/lessons.py",
+          "lines": "292-296",
+          "snippet": "if len(stats.unique_lessons) >= max_lessons:\n    logger.debug(\n        f\"Session lesson limit reached ({len(stats.unique_lessons)}/{max_lessons})\"\n    )\n    return"
+        },
+        {
+          "file": "gptme/tools/lessons.py",
+          "lines": "362-369",
+          "snippet": "# Filter out already included lessons (MatchResult has .lesson attribute)\nnew_matches = [\n    match\n    for match in match_results\n    if not _is_holdout_lesson(match.lesson, holdout_lessons)\n    and str(match.lesson.path) not in included_lessons\n    and str(match.lesson.path) not in stats.unique_lessons\n]"
+        },
+        {
+          "file": "gptme/lessons/matcher.py",
+          "lines": "124-129",
+          "snippet": "if context.tools_used and lesson.metadata.tools:\n    tools_lower = {t.lower() for t in context.tools_used}\n    for tool in lesson.metadata.tools:\n        if tool.lower() in tools_lower:\n            score += 2.0  # Higher weight for tool matches\n            matched_by.append(f\"tool:{tool}\")"
+        },
+        {
+          "file": "gptme/tools/lessons.py",
+          "lines": "484-489",
+          "snippet": "hooks={\n    \"auto_include_lessons\": (\n        HookType.STEP_PRE.value,\n        auto_include_lessons_hook,\n        5,  # Medium priority\n    ),"
+        }
+      ]
+    },
+    {
+      "name": "tool-use enforcement prompt for narrating model families",
+      "what_it_is": "For OpenAI, Azure, Gemini and xAI providers, and for model names containing gpt-/codex/gemini/gemma/grok, the system prompt gets an extra instruction to call tools immediately and to emit every intended tool call in the same message.",
+      "function_in_system": "Sits in system prompt construction. Targets 'describe without doing' drift, where a model narrates the planned tool use and ends the turn with zero actions. Otherwise such turns waste a step and, in autonomous mode, fall through to the auto-reply fallback.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "gptme/prompts/templates.py",
+          "lines": "18-31",
+          "snippet": "# Providers whose models tend to narrate tool use instead of emitting actual calls.\n# Inspired by Hermes/OpenClaw research on \"describe without doing\" drift.\n_TOOL_ENFORCEMENT_PROVIDERS = frozenset(\n    [\"openai\", \"openai-subscription\", \"azure\", \"gemini\", \"xai\"]\n)\n# Model name substrings that need enforcement when running under generic providers\n# (openrouter, groq, deepseek, nvidia, local).\n_TOOL_ENFORCEMENT_MODEL_FAMILIES = (\"gpt-\", \"codex\", \"gemini\", \"gemma\", \"grok\")\n\n_TOOL_USE_ENFORCEMENT_PROMPT = (\n    \"\\n\\nWhen a tool is available for a task, call it immediately — do not describe \"\n    \"what you would do or which tool you would use. Every decision to use a tool \"\n    \"must produce an actual tool call in the same message.\"\n)"
+        },
+        {
+          "file": "gptme/prompts/templates.py",
+          "lines": "223-224",
+          "snippet": "if _needs_tool_use_enforcement(model_meta):\n    full_prompt += _TOOL_USE_ENFORCEMENT_PROMPT"
+        }
+      ]
+    },
+    {
+      "name": "bounded project context command at startup",
+      "what_it_is": "The configured context_cmd runs with a 60 s timeout. Its stdout is capped at 100,000 chars and cut at a line boundary with a truncation notice. On a non-zero exit, the partial stdout plus up to 500 chars of stderr are passed to the model.",
+      "function_in_system": "Runs once while the system prompt is built. Bounds size and runtime of dynamic startup context. On failure the model still receives partial results and the error, so it can recover on its own. Otherwise a verbose or hanging context command floods the context window or blocks session start.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/prompts/context_cmd.py",
+          "lines": "11-13",
+          "snippet": "# Maximum characters for context_cmd output to prevent context explosion\n# ~100k chars ~ ~25k tokens, a reasonable safeguard for most context windows\nCONTEXT_CMD_MAX_CHARS = 100_000"
+        },
+        {
+          "file": "gptme/prompts/context_cmd.py",
+          "lines": "54-62",
+          "snippet": "result = subprocess.run(\n    cmd,\n    check=False,\n    cwd=workspace,\n    shell=True,\n    capture_output=True,\n    text=True,\n    timeout=60,\n)"
+        },
+        {
+          "file": "gptme/prompts/context_cmd.py",
+          "lines": "76-87",
+          "snippet": "logger.warning(f\"Context command '{cmd}' exited with code {result.returncode}\")\n# Include both stdout (partial results) and stderr (error details)\n# so LLM can see what worked and what failed for self-recovery\n# Truncate stdout to prevent context explosion, truncate stderr for safety\noutput = _truncate_context_output(result.stdout)\nstderr_stripped = result.stderr.strip()\nif stderr_stripped:\n    stderr_preview = stderr_stripped[:500]\n    if len(stderr_stripped) > 500:\n        stderr_preview += \"\\n... (truncated)\"\n    output += f\"\\n\\n## Context Generation Error (exit {result.returncode})\\n\\n{stderr_preview}\"\nreturn md_codeblock(cmd, output)"
+        }
+      ]
+    },
+    {
+      "name": "architect/editor split with plan approval gate",
+      "what_it_is": "Before the first turn of a new conversation, an architect model receives a stripped context (only ARCHITECT_SYSTEM_PROMPT plus the user request, tools=None) and produces a natural-language plan. The plan is shown to the user with a 'Proceed with editor turn? [y/N]' gate, skipped under auto_accept or --no-confirm. The plan is then injected as a system message and the editor model (editor_model, falling back to the architect model) executes it with all tools.",
+      "function_in_system": "Sits in front of the agent loop, once per new conversation. Separates planning from execution, lets the human reject a wrong plan before any tool runs, and allows routing the tool-heavy editing work to a separate, cheaper model. Otherwise a misread request only becomes visible after the agent has already made edits.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/config/models.py",
+          "lines": "232-251",
+          "snippet": "@dataclass\nclass ArchitectConfig:\n    \"\"\"Configuration for architect/editor coder split.\n\n    When enabled, planning (architect model) and editing (editor model) are\n    split into separate turns. The architect model produces a natural-language\n    plan without tools, then the editor model executes against the plan.\n    \"\"\"\n\n    enabled: bool = False\n    \"\"\"Enable architect/editor split mode.\"\"\"\n\n    architect_model: str | None = None\n    \"\"\"Model to use for the planning turn. Falls back to the primary model.\"\"\"\n\n    editor_model: str | None = None\n    \"\"\"Model to use for the editing turn. Falls back to a cheaper fast model.\"\"\"\n\n    auto_accept: bool = False\n    \"\"\"Skip user confirmation between architect and editor turns.\"\"\""
+        },
+        {
+          "file": "gptme/cli/main.py",
+          "lines": "1113-1133",
+          "snippet": "# Build architect messages: stripped context (no tool docs).\n# Do NOT include initial_msgs — the full tool-laden system prompt contradicts\n# the design intent of a stripped planning context where the model sees\n# only ARCHITECT_SYSTEM_PROMPT + the user's request.\nfirst_prompt = prompt_msgs[0]\narchitect_msgs = make_architect_messages(first_prompt.content)\n\nlogger.info(\n    \"Architect mode: planning with %s, will edit with %s\",\n    _arch_model,\n    _editor_model or _arch_model,\n)\n\n# Run architect turn\narchitect_response = llm_reply(\n    architect_msgs,\n    model=_arch_model,\n    stream=False,\n    tools=None,  # architect has no tools (planning only)\n    workspace=workspace_path,\n)"
+        },
+        {
+          "file": "gptme/cli/main.py",
+          "lines": "1138-1148",
+          "snippet": "# Confirmation gate: show plan and ask before handing off to editor\nif not _auto_accept and not no_confirm:\n    from ..util import console\n\n    console.print(\"\\n[bold]Architect plan:[/bold]\")\n    console.print(plan_text)\n    console.print()\n    answer = input(\"Proceed with editor turn? [y/N] \").strip().lower()\n    if answer not in (\"y\", \"yes\"):\n        logger.info(\"Architect turn cancelled by user.\")\n        return"
+        },
+        {
+          "file": "gptme/cli/main.py",
+          "lines": "1157-1167",
+          "snippet": "# Inject plan as system message + editor prompt, replace original prompt\neditor_injection = make_editor_injection(plan_text)\nconfig.chat.model = _editor_model or _arch_model\nprompt_msgs = [\n    Message(\n        first_prompt.role,\n        f\"The architect's plan is in the system message above. \"\n        f\"Implement it now.\\n\\nOriginal request: {first_prompt.content}\",\n    )\n]\ninitial_msgs = list(initial_msgs) + [editor_injection]"
+        }
+      ]
+    },
+    {
+      "name": "server session reaper for idle, stuck and dead sessions",
+      "what_it_is": "A background health-monitor thread runs every 30 s. It evicts sessions idle for more than 60 min, force-cleans sessions stuck in generating=True for more than 10 min (_STUCK_GENERATING_TIMEOUT_MINUTES), and removes sessions whose ACP subprocess has died, skipping sessions that are actively generating. Removal happens under a single lock acquisition; hook triggers and ACP cleanup run after the lock is released. The monitor is started lazily on the first ACP session.",
+      "function_in_system": "Sits outside the agent loop at the server level. Frees resources held by abandoned, hung or crashed sessions, so a stuck generation cannot pin a conversation and its subprocess forever. Otherwise a long-running server accumulates dead sessions and orphaned subprocesses.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/server/session_step.py",
+          "lines": "57-60",
+          "snippet": "# How often the health monitor runs (seconds)\n_HEALTH_CHECK_INTERVAL = 30\n# Max idle time before a session is cleaned up (minutes)\n_SESSION_MAX_AGE_MINUTES = 60"
+        },
+        {
+          "file": "gptme/server/session_step.py",
+          "lines": "119-152",
+          "snippet": "def _run_health_check() -> None:\n    \"\"\"Single health check iteration.\"\"\"\n    # 1. Clean inactive sessions (was never called before this change).\n    # Note: this intentionally applies to all sessions (not just ACP ones) —\n    # the health monitor acts as server-wide session hygiene in ACP deployments.\n    # Non-ACP sessions idle for more than _SESSION_MAX_AGE_MINUTES are also evicted.\n    SessionManager.clean_inactive_sessions(max_age_minutes=_SESSION_MAX_AGE_MINUTES)\n\n    # 2. Check ACP subprocess health\n    for session_id, session in SessionManager.get_all_sessions():\n        # Snapshot to a local variable: a concurrent _cleanup_all_acp_sessions()\n        # can set session.acp_runtime = None between reads, causing AttributeError.\n        acp_runtime = session.acp_runtime\n        if acp_runtime is None:\n            continue\n        if session.generating:\n            continue  # Don't disturb active generation\n        if not acp_runtime.is_subprocess_alive():\n            # Re-check generating flag before removing to narrow the TOCTOU window:\n            # a /step request arriving between the check above and remove_session()\n            # could start a generation on a session we are about to delete.\n            if session.generating:\n                continue\n            logger.warning(\n                \"ACP subprocess dead for session %s (conversation=%s, pid=%s), \"\n                \"cleaning up\",\n                session_id,\n                session.conversation_id,\n                acp_runtime.process_pid,\n            )\n            # Null out acp_runtime before remove_session so it doesn't\n            # spawn a close_acp_runtime_bg thread for an already-dead process.\n            session.acp_runtime = None\n            SessionManager.remove_session(session_id)"
+        },
+        {
+          "file": "gptme/server/session_models.py",
+          "lines": "180-221",
+          "snippet": "_STUCK_GENERATING_TIMEOUT_MINUTES = 10\n\n@classmethod\ndef clean_inactive_sessions(cls, max_age_minutes: int = 60) -> None:\n    \"\"\"Clean up inactive sessions.\n\n    Also detects sessions stuck in generating=True state: if a session has\n    been generating for longer than _STUCK_GENERATING_TIMEOUT_MINUTES, it is\n    force-cleaned to prevent permanent resource leaks.\n\n    Removal is performed atomically under a single lock acquisition to\n    prevent a TOCTOU race where a concurrent ``/step`` could start\n    generating on a session between the staleness check and its removal.\n    Side-effects (hook triggers, ACP cleanup) run after the lock is\n    released.\n    \"\"\"\n    now = datetime.now(tz=timezone.utc)\n    cutoff = now - timedelta(minutes=max_age_minutes)\n    stuck_cutoff = now - timedelta(minutes=cls._STUCK_GENERATING_TIMEOUT_MINUTES)\n\n    # Collect post-lock work: (conversation_id, is_last, acp_runtime)\n    deferred: list[tuple[str, bool, AcpSessionRuntime | None]] = []\n\n    with cls._lock:\n        to_remove: list[str] = []\n        for session_id, session in cls._sessions.items():\n            if session.last_activity < cutoff and not session.generating:\n                to_remove.append(session_id)\n            elif (\n                session.generating\n                and session.generating_since is not None\n                and session.generating_since < stuck_cutoff\n            ):\n                logger.warning(\n                    \"Force-cleaning stuck session %s (generating since %s, \"\n                    \"exceeded %d min timeout)\",\n                    session_id,\n                    session.generating_since.isoformat(),\n                    cls._STUCK_GENERATING_TIMEOUT_MINUTES,\n                )\n                session.generating = False\n                to_remove.append(session_id)"
+        },
+        {
+          "file": "gptme/server/api_v2_sessions.py",
+          "lines": "369-376",
+          "snippet": "if use_acp and not session.use_acp:\n    from .acp_session_runtime import AcpSessionRuntime\n\n    session.use_acp = True\n    session.acp_runtime = AcpSessionRuntime(workspace=chat_config.workspace)\n    # Lazy-start the health monitor on first ACP session — avoids unconditional\n    # background thread and global session-eviction side-effects at app startup.\n    start_acp_health_monitor()"
+        }
+      ]
+    },
+    {
+      "name": "ACP subprocess isolation for server sessions",
+      "what_it_is": "With use_acp=True (per step request, or server-wide via GPTME_USE_ACP_DEFAULT) a server session runs its agent in a separate ACP subprocess, sticky for the session's lifetime. On shutdown the subprocess receives SIGTERM, then SIGKILL after 3 s, and is reaped.",
+      "function_in_system": "Wraps the whole agent loop of one server session. Contains crashes and resource exhaustion of one session inside its own process while the server stays responsive; the dead process is later detected by the session reaper. Otherwise a failure inside one session's execution directly hits the shared server process.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "gptme/server/openapi_docs.py",
+          "lines": "435-442",
+          "snippet": "use_acp: bool = Field(\n    False,\n    description=(\n        \"Route this session through an ACP subprocess for process-isolated execution. \"\n        \"Sticky: once enabled for a session, all subsequent steps use ACP. \"\n        \"The subprocess manages its own model; 'model' is ignored in ACP mode.\"\n    ),\n)"
+        },
+        {
+          "file": "gptme/server/api_v2_sessions.py",
+          "lines": "353-357",
+          "snippet": "# ACP opt-in: sticky once enabled for a session.\n# Default can be set server-wide via GPTME_USE_ACP_DEFAULT=true env var.\n# Validate type explicitly to avoid truthy string surprises (e.g. \"false\").\n_acp_default = _get_use_acp_default()\nuse_acp = req_json.get(\"use_acp\", _acp_default)"
+        },
+        {
+          "file": "gptme/server/session_models.py",
+          "lines": "87-89",
+          "snippet": "# ACP-backed subprocess session (opt-in via use_acp=True in step request)\nuse_acp: bool = False\nacp_runtime: \"AcpSessionRuntime | None\" = field(default=None, repr=False)"
+        },
+        {
+          "file": "gptme/server/acp_session_runtime.py",
+          "lines": "186-208",
+          "snippet": "def terminate_subprocess_sync(self, timeout: float = 3.0) -> None:\n    \"\"\"Terminate the ACP subprocess synchronously.\n\n    Safer than ``close()`` in atexit handlers where the asyncio event loop\n    may already be partially torn down.  Falls back to SIGKILL if SIGTERM\n    does not succeed within *timeout* seconds.\n    \"\"\"\n    if self._client is None:\n        return\n    proc = getattr(self._client, \"_process\", None)\n    if proc is None:\n        return\n    try:\n        proc.terminate()\n        proc.wait(timeout=timeout)\n    except subprocess.TimeoutExpired:\n        try:\n            proc.kill()\n            proc.wait(timeout=1.0)  # reap zombie after SIGKILL\n        except Exception:\n            logger.debug(\n                \"Failed to kill ACP subprocess after SIGTERM timeout\", exc_info=True\n            )"
+        }
+      ]
+    },
+    {
+      "name": "wall-clock cap for scheduled autonomous agent runs",
+      "what_it_is": "'gptme-agent install' writes a systemd oneshot service with TimeoutStartSec=1800 around autonomous-run.sh, triggered by a timer (OnCalendar, Persistent=true). systemd kills a run that exceeds 30 minutes. The launchd variant on macOS sets only the schedule and has no equivalent cap.",
+      "function_in_system": "Sits outside the agent process as the service supervisor of unattended scheduled runs. Bounds duration and cost of a single autonomous run that hangs or loops. Otherwise a stuck run blocks every later scheduled run and keeps consuming tokens.",
+      "activation": "always",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "gptme/agent/service.py",
+          "lines": "148-161",
+          "snippet": "        service_content = f\"\"\"[Unit]\nDescription=gptme agent: {name}\nAfter=network.target\n\n[Service]\nType=oneshot\nWorkingDirectory={workspace}\nExecStart={workspace}/scripts/runs/autonomous/autonomous-run.sh\n{env_lines}\nTimeoutStartSec=1800\n\n[Install]\nWantedBy=default.target\n\"\"\""
+        },
+        {
+          "file": "gptme/agent/service.py",
+          "lines": "170-180",
+          "snippet": "            timer_content = f\"\"\"[Unit]\nDescription=Timer for gptme agent: {name}\nRequires=gptme-agent-{name}.service\n\n[Timer]\nOnCalendar={schedule}\nPersistent=true\n\n[Install]\nWantedBy=timers.target\n\"\"\""
+        },
+        {
+          "file": "gptme/agent/service.py",
+          "lines": "384-400",
+          "snippet": "plist: dict = {\n    \"Label\": f\"org.gptme.agent.{name}\",\n    \"ProgramArguments\": [\n        str(workspace / \"scripts\" / \"runs\" / \"autonomous\" / \"autonomous-run.sh\"),\n    ],\n    \"WorkingDirectory\": str(workspace),\n    \"StandardOutPath\": str(log_path),\n    \"StandardErrorPath\": str(log_path),\n    \"RunAtLoad\": False,\n}\n\nif schedule:\n    schedule_config = parse_schedule(schedule)\n    if \"StartInterval\" in schedule_config:\n        plist[\"StartInterval\"] = schedule_config[\"StartInterval\"]\n    elif \"StartCalendarInterval\" in schedule_config:\n        plist[\"StartCalendarInterval\"] = schedule_config[\"StartCalendarInterval\"]"
+        }
+      ]
+    }
+  ]
+}

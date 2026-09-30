@@ -1,0 +1,1389 @@
+{
+  "repo": "HKUDS/DeepTutor",
+  "commit": "30b92dfe86",
+  "system_type": "application",
+  "system_type_reason": "End-user tutoring system with fixed capabilities (chat, solve, research, ...) behind CLI/web/SDK.",
+  "repo_overview": {
+    "summary": "Agent-native tutoring system organized as a two-layer plugin model: single-shot Tools the LLM calls on demand, and multi-stage Capabilities (chat, deep_solve, deep_research, deep_question, visualize, math_animator, mastery_path) that take over a turn. A ChatOrchestrator routes each turn to a capability. All chat capabilities run on one shared agentic loop engine (core/agentic) and emit events on a StreamBus. Entry points are CLI, WebSocket API and Python SDK.",
+    "components": [
+      {
+        "path": "deeptutor/core/",
+        "purpose": "shared agentic loop engine (core/agentic: loop, tool dispatch, LLM client, usage tracking), tool/capability protocols, UnifiedContext, StreamBus, errors"
+      },
+      {
+        "path": "deeptutor/runtime/",
+        "purpose": "ChatOrchestrator that routes turns to capabilities, tool/capability registries, deferred tool loading, launcher"
+      },
+      {
+        "path": "deeptutor/capabilities/",
+        "purpose": "multi-stage turn pipelines (solve, mastery, subagent, explore_context, obsidian)"
+      },
+      {
+        "path": "deeptutor/agents/",
+        "purpose": "agent implementations behind the capabilities: chat, research, question, math_animator, visualize, vision_solver, notebook"
+      },
+      {
+        "path": "deeptutor/tools/",
+        "purpose": "single-shot tools (rag, web_search/fetch, exec, code execution, ask_user, reason, brainstorm, cron, paper search)"
+      },
+      {
+        "path": "deeptutor/services/",
+        "purpose": "backend services: llm, memory, rag, session, config, search, parsing, skill, subagent, sandbox, mcp, embedding, cron, media generation, voice"
+      },
+      {
+        "path": "deeptutor/book/",
+        "purpose": "book compiler that generates structured learning books from knowledge bases via agents"
+      },
+      {
+        "path": "deeptutor/learning/",
+        "purpose": "guided learning: mastery model, grading, spaced-repetition scheduler"
+      },
+      {
+        "path": "deeptutor/knowledge/",
+        "purpose": "knowledge base creation, document ingestion, progress tracking"
+      },
+      {
+        "path": "deeptutor/partners/",
+        "purpose": "IM-connected companion bots (15 chat channels, message bus)"
+      },
+      {
+        "path": "deeptutor/co_writer/",
+        "purpose": "text editing agent for the co-writer UI"
+      },
+      {
+        "path": "deeptutor/multi_user/",
+        "purpose": "per-user isolation and access grants for models, tools, knowledge bases and skills"
+      },
+      {
+        "path": "deeptutor/api/",
+        "purpose": "FastAPI server, WebSocket endpoint, REST routers"
+      },
+      {
+        "path": "deeptutor/config/, logging/, events/, i18n/, utils/, app/",
+        "purpose": "settings schema, logging, event bus, translations, helpers, Python SDK facade"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "deeptutor/core/agentic/loop.py",
+        "lines": "226, 237-245",
+        "snippet": "for iteration in range(max_iter):\n...\n    step = await run_labeled_step(\n        client=client,\n        model=model,\n        messages=messages,\n        completion_kwargs=completion_kwargs,\n        tool_schemas=tool_schemas,\n        allowed_labels=protocol.allowed,\n        final_labels=protocol.final,\n        tool_label=protocol.tool_label,"
+      },
+      {
+        "file": "deeptutor/core/agentic/loop.py",
+        "lines": "304-316",
+        "snippet": "if protocol.tool_label is not None and step.label == protocol.tool_label:\n    messages.append(\n        host.assistant_message_with_tool_calls(\n            content=step.text,\n            tool_calls=step.tool_calls,\n        )\n    )\n    outcome = await host.dispatch_tools(\n        iteration=iteration,\n        tool_calls=step.tool_calls,\n    )\n    aggregated_sources.extend(outcome.sources)\n    messages.extend(outcome.tool_messages)"
+      },
+      {
+        "file": "deeptutor/core/agentic/loop.py",
+        "lines": "275, 299-302",
+        "snippet": "if step.label in protocol.terminal:\n...\n    final_text = step.text\n    final_label_seen = step.label\n    completed = True\n    break"
+      },
+      {
+        "file": "deeptutor/core/agentic/loop.py",
+        "lines": "368-372",
+        "snippet": "else:\n    finish_text, did_finish, extra_calls = await host.force_finalize(\n        messages=messages,\n        start_iteration=max_iter,\n    )"
+      },
+      {
+        "file": "deeptutor/agents/chat/agent_loop.py",
+        "lines": "235-237, 259-260, 298-299",
+        "snippet": "for _round in range(max(1, self.pipeline.effective_max_rounds(self.context))):\n    try:\n        result = await self._call_llm(\n...\n    if not result.tool_calls:\n        final_text = self._clean(result.text)\n...\n        # Finish: the text streamed live this round IS the answer.\n        return await self._finalize_finish(final_text)"
+      },
+      {
+        "file": "deeptutor/agents/chat/agent_loop.py",
+        "lines": "301-311",
+        "snippet": "messages.append(_assistant_message_with_tool_calls(result.text, result.tool_calls))\ndispatch = await self.pipeline._dispatch_tool_calls(\n    tool_calls=result.tool_calls,\n    context=self.context,\n    stream=self.stream,\n    iteration_index=state.tool_steps,\n    stage=LOOP_STAGE,\n)\nstate.tool_steps += 1\nstate.sources.extend(dispatch.sources)\nmessages.extend(dispatch.tool_messages)"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "Each iteration of run_agentic_loop calls run_labeled_step (loop.py:237) and branches on the protocol label the model emitted: TOOL dispatches the model's tool_calls (loop.py:304-314), a terminal label ends the loop (loop.py:275, 299-302). The chat AgentLoop dispatches the tool calls of each LLM round (agent_loop.py:301-308).",
+      "consumes_feedback": "Tool results are appended to messages (loop.py:316, agent_loop.py:311) and sent with the next LLM call, so the model's next decision reads the observations of the previous step.",
+      "multi_turn_until_termination": "for iteration in range(max_iter) (loop.py:226) and for _round in range(effective_max_rounds) (agent_loop.py:235) iterate until a FINISH label or a tool-less round ends the turn, with forced finalization when the budget runs out (loop.py:368-372)."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent",
+    "evidence": [
+      {
+        "file": "deeptutor/capabilities/subagent/capability.py",
+        "lines": "1-8",
+        "snippet": "\"\"\"Subagent loop capability — consult the user's live local agent as a delegate.\n\nActive whenever the user's selected knowledge base is a connected subagent\n(resolved by :mod:`deeptutor.capabilities.subagent.binding`). As a\n:class:`KnowledgeCapability` it owns the turn: the chat loop runs exclusively on\nthe single ``consult_subagent`` tool (plus the ``ask_user`` floor). The chat\nmodel decides what to ask, asks the local Claude Code / Codex up to the consult\nbudget, watches its streamed run, and then answers the user in its own voice."
+      },
+      {
+        "file": "deeptutor/capabilities/subagent/tools.py",
+        "lines": "101-103, 143-148",
+        "snippet": "from deeptutor.services.subagent import get_backend\n\nbackend = get_backend(str(spec.get(\"kind\") or \"\"))\n...\ntry:\n    result = await backend.consult(\n        question,\n        on_event=on_event,\n        cwd=spec.get(\"cwd\") or None,\n        session_id=state.get(\"session_id\"),"
+      },
+      {
+        "file": "deeptutor/agents/research/pipeline.py",
+        "lines": "965-967",
+        "snippet": "results = await asyncio.gather(\n    *[\n        self._research_block("
+      },
+      {
+        "file": "deeptutor/agents/research/pipeline.py",
+        "lines": "824-826",
+        "snippet": "outcome = await run_agentic_loop(\n    initial_messages=messages,\n    protocol=_PROTOCOL_BLOCK,"
+      }
+    ],
+    "justification": "Most capabilities run one agent over tools (chat AgentLoop, question and solve loops). The subagent capability makes the system multi-agent: the chat model delegates questions through the consult_subagent tool to the user's local Claude Code or Codex CLI (capability.py:1-8, tools.py:101-103, 143-148), an independent agent with its own LLM loop, tools and session, whose answer the chat agent then uses. Deep research also plans topic blocks and runs a separate run_agentic_loop with its own block protocol and prompt per block (pipeline.py:824-826), several in parallel via asyncio.gather (pipeline.py:965-967), coordinated by a planning and reporting stage.",
+    "verdict_raw": "multi-agent"
+  },
+  "resilience": [
+    {
+      "name": "label-protocol violation detection with repair re-prompt",
+      "what_it_is": "Every LLM reply must start with exactly one protocol label (THINK, TOOL, FINISH, ...). A deterministic check classifies the step as missing_label, multiple_labels, tool_without_calls, <label>_with_tools or unknown_action; an optional host hook validate_terminal can reject a terminal label with its own violation key. On violation the loop emits a retry notice, keeps the model's draft (clipped to 500 chars) as assistant context, appends a violation-specific correction prompt and runs the next iteration. Label parsing is tolerant: wrapped labels with one to three backticks, bare labels followed by a separator, leading whitespace/zero-width chars and a leading <think> prelude are accepted; label mentions inside prose are ignored.",
+      "function_in_system": "Sits in run_agentic_loop directly after each run_labeled_step call, before the label is acted on. Catches malformed or contradictory model output (no label, label plus stray tool calls, premature finish) and turns it into feedback for the next turn. Otherwise a malformed reply ends the turn or leaks through as the final answer.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/core/agentic/loop.py",
+          "lines": "258-273",
+          "snippet": "violation = _protocol_violation(step, protocol)\n        if violation:\n            await _emit_retry_notice(\n                stream=stream,\n                source=source,\n                stage=stage,\n                host=host,\n                violation=violation,\n            )\n            _append_repair_messages(\n                messages=messages,\n                iteration_text=step.text,\n                violation=violation,\n                host=host,\n            )\n            continue"
+        },
+        {
+          "file": "deeptutor/core/agentic/loop.py",
+          "lines": "275-278",
+          "snippet": "if step.label in protocol.terminal:\n            validate_terminal = getattr(host, \"validate_terminal\", None)\n            if validate_terminal is not None:\n                violation = await validate_terminal(step.label, step.text)"
+        },
+        {
+          "file": "deeptutor/core/agentic/loop.py",
+          "lines": "394-408",
+          "snippet": "if step.label == LABEL_UNKNOWN:\n        return \"missing_label\"\n    if find_inline_labels(step.text, allowed_labels=protocol.allowed):\n        return \"multiple_labels\"\n    if protocol.tool_label is not None:\n        if step.label == protocol.tool_label and not step.tool_calls:\n            return \"tool_without_calls\"\n        if step.label != protocol.tool_label and step.tool_calls:\n            # The violation key carries the actual offending label so the\n            # host can render an accurate repair message. The legacy keys\n            # ``think_with_tools`` / ``finish_with_tools`` are still\n            # produced for the canonical THINK/FINISH labels, but new\n            # label vocabularies (e.g. chat's ``PAUSE`` — intermediate +\n            # final) get their own ``{label}_with_tools`` key.\n            return f\"{step.label.lower()}_with_tools\""
+        },
+        {
+          "file": "deeptutor/core/agentic/loop.py",
+          "lines": "440-445",
+          "snippet": "clipped = str(iteration_text or \"\").strip()\n    if clipped:\n        if len(clipped) > _REPAIR_PREVIEW_CHARS:\n            clipped = clipped[:_REPAIR_PREVIEW_CHARS].rstrip() + \"\\n...[truncated]\"\n        messages.append({\"role\": \"assistant\", \"content\": clipped})\n    messages.append({\"role\": \"user\", \"content\": host.protocol_repair_message(violation)})"
+        },
+        {
+          "file": "deeptutor/core/agentic/labels.py",
+          "lines": "64-67, 89-92",
+          "snippet": "stripped = strip_label_probe_prefix(buffer)\n    for label in allowed_labels:\n        wrapped = re.match(\n            rf\"^(?P<ticks>`+)\\s*{re.escape(label)}\\s*(?P=ticks)(?P<after>.*)$\",\n...\n        if stripped.startswith(label):\n            tail = stripped[len(label) :]\n            if tail and tail[0] in _LABEL_SEPARATOR_CHARS:\n                return label, tail.lstrip(_LABEL_SEPARATOR_CHARS)"
+        }
+      ]
+    },
+    {
+      "name": "iteration budget with forced finalization",
+      "what_it_is": "The loop runs at most max_iterations labeled steps (for/else). When the budget is exhausted without a terminal label, the host's force_finalize hook is invoked to produce a final answer anyway; its extra LLM calls are counted into the iteration total. The chat AgentLoop has its own equivalent: at most effective_max_rounds rounds (default 8 from chat params, raised to a capability's _min_loop_rounds floor); if the budget runs out while tools are still requested, a finish instruction is appended and one final LLM call without tool schemas produces the answer. The explore_context pre-pass loop follows the same pattern with at most 5 rounds, the last one sent with a forced-finish instruction and without tool schemas. The deep-research block host implements force_finalize with a FINISH-only label protocol and up to 3 repair attempts, then falls back to a fixed text and marks the block failed; the rephrase host returns an empty result so the caller continues with the raw topic.",
+      "function_in_system": "Wraps the whole run_agentic_loop iteration and the round loop of the chat AgentLoop. Bounds runaway loops in which the model keeps thinking or calling tools, capping cost and latency per turn, and still delivers an answer at the cutoff. Otherwise a non-converging model loops indefinitely or the turn ends with no answer.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/core/agentic/loop.py",
+          "lines": "224-226",
+          "snippet": "max_iter = max(1, max_iterations)\n\n    for iteration in range(max_iter):"
+        },
+        {
+          "file": "deeptutor/core/agentic/loop.py",
+          "lines": "368-375",
+          "snippet": "else:\n        finish_text, did_finish, extra_calls = await host.force_finalize(\n            messages=messages,\n            start_iteration=max_iter,\n        )\n        iterations_run += extra_calls\n        final_text = finish_text\n        completed = did_finish"
+        },
+        {
+          "file": "deeptutor/agents/chat/agentic_pipeline.py",
+          "lines": "96-98",
+          "snippet": "# Exploring-loop budget: max LLM rounds in one turn's loop. A round without\n# tool calls ends the loop early — that is the normal exit.\nDEFAULT_MAX_ROUNDS = 8"
+        },
+        {
+          "file": "deeptutor/agents/chat/agentic_pipeline.py",
+          "lines": "277-280",
+          "snippet": "    floor = int(context.metadata.get(\"_min_loop_rounds\") or 0)\nexcept (TypeError, ValueError):\n    floor = 0\nreturn max(self.max_rounds, floor)"
+        },
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "235",
+          "snippet": "for _round in range(max(1, self.pipeline.effective_max_rounds(self.context))):"
+        },
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "341-342",
+          "snippet": "# Round budget ran out while still requesting tools — force a finish.\nreturn await self._forced_finish(messages, state)"
+        },
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "387-396",
+          "snippet": "messages.append({\"role\": \"user\", \"content\": self.pipeline._finish_exhausted_instruction()})\ntry:\n    result = await self._call_llm(\n        messages=messages,\n        label=self.pipeline._t(\"labels.final_response\", default=\"Final response\"),\n        call_kind=\"llm_final_response\",\n        trace_role=\"response\",\n        max_tokens=self.pipeline.loop_max_tokens,\n        tool_schemas=None,  # tools disabled so the model must finish\n    )"
+        },
+        {
+          "file": "deeptutor/capabilities/explore_context/explorer.py",
+          "lines": "56-59",
+          "snippet": "# Agentic-loop budget: at most this many LLM rounds; the model normally\n# finishes earlier by writing its investigation without a tool call. The last\n# round runs with tools disabled so it is always forced to finish.\nMAX_LOOP_ROUNDS = 5"
+        },
+        {
+          "file": "deeptutor/capabilities/explore_context/explorer.py",
+          "lines": "202-210",
+          "snippet": "for round_idx in range(MAX_LOOP_ROUNDS):\n    is_last = round_idx == MAX_LOOP_ROUNDS - 1\n    if is_last:\n        # Budget exhausted while still calling tools — force a\n        # tool-less finish from what has been gathered.\n        messages.append({\"role\": \"user\", \"content\": self._forced_finish_instruction()})\n    total_in += sum(_content_chars(m) for m in messages)\n    result = await self._call_llm(\n        client, messages, tool_schemas if not is_last else None, chunk_meta, stream"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "2433-2445",
+          "snippet": "async def force_finalize(\n    self,\n    *,\n    messages: list[dict[str, Any]],\n    start_iteration: int,\n) -> tuple[str, bool, int]:\n    return await self._pipeline._force_finish_block(\n        client=self._client,\n        messages=messages,\n        stream=self._stream,\n        block=self._block,\n        start_iteration=start_iteration,\n    )"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "874-876, 882, 886-892, 897-902",
+          "snippet": "for attempt in range(3):\n    iter_meta = self._build_simple_trace_meta(\n        call_id_root=f\"research-{block.block_id}-force-{start_iteration + attempt}\",\n...\n    result = await self._run_labeled_step(\n...\n        protocol=LabelProtocol(\n            allowed=(LABEL_FINISH,),\n            terminal=frozenset({LABEL_FINISH}),\n            intermediate=frozenset(),\n            final=frozenset({LABEL_FINISH}),\n            tool_label=None,\n        ),\n...\n    calls += 1\n    if result.label == LABEL_FINISH and result.text.strip():\n        return result.text, True, calls\n    messages.append({\"role\": \"assistant\", \"content\": result.text[:500]})\n    messages.append({\"role\": \"user\", \"content\": self._t(\"protocol.force_finish_repair\")})\nreturn self._t(\"protocol.fallback_final\"), False, calls"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "2778-2787",
+          "snippet": "async def force_finalize(\n    self,\n    *,\n    messages: list[dict[str, Any]],\n    start_iteration: int,\n) -> tuple[str, bool, int]:\n    # Rephrase exhaustion falls back to the raw topic (handled by\n    # the caller); we report no extra calls and \"not completed\" so\n    # the loop returns with an empty final_text.\n    return (\"\", False, 0)"
+        }
+      ]
+    },
+    {
+      "name": "parallel tool-call cap",
+      "what_it_is": "At most MAX_PARALLEL_TOOL_CALLS = 8 tool calls are executed per iteration; surplus calls are dropped and a warning is emitted to the stream.",
+      "function_in_system": "Sits at the entry of dispatch_tool_calls, between the model's TOOL step and parallel execution. Limits the fan-out of a single model reply, bounding tool cost and backend load per iteration. Otherwise one reply can trigger an unbounded batch of parallel tool executions.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/core/agentic/tool_dispatch.py",
+          "lines": "41",
+          "snippet": "MAX_PARALLEL_TOOL_CALLS = 8"
+        },
+        {
+          "file": "deeptutor/core/agentic/tool_dispatch.py",
+          "lines": "94-102",
+          "snippet": "if len(tool_calls) > MAX_PARALLEL_TOOL_CALLS:\n        if too_many_tool_calls_message:\n            await stream.progress(\n                too_many_tool_calls_message,\n                source=source,\n                stage=stage,\n                metadata={\"trace_kind\": \"warning\"},\n            )\n        tool_calls = tool_calls[:MAX_PARALLEL_TOOL_CALLS]"
+        }
+      ]
+    },
+    {
+      "name": "in-batch duplicate tool-call suppression",
+      "what_it_is": "Within one parallel batch, calls with the same tool name and identical JSON-normalised args, and every ask_user call after the first, are mapped to their primary occurrence. Duplicates skip execution and receive a synthetic tool result that tells the model the call was skipped and instructs it to stop emitting identical parallel calls; duplicate ask_user calls are also hidden from the UI stream.",
+      "function_in_system": "Sits inside dispatch_tool_calls before parallel execution. Saves redundant tool executions and their cost, prevents multiple pending user questions the pause runtime cannot handle, and keeps the tool_call/tool_message pairing valid for the next API call. The stub text feeds back so the model corrects the behavior. Otherwise duplicate calls run twice and multiple ask_user cards break the pause/resume flow.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/core/agentic/tool_dispatch.py",
+          "lines": "117-118",
+          "snippet": "duplicate_of = _detect_duplicate_calls(prepared)\n    suppress_ui_indices = {idx for idx in duplicate_of if prepared[idx][1] == \"ask_user\"}"
+        },
+        {
+          "file": "deeptutor/core/agentic/tool_dispatch.py",
+          "lines": "147-154",
+          "snippet": "async def _run_one(tool_index: int) -> dict[str, Any]:\n        primary_idx = duplicate_of.get(tool_index)\n        if primary_idx is not None:\n            primary_call_id = prepared[primary_idx][0]\n            return _duplicate_stub_result(\n                primary_call_id=primary_call_id,\n                tool_name=prepared[tool_index][1],\n            )"
+        },
+        {
+          "file": "deeptutor/core/agentic/tool_dispatch.py",
+          "lines": "207-222",
+          "snippet": "for idx, (_tcid, tool_name, exec_args) in enumerate(prepared):\n        if tool_name == \"ask_user\":\n            if first_ask_user_idx is not None:\n                duplicate_of[idx] = first_ask_user_idx\n                continue\n            first_ask_user_idx = idx\n        try:\n            args_key = json.dumps(exec_args, sort_keys=True, default=str)\n        except (TypeError, ValueError):\n            args_key = str(exec_args)\n        key = (tool_name, args_key)\n        primary = seen.get(key)\n        if primary is None:\n            seen[key] = idx\n        else:\n            duplicate_of[idx] = primary"
+        },
+        {
+          "file": "deeptutor/core/agentic/tool_dispatch.py",
+          "lines": "248-253",
+          "snippet": "result_text = (\n            \"(duplicate parallel tool_call — skipped. The identical call \"\n            f\"with id={primary_call_id!r} already ran in this batch; \"\n            \"see its result. Do NOT emit two identical tool_calls in one \"\n            \"assistant message — parallel calls must differ in arguments.)\"\n        )"
+        }
+      ]
+    },
+    {
+      "name": "tool failure fed back as observation",
+      "what_it_is": "Any exception raised by a tool during execute_tool_call is caught, logged and converted into a regular role=tool result with an error message, success=False and the error in metadata.",
+      "function_in_system": "Wraps each tool execution in the dispatcher. The error text becomes the tool message the model reads in the next iteration, so the model can retry, switch tools or answer without the result. Otherwise a single failing tool aborts the whole turn.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/core/agentic/tool_dispatch.py",
+          "lines": "401-427",
+          "snippet": "except Exception as exc:\n        logger.error(\"Tool %s failed\", tool_name, exc_info=True)\n...\n        unknown_msg = (\n            unknown_error_message_factory(tool_name)\n            if unknown_error_message_factory is not None\n            else f\"Error executing {tool_name}: {exc}\"\n        )\n        return {\n            \"result_text\": unknown_msg,\n            \"success\": False,\n            \"sources\": [],\n            \"metadata\": {\"error\": str(exc)},\n            \"terminate_turn\": False,\n            \"pause_for_user\": None,\n        }"
+        },
+        {
+          "file": "deeptutor/core/agentic/loop.py",
+          "lines": "311-316",
+          "snippet": "outcome = await host.dispatch_tools(\n                iteration=iteration,\n                tool_calls=step.tool_calls,\n            )\n            aggregated_sources.extend(outcome.sources)\n            messages.extend(outcome.tool_messages)"
+        }
+      ]
+    },
+    {
+      "name": "provider-capability fallback retry",
+      "what_it_is": "When the streaming completion call fails, the error text is matched against marker lists and the request is retried once in a reduced form: without stream_options if that parameter is rejected, without tools/tool_choice if native tool schemas are rejected, or with all image parts stripped in place from the message history if image input is rejected and the model is outside the known-vision allowlist. Tool and image fallbacks emit a warning to the stream; transient errors (rate limit, 5xx) carry none of the markers and are re-raised.",
+      "function_in_system": "Sits around client.chat.completions.create inside run_labeled_step (core agentic loop) and inside AgentLoop._create_response_stream (chat loop), the single LLM call of each iteration. Degrades the request to what the configured provider/model supports so the turn continues; stripping images in place keeps later iterations from failing the same way. Otherwise a provider that lacks one feature fails every turn that uses it.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/core/agentic/labeled_step.py",
+          "lines": "474-481",
+          "snippet": "async def _create_response_stream() -> Any:\n        try:\n            return await client.chat.completions.create(**kwargs)\n        except Exception as exc:\n            if auto_stream_options_added and _is_stream_options_unsupported(exc):\n                retry_kwargs = dict(kwargs)\n                retry_kwargs.pop(\"stream_options\", None)\n                return await client.chat.completions.create(**retry_kwargs)"
+        },
+        {
+          "file": "deeptutor/core/agentic/labeled_step.py",
+          "lines": "482-495",
+          "snippet": "if tool_schemas and _is_tool_schema_unsupported(exc):\n                await stream.progress(\n                    \"Provider rejected native tool schemas; retrying without tools.\",\n...\n                retry_kwargs = dict(kwargs)\n                retry_kwargs.pop(\"tools\", None)\n                retry_kwargs.pop(\"tool_choice\", None)\n                return await client.chat.completions.create(**retry_kwargs)"
+        },
+        {
+          "file": "deeptutor/core/agentic/labeled_step.py",
+          "lines": "500-514",
+          "snippet": "if _is_image_input_unsupported(exc) and should_degrade_to_text(\n                binding, model, kwargs.get(\"messages\") or []\n            ):\n                strip_image_parts_inplace(kwargs[\"messages\"])\n...\n                return await client.chat.completions.create(**kwargs)\n            raise"
+        },
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "588-595, 608-612",
+          "snippet": "try:\n    return await self.client.chat.completions.create(**kwargs)\nexcept Exception as exc:\n    if \"stream_options\" in kwargs and _is_stream_options_unsupported(exc):\n        retry_kwargs = dict(kwargs)\n        retry_kwargs.pop(\"stream_options\", None)\n        return await self.client.chat.completions.create(**retry_kwargs)\n    if kwargs.get(\"tools\") and _is_tool_schema_unsupported(exc):\n...\n        retry_kwargs = dict(kwargs)\n        retry_kwargs.pop(\"tools\", None)\n        retry_kwargs.pop(\"tool_choice\", None)\n        self.tool_schemas = None\n        return await self.client.chat.completions.create(**retry_kwargs)"
+        },
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "713-716",
+          "snippet": "def _is_tool_schema_unsupported(exc: Exception) -> bool:\n    text = _error_text(exc)\n    return any(\n        marker in text"
+        }
+      ]
+    },
+    {
+      "name": "stream idle timeout for hanging streams",
+      "what_it_is": "LLM stream chunks are awaited with timeouts. In the agentic loop (run_labeled_step): 1.0 s for the optional usage trailer after finish_reason has arrived, and 8.0 s of idleness once a final-label answer has started streaming; on timeout in those states the stream is closed locally and the step completes, in other states the timeout is re-raised. In the provider layer (OpenAICompatProvider.chat_stream): every chunk is awaited with a 90 s idle timeout; a stall returns an error response ('stream stalled').",
+      "function_in_system": "Sits in the chunk-reading loops of the agentic loop step and of the provider stream used by pipeline agents and tools. Handles gateways that keep the SSE connection open after generation has finished and providers that stall mid-stream, so the turn completes or fails visibly. Otherwise the turn hangs on a stream that never closes.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/core/agentic/labeled_step.py",
+          "lines": "80, 83",
+          "snippet": "_USAGE_TRAILER_GRACE_TIMEOUT_S = 1.0\n...\n_FINAL_LABEL_IDLE_TIMEOUT_S = 8.0"
+        },
+        {
+          "file": "deeptutor/core/agentic/labeled_step.py",
+          "lines": "520-542",
+          "snippet": "timeout: float | None = None\n            if finish_reason_seen:\n                if usage is not None and usage_seen is None and not usage_trailer_waited:\n                    timeout = _USAGE_TRAILER_GRACE_TIMEOUT_S\n                    usage_trailer_waited = True\n                else:\n                    break\n            elif label in final_labels and content_acc:\n                timeout = _FINAL_LABEL_IDLE_TIMEOUT_S\n            try:\n                if timeout is None:\n                    chunk = await stream_iter.__anext__()\n                else:\n                    chunk = await asyncio.wait_for(stream_iter.__anext__(), timeout=timeout)\n            except StopAsyncIteration:\n                break\n            except asyncio.TimeoutError:\n                # Terminal enough for the chat UI: the model already sent a\n                # final-label answer (or an explicit finish_reason), but the\n                # gateway is holding the connection open.\n                if finish_reason_seen or label in final_labels:\n                    break\n                raise"
+        },
+        {
+          "file": "deeptutor/services/llm/provider_core/openai_compat_provider.py",
+          "lines": "752, 825-832, 847-851",
+          "snippet": "idle_timeout_s = 90\n...\n            while True:\n                try:\n                    chunk = await asyncio.wait_for(\n                        stream_iter.__anext__(),\n                        timeout=idle_timeout_s,\n                    )\n                except StopAsyncIteration:\n                    break\n...\n        except asyncio.TimeoutError:\n            return LLMResponse(\n                content=f\"Error calling LLM: stream stalled for more than {idle_timeout_s} seconds\",\n                finish_reason=\"error\",\n            )"
+        }
+      ]
+    },
+    {
+      "name": "transient-error LLM retry with exponential backoff",
+      "what_it_is": "LLM call exceptions are converted into an LLMResponse with finish_reason='error'. If the error text matches a transient marker (429, rate limit, 5xx, overloaded, timeout, connection, ...), the call is repeated after a delay from a precomputed schedule; non-transient errors return immediately. Defaults from settings.retry: 8 retries, base delay 5.0 s, exponential backoff (base * 2^attempt), each delay capped at 120 s.",
+      "function_in_system": "Wraps every provider call made through services.llm complete()/stream(), the path used by BaseAgent-derived pipeline agents (research, question, solve, ...) and by tools such as reason and brainstorm. Absorbs rate limits and provider outages before they reach the pipeline stage. Otherwise a single transient provider failure aborts the stage and the whole capability run. The agentic loop's raw client path bypasses this wrapper.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/llm/provider_core/base.py",
+          "lines": "73-87",
+          "snippet": "_CHAT_RETRY_DELAYS = (1, 2, 4)\n    _TRANSIENT_ERROR_MARKERS = (\n        \"429\",\n        \"rate limit\",\n        \"500\",\n        \"502\",\n        \"503\",\n        \"504\",\n        \"overloaded\",\n        \"timeout\",\n        \"timed out\",\n        \"connection\",\n        \"server error\",\n        \"temporarily unavailable\",\n    )"
+        },
+        {
+          "file": "deeptutor/services/llm/provider_core/base.py",
+          "lines": "294-303, 328-339",
+          "snippet": "except Exception as exc:\n                response = LLMResponse(\n                    content=f\"Error calling LLM: {exc}\",\n                    finish_reason=\"error\",\n                )\n\n            if response.finish_reason != \"error\":\n                return response\n\n            if not self._is_transient_error(response.content):\n...\n            if attempt > len(delays):\n                return response\n\n            delay = delays[attempt - 1]\n            logger.warning(\n                \"LLM transient error (attempt {}/{}), retrying in {}s: {}\",\n                attempt,\n                len(delays) + 1,\n                delay,\n                (response.content or \"\")[:120].lower(),\n            )\n            await asyncio.sleep(delay)"
+        },
+        {
+          "file": "deeptutor/services/llm/factory.py",
+          "lines": "62-74",
+          "snippet": "def _build_retry_delays(\n    max_retries: int,\n    retry_delay: float,\n    exponential_backoff: bool,\n) -> tuple[float, ...]:\n    if max_retries <= 0:\n        return ()\n    delays: list[float] = []\n    base = max(float(retry_delay), 0.0)\n    for attempt in range(max_retries):\n        delay = base * (2**attempt) if exponential_backoff else base\n        delays.append(min(delay, 120.0))\n    return tuple(delays)"
+        },
+        {
+          "file": "deeptutor/config/settings.py",
+          "lines": "19-24",
+          "snippet": "class LLMRetryConfig(BaseModel):\n    max_retries: int = Field(default=8, description=\"Maximum retry attempts for LLM calls\")\n    base_delay: float = Field(default=5.0, description=\"Base delay between retries in seconds\")\n    exponential_backoff: bool = Field(\n        default=True, description=\"Whether to use exponential backoff\"\n    )"
+        }
+      ]
+    },
+    {
+      "name": "text-only fallback for image input on non-vision models",
+      "what_it_is": "When a provider call fails with a non-transient error while the messages contain image parts and the model is outside the known-vision allowlist (allow_image_fallback = not supports_vision), the call is retried once with images stripped. On success the image parts are also removed in place from the caller's message list.",
+      "function_in_system": "Sits inside the provider retry wrapper (_call_with_retry) used by complete()/stream() for pipeline agents and tools. Keeps a request with attachments working on a text-only model and prevents later calls with the same history from failing again. Known-vision models keep their images so real errors surface. Otherwise every call carrying an image fails on text-only models.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/llm/provider_core/base.py",
+          "lines": "303-326",
+          "snippet": "if not self._is_transient_error(response.content):\n                # Stage-2 vision fallback: only degrade to text-only when the\n                # caller opted in (model is *not* in the known-vision\n                # allowlist). For allowlisted models we trust the images and\n                # let the real error surface rather than masking it.\n                if allow_image_fallback and has_image_parts(messages):\n                    logger.warning(\n                        \"Non-transient LLM error with image content; model is not\"\n                        \" known vision-capable, retrying once without images\"\n                    )\n                    retry_response = await call(\n                        messages=strip_image_parts(messages),\n                        tools=tools,\n                        model=model,\n                        max_tokens=max_tokens,\n                        temperature=temperature,\n                        reasoning_effort=reasoning_effort,\n                        tool_choice=tool_choice,\n                        **kwargs,\n                    )\n                    if retry_response.finish_reason != \"error\":\n                        strip_image_parts_inplace(messages)\n                    return retry_response\n                return response"
+        },
+        {
+          "file": "deeptutor/services/llm/factory.py",
+          "lines": "383-389",
+          "snippet": "response = await provider.chat_with_retry(\n            messages=request_messages,\n            model=config.model,\n            reasoning_effort=config.reasoning_effort,\n            retry_delays=retry_delays,\n            allow_image_fallback=not supports_vision(capability_binding, config.model),\n            **extra_kwargs,\n        )"
+        }
+      ]
+    },
+    {
+      "name": "response_format fallback with learned capability memory",
+      "what_it_is": "When a provider rejects the response_format (JSON mode) parameter, the request is retried once without it and the (binding, model) pair is recorded in a process-wide set. supports_response_format consults this set, so all later calls for that pair omit response_format upfront. Implemented in the provider chat and chat_stream paths, in executors.py and in cloud_provider.py.",
+      "function_in_system": "Sits at the completion call of structured-output requests made by pipeline agents. Keeps JSON-mode calls working on local servers and providers that reject the parameter, and saves the cost of a failing request on every subsequent call. Otherwise every structured-output call to such a model fails or pays one failed request first.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/llm/provider_core/openai_compat_provider.py",
+          "lines": "705-713",
+          "snippet": "except Exception as exc:\n                if request_kwargs.get(\n                    \"response_format\"\n                ) is not None and self._is_response_format_error(exc):\n                    binding = self._provider_name or (self._spec.name if self._spec else \"openai\")\n                    disable_response_format_at_runtime(binding, request_kwargs.get(\"model\"))\n                    retry_kwargs = dict(request_kwargs)\n                    retry_kwargs.pop(\"response_format\", None)\n                    return self._parse(await self._client.chat.completions.create(**retry_kwargs))"
+        },
+        {
+          "file": "deeptutor/services/llm/capabilities.py",
+          "lines": "374-377, 386-395",
+          "snippet": "_RUNTIME_DISABLED_RESPONSE_FORMAT: set[tuple[str, str]] = set()\n\n\ndef disable_response_format_at_runtime(binding: str | None, model: str | None) -> None:\n...\n    if not binding or not model:\n        return\n    _RUNTIME_DISABLED_RESPONSE_FORMAT.add((binding.lower(), model.lower()))\n\n\ndef is_response_format_disabled_at_runtime(binding: str | None, model: str | None) -> bool:\n    \"\"\"Return True if (binding, model) was disabled via :func:`disable_response_format_at_runtime`.\"\"\"\n    if not binding or not model:\n        return False\n    return (binding.lower(), model.lower()) in _RUNTIME_DISABLED_RESPONSE_FORMAT"
+        },
+        {
+          "file": "deeptutor/services/llm/executors.py",
+          "lines": "57-69",
+          "snippet": "try:\n        return await client.chat.completions.create(**payload)\n    except BadRequestError as exc:\n        if \"response_format\" not in payload or not _is_unsupported_response_format_error(exc):\n            raise\n        logger.warning(\n            f\"Provider {binding} rejected response_format for model {model} ({exc}); \"\n            \"retrying without it and disabling response_format for this binding+model.\"\n        )\n        disable_response_format_at_runtime(binding, model)\n        retry_payload = dict(payload)\n        retry_payload.pop(\"response_format\", None)\n        return await client.chat.completions.create(**retry_payload)"
+        },
+        {
+          "file": "deeptutor/services/llm/factory.py",
+          "lines": "332",
+          "snippet": "if not supports_response_format(binding, model):"
+        }
+      ]
+    },
+    {
+      "name": "Responses-API circuit breaker with chat-completions fallback",
+      "what_it_is": "For OpenAI reasoning models (gpt-5, o1/o3/o4 or reasoning_effort set) on the direct OpenAI base URL, calls first go to the Responses API. A 400/404/422 error with Responses-specific markers falls back to chat.completions in the same call and increments a failure counter per (model, reasoning_effort). At 2 failures the circuit trips and the Responses API is skipped for 300 s, after which it is probed again; a success resets the counter.",
+      "function_in_system": "Sits in OpenAICompatProvider.chat/chat_stream in front of the actual request. Keeps calls working when an endpoint or model rejects the Responses API, and after tripping saves the failing first attempt on every call. Otherwise each call to such a model pays a failed Responses request or fails outright.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/llm/provider_core/openai_compat_provider.py",
+          "lines": "55-56",
+          "snippet": "_RESPONSES_FAILURE_THRESHOLD = 2\n_RESPONSES_PROBE_INTERVAL_S = 300.0"
+        },
+        {
+          "file": "deeptutor/services/llm/provider_core/openai_compat_provider.py",
+          "lines": "331-344",
+          "snippet": "circuit_key = _responses_circuit_key(model, self.default_model, reasoning_effort)\n        failures = self._responses_failures.get(circuit_key, 0)\n        if failures >= _RESPONSES_FAILURE_THRESHOLD:\n            tripped_at = self._responses_tripped_at.get(circuit_key, 0.0)\n            if (time.monotonic() - tripped_at) < _RESPONSES_PROBE_INTERVAL_S:\n                return False\n        return True\n\n    def _record_responses_failure(self, model: str | None, reasoning_effort: str | None) -> None:\n        circuit_key = _responses_circuit_key(model, self.default_model, reasoning_effort)\n        failures = self._responses_failures.get(circuit_key, 0) + 1\n        self._responses_failures[circuit_key] = failures\n        if failures >= _RESPONSES_FAILURE_THRESHOLD:\n            self._responses_tripped_at[circuit_key] = time.monotonic()"
+        },
+        {
+          "file": "deeptutor/services/llm/provider_core/openai_compat_provider.py",
+          "lines": "671, 683-691",
+          "snippet": "if self._should_use_responses_api(model, reasoning_effort):\n...\n                    result = parse_response_output(await self._client.responses.create(**body))\n                    self._record_responses_success(model, reasoning_effort)\n                    return result\n                except Exception as responses_error:\n                    if self._spec and self._spec.name == \"github_copilot\":\n                        raise\n                    if not self._should_fallback_from_responses_error(responses_error):\n                        raise\n                    self._record_responses_failure(model, reasoning_effort)"
+        }
+      ]
+    },
+    {
+      "name": "prompt caching via cache_control markers",
+      "what_it_is": "Before each request, ephemeral cache_control markers are placed on the system prompt, on the second-to-last message and on tool definitions (the last tool if there are at most 5, otherwise every fifth from the end). Active in the native Anthropic provider (supports_prompt_caching defaults to True, spec flag set for anthropic) and in the OpenAI-compatible provider for Claude models on specs with supports_prompt_caching (OpenRouter).",
+      "function_in_system": "Sits in request building (_build_kwargs) of every call to these providers, including the agentic loop's Anthropic adapter. The growing message history of a multi-turn loop shares a stable prefix, which the provider then serves from cache. Saves input-token cost and latency per iteration. Otherwise the full prefix is billed and processed on every loop iteration.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/llm/provider_core/anthropic_provider.py",
+          "lines": "290-296, 338-343",
+          "snippet": "marker = {\"type\": \"ephemeral\"}\n\n        if isinstance(system, str) and system:\n            system = [{\"type\": \"text\", \"text\": system, \"cache_control\": marker}]\n        elif isinstance(system, list) and system:\n            system = list(system)\n            system[-1] = {**system[-1], \"cache_control\": marker}\n...\n        if self._supports_prompt_caching:\n            system, anthropic_msgs, anthropic_tools = self._apply_cache_control(\n                system,\n                anthropic_msgs,\n                anthropic_tools,\n            )"
+        },
+        {
+          "file": "deeptutor/services/llm/provider_core/openai_compat_provider.py",
+          "lines": "269-271",
+          "snippet": "if spec and spec.supports_prompt_caching:\n            if any(model_name.lower().startswith(k) for k in (\"anthropic/\", \"claude\")):\n                messages, tools = self._apply_cache_control(messages, tools)"
+        },
+        {
+          "file": "deeptutor/services/llm/provider_core/base.py",
+          "lines": "168-176",
+          "snippet": "@staticmethod\n    def _tool_cache_marker_indices(tools: list[dict[str, Any]]) -> list[int]:\n        \"\"\"Return indices of tool definitions that should get cache_control markers.\"\"\"\n        n = len(tools)\n        if n == 0:\n            return []\n        if n <= 5:\n            return [n - 1]\n        return [i for i in range(n - 1, -1, -5)]"
+        },
+        {
+          "file": "deeptutor/core/agentic/client.py",
+          "lines": "78-84",
+          "snippet": "anthropic_provider = AnthropicProvider(\n            api_key=config.api_key,\n            api_base=config.base_url or spec.default_api_base or None,\n            default_model=config.model or \"claude-sonnet-4-20250514\",\n            extra_headers=config.extra_headers,\n            supports_prompt_caching=spec.supports_prompt_caching,\n        )"
+        }
+      ]
+    },
+    {
+      "name": "deferred tool loading (progressive schema disclosure)",
+      "what_it_is": "Tools flagged deferred (all MCP tool adapters; builtins default to False) are left out of the per-turn tool schema list. The system prompt carries a one-line manifest entry per deferred tool; the model calls the load_tools builtin with exact names, and DeferredToolLoader appends the full schemas to the live tool_schemas list that the agentic loop re-reads each iteration. Loaded names persist per chat session; stale names (removed servers) are dropped, and an allowlist restricts which tools can be loaded.",
+      "function_in_system": "Sits in the chat pipeline's tool preparation and in the load_tools tool call inside the loop. Keeps the always-sent schema surface small, which saves context tokens on every LLM call and, per the module docs, improves tool selection on weaker models, while every connected tool stays one call away. Otherwise the schemas of all connected MCP servers are sent with every call.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/runtime/registry/deferred_tools.py",
+          "lines": "4-15",
+          "snippet": "Tools flagged ``BaseTool.deferred`` (all MCP tools, by default) are NOT part\nof the initial per-turn tool list. The system prompt carries a one-line\nmanifest per deferred tool (:func:`render_deferred_tools_manifest`); when the\nmodel decides it needs one, it calls the ``load_tools`` builtin with exact\nnames and the :class:`DeferredToolLoader` appends the full schemas to the\nlive ``tool_schemas`` list — ``run_agentic_loop`` re-reads that list every\niteration, so the tools become callable immediately. Loaded names persist\nper chat session so later turns include those schemas from the start.\n\nThis keeps the always-on schema surface small, which measurably improves\ntool selection on weaker models, while keeping every connected tool one\ncheap call away."
+        },
+        {
+          "file": "deeptutor/runtime/registry/deferred_tools.py",
+          "lines": "133-143",
+          "snippet": "tool = self._registry.get(name)\n            if tool is None or not getattr(tool, \"deferred\", False) or not self._is_allowed(name):\n                unknown.append(name)\n                continue\n            if self._live_schemas is not None:\n                self._live_schemas.append(tool.get_definition().to_openai_schema())\n            self._loaded.add(name)\n            loaded.append(name)\n        if loaded:\n            self._persist()\n        return {\"loaded\": loaded, \"already_loaded\": already, \"unknown\": unknown}"
+        },
+        {
+          "file": "deeptutor/services/mcp/manager.py",
+          "lines": "67",
+          "snippet": "deferred = True"
+        },
+        {
+          "file": "deeptutor/agents/chat/agentic_pipeline.py",
+          "lines": "470-475",
+          "snippet": "self._deferred_loader = DeferredToolLoader(\n                registry=self.registry,\n                session_id=context.session_id,\n                loaded=load_loaded_tools(context.session_id),\n                allowed=allowed,\n            )"
+        }
+      ]
+    },
+    {
+      "name": "context-window guard with tool-result snipping",
+      "what_it_is": "Before every LLM call of the chat loop, the message tokens are estimated (token count per text part). If the estimate exceeds 0.9 of the effective context window (configured context_window capped at 1M, else 65,536 for known large-context model families, else max(16,384, 4 x max_tokens)), role=tool message contents are replaced one by one, oldest first, by a marker telling the model to call the tool again if it still needs the content, until the estimate fits. A warning is emitted to the stream.",
+      "function_in_system": "Sits in AgentLoop._call_llm right before each request, including the forced finish. Keeps a turn that accumulated large tool outputs (RAG passages, web pages, exec output) inside the model's window while the system prompt, history and the model's own messages stay intact. Otherwise the provider rejects the request with a context-length error and the turn fails.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/chat/agentic_pipeline.py",
+          "lines": "99",
+          "snippet": "CONTEXT_WINDOW_GUARD_RATIO = 0.9"
+        },
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "433",
+          "snippet": "await self.pipeline._guard_context_window(messages, self.stream)"
+        },
+        {
+          "file": "deeptutor/agents/chat/agentic_pipeline.py",
+          "lines": "1150-1165",
+          "snippet": "if not window or window <= 0:\n    return\nbudget = int(window * CONTEXT_WINDOW_GUARD_RATIO)\nif self._estimate_messages_tokens(messages) <= budget:\n    return\nsnipped = False\nfor msg in messages:\n    if msg.get(\"role\") != \"tool\":\n        continue\n    marker = self._tool_result_snip_marker()\n    if msg.get(\"content\") == marker:\n        continue\n    msg[\"content\"] = marker\n    snipped = True\n    if self._estimate_messages_tokens(messages) <= budget:\n        break"
+        },
+        {
+          "file": "deeptutor/agents/chat/agentic_pipeline.py",
+          "lines": "410-415",
+          "snippet": "return self._t(\n    \"notices.tool_result_snipped\",\n    default=(\n        \"[earlier tool result snipped to stay within context window; \"\n        \"call the same tool again if the content is still needed]\"\n    ),"
+        },
+        {
+          "file": "deeptutor/services/llm/context_window.py",
+          "lines": "60-66",
+          "snippet": "configured = coerce_positive_int(context_window)\nif configured is not None:\n    return min(configured, MAX_EFFECTIVE_CONTEXT_WINDOW)\nreturn min(\n    default_context_window_for_model(model=model, max_tokens=max_tokens),\n    MAX_EFFECTIVE_CONTEXT_WINDOW,\n)"
+        }
+      ]
+    },
+    {
+      "name": "forced finish on mid-loop LLM failure",
+      "what_it_is": "In the chat AgentLoop, an exception from a round's LLM call is caught once at least one round has completed; the loop then runs the forced finish (warning notice, finish instruction, one tool-less LLM call) over the gathered context. If that salvage call fails too, a fixed fallback answer is emitted. A failure in the first round is re-raised.",
+      "function_in_system": "Wraps the per-round LLM call of the chat loop. Turns a timeout or network failure late in a turn into an answer built from the tool results already collected. Otherwise a single failing call discards all prior tool work and the turn ends with an error.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "245, 250-251, 257",
+          "snippet": "except Exception as exc:\n...\n    if state.rounds == 0:\n        raise\n...\n    return await self._forced_finish(messages, state, reason=\"error\")"
+        },
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "371-375",
+          "snippet": "if reason == \"error\":\n    notice = self.pipeline._t(\n        \"notices.loop_error_finish\",\n        default=\"A step failed; answering with what has been gathered.\",\n    )"
+        },
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "397-402",
+          "snippet": "except Exception as exc:\n    # The salvage call itself failed (e.g. the provider is still\n    # stalling). Don't bubble up and lose the turn — emit the graceful\n    # fallback answer instead.\n    logger.warning(\"forced-finish LLM call failed: %s\", exc)\n    return await self._finalize_finish(\"\")"
+        },
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "408-418",
+          "snippet": "if not final_text:\n    # The finish round produced no usable text; nothing streamed to\n    # the user, so emit a fallback answer here.\n    final_text = self.pipeline._t(\n        \"notices.empty_final_response\",\n        default=(\n            \"I could not produce a useful response from the model \"\n            \"output. Please try again or narrow the request.\"\n        ),\n    )\n    await self.pipeline._emit_protocol_fallback_final_response(self.stream, final_text)"
+        }
+      ]
+    },
+    {
+      "name": "one-shot nudge on reasoning-only finish",
+      "what_it_is": "When a round returns no tool calls and its text is empty after removing think tags, the loop keeps the raw text as an assistant message, appends a user message asking the model to either call tools or write the final answer, emits a warning and runs another round. The nudge fires at most once per turn; a second empty finish falls through to the fallback answer.",
+      "function_in_system": "Sits at the finish detection of the chat loop. Catches reasoning models that put the whole reply inside <think> and stop, which the loop would otherwise treat as a finished turn. Otherwise the user receives the generic empty-response fallback although the model had a plan.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "259-261, 267, 280-282, 297",
+          "snippet": "if not result.tool_calls:\n    final_text = self._clean(result.text)\n    if not final_text and not nudged_empty_finish:\n...\n        nudged_empty_finish = True\n...\n        if result.text:\n            messages.append({\"role\": \"assistant\", \"content\": result.text})\n        messages.append(\n...\n        continue"
+        }
+      ]
+    },
+    {
+      "name": "context checkpoint folding after solve steps",
+      "what_it_is": "The solve_finish_step tool attaches a one-line step summary as _context_checkpoint metadata. After tool dispatch, the chat loop truncates the message list back to the last checkpoint boundary (initially the end of the seed messages) and appends the summary as a system message; the new length becomes the next boundary.",
+      "function_in_system": "Sits after each tool dispatch in AgentLoop._run_loop and fires in solve turns, where the solve capability mounts the tool. Removes the finished step's intermediate assistant and tool messages from the context and keeps its outcome, so multi-step solves stay small and cheap per round. Otherwise every step's tool chatter accumulates for the rest of the turn.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "327-331",
+          "snippet": "checkpoint_boundary = self._fold_context_checkpoint(\n    messages=messages,\n    dispatch=dispatch,\n    checkpoint_boundary=checkpoint_boundary,\n)"
+        },
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "351-362",
+          "snippet": "summary = _last_context_checkpoint_summary(dispatch)\nif not summary:\n    return checkpoint_boundary\nprefix = messages[:checkpoint_boundary]\nprefix.append(\n    {\n        \"role\": \"system\",\n        \"content\": f\"[Context checkpoint]\\n{summary}\",\n    }\n)\nmessages[:] = prefix\nreturn len(messages)"
+        },
+        {
+          "file": "deeptutor/capabilities/solve/tools.py",
+          "lines": "9-13",
+          "snippet": "The active session id is injected server-side by the pipeline as\n``_solve_session_id``; the model never supplies it. ``solve_finish_step`` emits\na ``_context_checkpoint`` so the loop folds the just-finished step's tool\nchatter into a one-line summary — the loop-native equivalent of the old\npipeline's per-step message reset."
+        },
+        {
+          "file": "deeptutor/capabilities/solve/tools.py",
+          "lines": "198-203",
+          "snippet": "checkpoint = f\"[{step.id}] {step.goal} — done. {summary}\".strip()\nreturn _json_result(\n    payload,\n    meta_key=\"solve_finish_step\",\n    extra_meta={\"_context_checkpoint\": {\"summary\": checkpoint}},\n)"
+        }
+      ]
+    },
+    {
+      "name": "ask_user pause for human clarification",
+      "what_it_is": "ask_user is mounted on every chat turn. Its tool result carries pause_for_user; the dispatcher reports a pause, the loop awaits the reply through the wait_for_user_reply callback, substitutes the formatted answers plus a continue directive into the matching role=tool message and resumes the loop. Without a waiter the question itself is emitted as the turn's final response and the loop stops.",
+      "function_in_system": "Sits in the chat loop right after tool dispatch. Lets the model resolve an ambiguous or underspecified request with the user mid-turn and continue in-protocol with the answer. Otherwise the model has to guess missing requirements and may spend rounds and tokens on the wrong task.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/_shared/tool_composition.py",
+          "lines": "167",
+          "snippet": "for always_on in (\"write_memory\", \"web_fetch\", \"github\", \"ask_user\", \"cron\"):"
+        },
+        {
+          "file": "deeptutor/agents/chat/agent_loop.py",
+          "lines": "313-322, 325",
+          "snippet": "if dispatch.pause:\n    resumed = await self.pipeline._await_user_reply_and_resolve(\n        context=self.context,\n        stream=self.stream,\n        dispatch=dispatch,\n    )\n    if not resumed:\n        # The pending question is already the turn's final\n        # artefact (or the user abandoned the turn) — stop.\n        return LoopOutcome(final_text=\"\", completed=False)\n...\n    continue"
+        },
+        {
+          "file": "deeptutor/agents/chat/agentic_pipeline.py",
+          "lines": "799-802, 812-814, 829-833",
+          "snippet": "ask_user = (dispatch.pause_payload or {}).get(\"ask_user\") or {}\nwaiter = context.metadata.get(\"wait_for_user_reply\")\nif not callable(waiter):\n    await self._emit_terminator_final_response(\n...\nraw_reply = await waiter()\nif raw_reply is None:\n    return False\n...\ndirective = f\"{body_text}\\n\\n{continue_directive}\"\nfor tm in dispatch.tool_messages:\n    if tm.get(\"tool_call_id\") == dispatch.pause_tool_call_id:\n        tm[\"content\"] = directive\n        break"
+        }
+      ]
+    },
+    {
+      "name": "bounded replan budget (solve)",
+      "what_it_is": "solve_replan replaces the solve plan at most max_replans times per turn (default 2, read from the solve settings and injected server-side into the turn's SolveSession). Once the counter reaches the limit, the tool leaves the plan untouched and returns status budget_exhausted with the instruction to finish with the best available result.",
+      "function_in_system": "Sits in the solve tool layer that the chat loop calls during a deep_solve turn. Caps course corrections so the model commits to a plan and converges. Otherwise a stuck model can replan repeatedly and burn the round budget without progress.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/capabilities/solve/session.py",
+          "lines": "21",
+          "snippet": "DEFAULT_MAX_REPLANS = 2"
+        },
+        {
+          "file": "deeptutor/capabilities/solve/session.py",
+          "lines": "52-59",
+          "snippet": "def replan(self, analysis: str, steps: list[tuple[str, str]]) -> bool:\n    \"\"\"Replace the plan, bumping the replan counter. Returns ``False`` (and\n    leaves the plan untouched) once the budget is spent.\"\"\"\n    if self.replans >= self.max_replans:\n        return False\n    self.replans += 1\n    self.set_plan(analysis, steps)\n    return True"
+        },
+        {
+          "file": "deeptutor/capabilities/solve/tools.py",
+          "lines": "249-263",
+          "snippet": "if not session.replan(reason, steps):\n    return ToolResult(\n        content=json.dumps(\n            {\n                \"status\": \"budget_exhausted\",\n                \"instruction\": (\n                    \"Replan budget is spent. Do not replan again — finish \"\n                    \"the problem with the best of what you have.\"\n                ),\n            },\n            ensure_ascii=False,\n        ),\n        success=False,\n        metadata={\"solve_replan\": {\"status\": \"budget_exhausted\"}},\n    )"
+        },
+        {
+          "file": "deeptutor/capabilities/solve/loop.py",
+          "lines": "57-65",
+          "snippet": "# Seed the replan budget from the solve settings (the solve\n# capability forwards ``max_replans`` into metadata); never the model.\nsession = get_session(session_id)\ntry:\n    session.max_replans = int(\n        context.metadata.get(\"solve_max_replans\", DEFAULT_MAX_REPLANS)\n    )\nexcept (TypeError, ValueError):\n    session.max_replans = DEFAULT_MAX_REPLANS"
+        }
+      ]
+    },
+    {
+      "name": "plan commitment with per-step done gate (solve)",
+      "what_it_is": "On a solve turn the model is told to call solve_plan first with 2-6 ordered steps (stored as server-generated ids S1..Sn, capped at 12), then work one step at a time and close each with solve_finish_step. The session records per-step completion and returns the next open step or the instruction to write the final answer. Code validates step ids; ordering and completeness are instructions in tool descriptions and results.",
+      "function_in_system": "Structures the chat loop during deep_solve into plan, execute and finish phases held as engine state outside the conversation. Keeps the model on a committed decomposition and tells it when all steps are done. Otherwise the model can skip steps or drift between approaches on multi-step problems.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "deeptutor/capabilities/solve/tools.py",
+          "lines": "84-88",
+          "snippet": "\"Lay out your plan for solving the problem: a short analysis plus \"\n\"an ordered list of steps. Call this FIRST, before doing any work. \"\n\"Then work the steps one at a time with the available tools, \"\n\"calling solve_finish_step after each. Keep the plan tight (2-6 \"\n\"steps); for a trivial problem a single step is fine.\""
+        },
+        {
+          "file": "deeptutor/capabilities/solve/tools.py",
+          "lines": "129-133",
+          "snippet": "\"instruction\": (\n    \"Work the first step now using the available tools, then call \"\n    \"solve_finish_step with a short summary of its result. Do not \"\n    \"skip steps.\"\n),"
+        },
+        {
+          "file": "deeptutor/capabilities/solve/session.py",
+          "lines": "48-50",
+          "snippet": "def set_plan(self, analysis: str, steps: list[tuple[str, str]]) -> None:\n    self.analysis = analysis\n    self.steps = [SolveStep(id=sid, goal=goal) for sid, goal in steps][:_MAX_STEPS]"
+        },
+        {
+          "file": "deeptutor/capabilities/solve/session.py",
+          "lines": "61-67",
+          "snippet": "def mark_done(self, step_id: str, summary: str) -> SolveStep | None:\n    for step in self.steps:\n        if step.id == step_id:\n            step.done = True\n            step.summary = summary.strip()\n            return step\n    return None"
+        }
+      ]
+    },
+    {
+      "name": "subagent consult budget with remaining-count feedback",
+      "what_it_is": "consult_subagent may run at most N times per turn (per-turn composer override clamped to CONSULT_BUDGET_MIN..MAX, else the configured default). A turn-scoped counter in context metadata is checked by the tool itself; beyond the budget it refuses with an instruction to answer now. Each result appends the number of remaining consults. The capability also raises the loop's minimum round budget to N + 2 so rounds remain for the final answer.",
+      "function_in_system": "Sits in the tool that delegates to the user's local Claude Code / Codex or a partner agent, the most expensive and slowest call in the turn. Bounds delegation cost and time and guarantees the loop keeps room to answer after the last consult. Otherwise the model can keep consulting indefinitely, or the default round budget cuts the turn off before the answer.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/capabilities/subagent/tools.py",
+          "lines": "88-99",
+          "snippet": "state = spec[\"state\"]\nbudget = int(spec[\"budget\"])\nname = str(spec.get(\"name\") or \"the agent\")\nif int(state.get(\"count\", 0)) >= budget:\n    return ToolResult(\n        content=(\n            f\"[Consult budget reached: you have already asked {name} {budget} \"\n            \"time(s) this turn — the maximum. Do not call consult_subagent \"\n            \"again. Answer the user now with what you have gathered.]\"\n        ),\n        success=False,\n    )"
+        },
+        {
+          "file": "deeptutor/capabilities/subagent/tools.py",
+          "lines": "177-196",
+          "snippet": "remaining = max(0, budget - consult_index)\nmetadata = {\n    \"subagent_kind\": backend.kind,\n    \"consult_index\": consult_index,\n    \"consult_remaining\": remaining,\n    \"event_count\": result.event_count,\n}\nif not result.final_text:\n    detail = result.error or \"the agent produced no final answer text\"\n    return ToolResult(\n        content=f\"[The agent returned no answer: {detail}]\",\n        success=False,\n        metadata=metadata,\n    )\n\nbudget_note = (\n    f\"\\n\\n[{remaining} consult(s) left with {name} this turn.]\"\n    if remaining > 0\n    else f\"\\n\\n[No consults left with {name} — answer the user now.]\"\n)"
+        },
+        {
+          "file": "deeptutor/capabilities/subagent/capability.py",
+          "lines": "24-29",
+          "snippet": "# Headroom over the consult budget so the loop always has rounds left to write\n# the final answer after the last consult. Read by the pipeline via\n# ``context.metadata[\"_min_loop_rounds\"]`` (a generic seam, like solve's\n# ``solve_max_replans``) so a high budget is never clipped by the default round\n# budget.\n_FINISH_HEADROOM = 2"
+        },
+        {
+          "file": "deeptutor/capabilities/subagent/capability.py",
+          "lines": "51-55",
+          "snippet": "budget = _resolve_budget(context)\n# Ensure the loop has room for ``budget`` consults plus the answer. This\n# runs once during prompt assembly, before the loop reads its round\n# budget — see ``_FINISH_HEADROOM``.\ncontext.metadata[\"_min_loop_rounds\"] = budget + _FINISH_HEADROOM"
+        },
+        {
+          "file": "deeptutor/capabilities/subagent/capability.py",
+          "lines": "143-157",
+          "snippet": "def _resolve_budget(context: UnifiedContext) -> int:\n    \"\"\"Consult budget for this turn: a per-turn override from the chat composer\n    (``config.subagent_consult_budget``) if present, else the configured default.\n    \"\"\"\n    from deeptutor.services.subagent import load_subagent_settings\n    from deeptutor.services.subagent.config import CONSULT_BUDGET_MAX, CONSULT_BUDGET_MIN\n\n    overrides = context.config_overrides if isinstance(context.config_overrides, dict) else {}\n    raw = overrides.get(\"subagent_consult_budget\")\n    if raw is not None:\n        try:\n            return max(CONSULT_BUDGET_MIN, min(CONSULT_BUDGET_MAX, int(raw)))\n        except (TypeError, ValueError):\n            pass\n    return load_subagent_settings().consult_budget"
+        }
+      ]
+    },
+    {
+      "name": "non-interactive delegate instruction for consulted agent",
+      "what_it_is": "When the user has set no system prompt for the subagent backend, a default instruction is injected (e.g. via Claude Code --append-system-prompt): answer directly and self-contained, ask no follow-up questions, wait for no input, state assumptions and proceed.",
+      "function_in_system": "Sits in the per-call config the capability builds for consult_subagent. Keeps the programmatically driven CLI agent from behaving like an interactive session. Otherwise the consulted agent may stop to ask the user a question that nobody answers, and the consult returns no usable result.",
+      "activation": "default_on",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "deeptutor/capabilities/subagent/capability.py",
+          "lines": "119-127",
+          "snippet": "# Default instruction injected (CC --append-system-prompt) so a consulted agent\n# behaves like a delegate, not an interactive session, when the user hasn't set\n# their own in /settings.\n_DEFAULT_CONSULT_INSTRUCTION = (\n    \"You are being consulted programmatically by DeepTutor on the user's behalf, \"\n    \"not in an interactive terminal. Answer the question directly, concisely, and \"\n    \"self-contained. Do not ask the user follow-up questions or wait for input; \"\n    \"if something is ambiguous, state your assumption and proceed.\"\n)"
+        },
+        {
+          "file": "deeptutor/capabilities/subagent/capability.py",
+          "lines": "130-140",
+          "snippet": "def _effective_config(config):\n    \"\"\"Fill product defaults the user hasn't overridden in /settings.\n\n    Today: a default ``system_prompt`` so the consulted agent knows it's a\n    delegate (applied by backends that support it, e.g. Claude Code).\n    \"\"\"\n    if config.system_prompt.strip():\n        return config\n    from dataclasses import replace\n\n    return replace(config, system_prompt=_DEFAULT_CONSULT_INSTRUCTION)"
+        }
+      ]
+    },
+    {
+      "name": "explore-context fallback to single-pass briefing",
+      "what_it_is": "The source investigation runs as a native tool-calling loop over read_source. If the provider lacks native tool calling, the loop raises, or it returns an empty investigation, a single LLM call is made instead that receives the source texts directly, clipped to 12 sources, 8,000 characters per source and 48,000 characters in total.",
+      "function_in_system": "Sits in the pre-pass that runs before the chat answer loop whenever the turn has attached sources. Keeps the answer loop grounded in the sources on every provider, since read_source lives only in the pre-pass. Otherwise a tool-calling failure leaves the answer loop with no access to the attached material.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/capabilities/explore_context/explorer.py",
+          "lines": "127-141",
+          "snippet": "investigation = \"\"\nif can_use_native_tool_calling(binding=self.binding, model=self.model):\n    try:\n        investigation = await self._run_loop(context, stream, source_index, usage)\n    except Exception:\n        logger.warning(\n            \"context exploration loop failed; falling back to single pass\",\n            exc_info=True,\n        )\n        investigation = \"\"\n# Non-native providers, or a failed/empty loop, degrade to the robust\n# dump-and-brief single pass so the answer loop is never left without\n# grounding (it can no longer read sources itself).\nif not investigation.strip():\n    investigation = await self._single_pass(context, stream, source_index, usage)"
+        },
+        {
+          "file": "deeptutor/capabilities/explore_context/explorer.py",
+          "lines": "62-66",
+          "snippet": "# Single-pass fallback budgets. The same sources remain reachable via\n# ``read_source`` in the loop path, so clipping here only bounds the fallback.\nMAX_SOURCES = 12\nCHARS_PER_SOURCE = 8000\nTOTAL_CHARS = 48000"
+        },
+        {
+          "file": "deeptutor/capabilities/explore_context/explorer.py",
+          "lines": "440-453",
+          "snippet": "def _render_source_blocks(self, source_index: dict[str, str]) -> str:\n    blocks: list[str] = []\n    total = 0\n    for sid, text in source_index.items():\n        body = str(text or \"\").strip()\n        if not body:\n            continue\n        if len(blocks) >= MAX_SOURCES or total >= TOTAL_CHARS:\n            break\n        remaining = TOTAL_CHARS - total\n        clipped = self._clip(body, min(CHARS_PER_SOURCE, remaining))\n        blocks.append(f\"### [{sid}] ({self._kind_label(sid)})\\n{clipped}\")\n        total += len(clipped)\n    return \"\\n\\n\".join(blocks)"
+        }
+      ]
+    },
+    {
+      "name": "dedicated source-investigation pre-pass",
+      "what_it_is": "Whenever the turn carries readable attached sources, an agentic pre-pass reads them with read_source and writes an objective third-person investigation that is folded into the answer loop's user-message seed. read_source is removed from the answer loop's tool surface.",
+      "function_in_system": "Sits before the first LLM call of the chat loop as a pre_loop capability hook. Per the design notes it addresses two failure modes: the model adopting another agent's first-person voice when it reads a referenced transcript in the answering context, and weak models skipping read_source under native tool calling. Otherwise answers rest on unread sources or speak in the wrong voice.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/capabilities/explore_context/capability.py",
+          "lines": "12-28",
+          "snippet": "Why it exists:\n\n* The chat loop fuses \"understand the attached material\" with \"answer the\n  user\" in a single loop. When the material is a transcript of the user\n  talking to another AI agent, the model reads those ``## Assistant`` turns in\n  the same context it answers from and adopts that agent's first-person voice.\n  Separating comprehension into an objective pre-pass removes that confusion\n  structurally.\n* Weak models under native tool calling routinely never call ``read_source``\n  themselves. Owning source-reading in a dedicated pre-pass — and dropping the\n  tool from the answer loop entirely — forces the investigation to happen up\n  front instead of being skipped.\n\nThe capability owns no answer-loop tools and contributes no system block — it\nworks purely through the optional async ``pre_loop`` hook (see\n:class:`LoopCapability`). ``read_source`` lives inside the pre-pass's own tool\nloop, not on the answer loop's surface."
+        },
+        {
+          "file": "deeptutor/agents/chat/agentic_pipeline.py",
+          "lines": "529-532",
+          "snippet": "# read_source is owned by the explore_context pre-pass (it runs\n# the investigation over attached sources), not the answer loop.\n# Keep it off the answer surface even when sources are present.\nhas_sources=False,"
+        }
+      ]
+    },
+    {
+      "name": "tool-evidence requirement before FINISH",
+      "what_it_is": "In deep-research blocks, the host's validate_terminal hook rejects a FINISH label while no tool round has run yet in that block (whenever native evidence tools are available). The core loop treats the rejection as a protocol violation: it emits a retry notice, appends repair messages and runs another iteration.",
+      "function_in_system": "Sits at the terminal-label check of run_agentic_loop for each research block. Forces the model to gather evidence before it synthesizes block knowledge, turning a prompt rule into an executable check. Otherwise models jump straight to FINISH and the report rests on ungrounded, uncited text.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "2304-2317",
+          "snippet": "async def validate_terminal(self, label: str, text: str) -> str | None:\n    \"\"\"Reject a first-turn FINISH when native evidence tools are callable.\n\n    The prompt tells the model to call a tool before FINISH, but some\n    models still jump straight to synthesis. This hook makes that rule\n    executable instead of prompt-only.\n    \"\"\"\n    if (\n        label == LABEL_FINISH\n        and self._tool_rounds_used <= 0\n        and self._pipeline._use_native_block_tools()\n    ):\n        return \"finish_without_tool\"\n    return None"
+        },
+        {
+          "file": "deeptutor/core/agentic/loop.py",
+          "lines": "276-290",
+          "snippet": "validate_terminal = getattr(host, \"validate_terminal\", None)\nif validate_terminal is not None:\n    violation = await validate_terminal(step.label, step.text)\n    if violation:\n        await _emit_retry_notice(\n            stream=stream,\n            source=source,\n            stage=stage,\n            host=host,\n            violation=violation,\n        )\n        _append_repair_messages(\n            messages=messages,\n            iteration_text=step.text,\n            violation=violation,"
+        }
+      ]
+    },
+    {
+      "name": "note-sidecar condensation of tool results",
+      "what_it_is": "After each tool dispatch in a research block, results of citable tools are summarized by a separate LLM call (raw input clipped to 8,000 characters, 1,500 output tokens). The summary is registered as a citation and replaces the tool message content as '[citation_id] summary'. If the summarizer call fails, the first 600 characters of the raw result are used.",
+      "function_in_system": "Sits in the block host's dispatch_tools between tool execution and the next loop iteration. Keeps long retrievals from filling the block's context and gives the model compact, citation-tagged evidence; the research hosts apply no other context trimming. Otherwise every raw RAG or web result accumulates in full across iterations.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "2187-2192",
+          "snippet": "Three loop hooks are implemented beyond the default protocol:\n* :meth:`dispatch_tools` — wraps the standard parallel dispatch with\n  a note-agent sidecar that summarises citable tool results and\n  records them in :class:`CitationManager`. The summary then\n  replaces the raw tool message content sent back to the model so\n  long retrievals don't blow the context budget."
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "200-203",
+          "snippet": "# Token budget for the note summarization sidecar.\nDEFAULT_NOTE_MAX_TOKENS = 1500\n# How much of the raw tool output we feed into the note summarizer.\nNOTE_RAW_INPUT_TRUNCATE_CHARS = 8000"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "2344-2349, 2352-2359, 2376",
+          "snippet": "for tm in outcome.tool_messages:\n    tool_call_id = str(tm.get(\"tool_call_id\") or \"\")\n    tool_name, tool_args = call_meta_by_id.get(tool_call_id, (\"\", {}))\n    if tool_name not in CITABLE_TOOLS:\n        continue\n    raw_answer = str(tm.get(\"content\") or \"\")\n...\n    try:\n        query = str(tool_args.get(\"query\") or \"\")\n        summary = await self._pipeline._summarise_tool_result(\n            tool_name=tool_name,\n            query=query,\n            raw_answer=raw_answer,\n            client=self._client,\n        )\n...\n        tm[\"content\"] = f\"[{citation_id}] {summary}\""
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "1017-1021, 1030",
+          "snippet": "\"\"\"One LLM call per citable tool result: condense long retrievals\ninto a short, citation-ready summary. Failures fall back to a\nleading slice of the raw answer so the loop never stalls on a\nflaky summariser call.\n\"\"\"\n...\n    raw_answer=cleaned[:NOTE_RAW_INPUT_TRUNCATE_CHARS],"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "1046-1049",
+          "snippet": "    return content.strip() or cleaned[:600]\nexcept Exception as exc:\n    logger.warning(\"Note summarisation failed (%s): %s\", tool_name, exc)\n    return cleaned[:600]"
+        }
+      ]
+    },
+    {
+      "name": "bounded dynamic topic queue with APPEND checks",
+      "what_it_is": "The APPEND label lets the model add sub-topics to the research queue. The host rejects empty titles, proposals when the queue is at max_length (default 8, configurable) and titles fuzzily similar to an existing block (threshold 0.85); each rejection is returned as feedback for the next iteration. The queue scheduler additionally stops after max(20, 4 x max_length) rounds.",
+      "function_in_system": "Sits in the block host's on_intermediate hook and in the queue scheduler of deep research. Bounds the number of research blocks, which each run a full agentic loop, and prevents the model from re-proposing the same topic in other words. Otherwise the queue can grow without limit and multiply cost and runtime.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "222",
+          "snippet": "DEFAULT_QUEUE_MAX_LENGTH = 8"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "2469, 2485-2491",
+          "snippet": "if self._queue.is_full():\n...\n    return self._pipeline._t(\n        \"notices.append_rejected_full\",\n        default=(\n            \"APPEND rejected: the topic queue is at capacity. Continue \"\n            \"researching the current block and emit FINISH when done.\"\n        ),\n    )"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "2493-2494, 2515-2523",
+          "snippet": "dup = self._queue.find_similar(title)\nif dup is not None:\n...\n    return self._pipeline._t(\n        \"notices.append_rejected_duplicate\",\n        existing_id=dup.block_id,\n        existing_title=dup.sub_topic,\n        default=(\n            f\"APPEND rejected: too similar to existing block \"\n            f\"{dup.block_id} ({dup.sub_topic!r}).\"\n        ),\n    )"
+        },
+        {
+          "file": "deeptutor/agents/research/data_structures.py",
+          "lines": "18-21",
+          "snippet": "# Default fuzzy-match threshold used by :meth:`DynamicTopicQueue.find_similar`.\n# 0.85 reliably catches near-duplicate titles (case / punctuation / one-word\n# reorderings) while letting genuinely distinct sub-topics through.\nDEFAULT_TOPIC_SIMILARITY_THRESHOLD = 0.85"
+        },
+        {
+          "file": "deeptutor/agents/research/data_structures.py",
+          "lines": "340-342",
+          "snippet": "def is_full(self) -> bool:\n    \"\"\"Return ``True`` when the queue has reached its configured cap.\"\"\"\n    return self.max_length is not None and len(self.blocks) >= self.max_length"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "954-955, 989-996",
+          "snippet": "rounds = 0\nsafety_cap = max(20, (self.queue_max_length or 0) * 4)\n...\n    rounds += 1\n    if rounds > safety_cap:\n        logger.warning(\n            \"Research scheduler aborted after %d rounds — queue size %d\",\n            rounds,\n            len(queue.blocks),\n        )\n        break"
+        }
+      ]
+    },
+    {
+      "name": "per-block failure isolation in deep research",
+      "what_it_is": "Each research block runs in its own agentic loop. An exception inside a block marks it failed and returns empty knowledge; the scheduler gathers batches with return_exceptions=True and records failed blocks the same way. Reporting continues with the remaining blocks.",
+      "function_in_system": "Sits around each block loop and around the parallel batch in the queue scheduler. Contains a failure (provider error, tool crash) to one sub-topic. Otherwise one failing block aborts the whole multi-block research run and discards the finished blocks.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "841-844",
+          "snippet": "except Exception as exc:\n    logger.exception(\"Research block %s failed: %s\", block.block_id, exc)\n    queue.mark_failed(block.block_id)\n    return ResearchedBlock(block=block, knowledge=\"\")"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "965-966, 978-986",
+          "snippet": "results = await asyncio.gather(\n    *[\n...\n    return_exceptions=True,\n)\nfor block, result in zip(batch, results, strict=True):\n    if isinstance(result, BaseException):\n        logger.exception(\"Block %s research failed: %s\", block.block_id, result)\n        if block.status == TopicStatus.RESEARCHING:\n            queue.mark_failed(block.block_id)\n        researched_by_id[block.block_id] = ResearchedBlock(block=block, knowledge=\"\")\n        continue"
+        }
+      ]
+    },
+    {
+      "name": "rephrase clarification cap",
+      "what_it_is": "The rephrase phase of deep research runs a mini agentic loop that exposes only ask_user. Other tool calls are answered inline with a rejection message. After max_rounds (default 3) ask_user rounds, further ask_user calls receive a tool message instructing the model to FINISH with the best refined topic. If the loop fails, the raw topic is used.",
+      "function_in_system": "Sits in the rephrase host's dispatch_tools and in _rephrase. Bounds how often the user is asked for clarification before research starts and keeps the phase from blocking the pipeline. Otherwise the model can keep questioning the user or call research tools in a phase meant for clarification.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "2624-2642",
+          "snippet": "for tc in tool_calls:\n    if tc.get(\"name\") == \"ask_user\":\n        allowed.append(tc)\n    else:\n        rejected.append(\n            {\n                \"role\": \"tool\",\n                \"tool_call_id\": tc.get(\"id\"),\n                \"name\": tc.get(\"name\", \"\"),\n                \"content\": self._pipeline._t(\n                    \"notices.rephrase_only_ask_user\",\n                    tool=tc.get(\"name\", \"\"),\n                    default=(\n                        \"Only `ask_user` is available in this phase. \"\n                        \"Use it or emit FINISH with the refined topic.\"\n                    ),\n                ),\n            }\n        )"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "2644-2662",
+          "snippet": "if self._rounds_used >= self._max_rounds and allowed:\n    cap_messages = [\n        {\n            \"role\": \"tool\",\n            \"tool_call_id\": tc.get(\"id\"),\n            \"name\": \"ask_user\",\n            \"content\": self._pipeline._t(\n                \"notices.rephrase_cap_reached\",\n                max_rounds=self._max_rounds,\n                default=(\n                    f\"ask_user limit reached ({self._max_rounds} \"\n                    \"rounds). Emit FINISH now with the best refined \"\n                    \"topic you can produce from prior answers.\"\n                ),\n            ),\n        }\n        for tc in allowed\n    ]\n    return DispatchOutcome(sources=[], tool_messages=cap_messages + rejected)"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "665-670",
+          "snippet": "except Exception as exc:\n    logger.warning(\"Rephrase loop failed; falling back to raw topic: %s\", exc)\n    return topic.strip()\n\nrefined = (outcome.final_text or \"\").strip()\nreturn refined or topic.strip()"
+        }
+      ]
+    },
+    {
+      "name": "deterministic repair of LLM-planned outlines",
+      "what_it_is": "Outline JSON from the model is post-processed in code. Report outline: invalid block ids are dropped, sections without blocks receive the most similar uncovered block, uncovered blocks are added to the best-matching section or to an 'Additional findings' section, and an unparseable outline becomes one section per block. Decompose: an unparseable sub-topic list becomes a single sub-topic equal to the topic.",
+      "function_in_system": "Sits between the planning LLM calls and the next phase of deep research. Guarantees that every researched block reaches the report and that the pipeline always has a plan. Otherwise malformed or partial outline output silently drops research results or stops the run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "1416-1422",
+          "snippet": "\"\"\"Make report planning robust to partial / invalid block maps.\n\nThe prompt asks the model to map every researched block into at\nleast one report section, but outline JSON is still model output.\nThis deterministic pass keeps the report from silently dropping a\nblock when the LLM omits its id, misspells it, or leaves a section\nwith an empty ``block_ids`` list."
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "1431-1438",
+          "snippet": "for section in sections:\n    ids = tuple(dict.fromkeys(bid for bid in section.block_ids if bid in valid_ids))\n    if not ids:\n        best = _best_block_for_section(section, blocks, exclude=covered)\n        if best is not None:\n            ids = (best.block.block_id,)\n    covered.update(ids)\n    repaired.append(_section_with_block_ids(section, ids))"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "1440-1449, 1456-1457, 1464-1471",
+          "snippet": "missing = [rb for rb in blocks if rb.block.block_id not in covered]\nif not missing:\n    return repaired\n\naddendum: list[str] = []\nfor rb in missing:\n    section_index = _best_section_for_block(rb, repaired)\n    if section_index is None:\n        addendum.append(rb.block.block_id)\n        continue\n...\nif addendum:\n    addendum_title = self._t(\"labels.addendum_title\", default=\"Additional findings\")\n...\n    repaired.append(\n        ReportSectionPlan(\n            id=f\"S{len(repaired) + 1}\",\n            title=addendum_title,\n            intent=addendum_intent,\n            block_ids=tuple(addendum),\n        )\n    )"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "1397-1405",
+          "snippet": "if not sections:\n    # Fallback: one section per researched block in queue order.\n    for rb in blocks:\n        sections.append(\n            ReportSectionPlan(\n                id=rb.block.block_id,\n                title=rb.block.sub_topic,\n                intent=rb.block.overview or \"\",\n                block_ids=(rb.block.block_id,),"
+        },
+        {
+          "file": "deeptutor/agents/research/pipeline.py",
+          "lines": "746-747",
+          "snippet": "if not items:\n    items = [SubTopicItem(title=topic, overview=\"\")]"
+        }
+      ]
+    },
+    {
+      "name": "render-error-driven code repair loop (Manim)",
+      "what_it_is": "Generated Manim code is rendered in a subprocess. A ManimRenderError (non-zero exit code, missing Scene class, missing artifact) triggers an LLM repair call that receives the current code and the last 1,200 characters of stdout/stderr, enriched with targeted hints for known error patterns (2D/3D point mismatch). The repaired code is rendered again. At most max_retries=4 repairs (5 render attempts), each repair call bounded by a 180 s timeout. A missing local LaTeX installation is classified as non-retriable and aborts immediately with a dedicated message. After the last failed attempt the error is re-raised.",
+      "function_in_system": "Sits in the render stage of the math_animator pipeline, which the Manim branch of the visualize capability reuses. Turns runtime failures of LLM-written code into feedback for a targeted fix, and the timeout keeps a hanging repair call from blocking the turn. Otherwise the first crash of generated Manim code ends the turn.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/math_animator/retry_manager.py",
+          "lines": "53, 59-63, 129-155",
+          "snippet": "for attempt in range(self.max_retries + 1):\n...\n        render_result = await self.renderer.render(\n            code=code,\n            output_mode=output_mode,\n            quality=quality,\n        )\n...\n    except ManimRenderError as exc:\n        if _is_non_retriable_environment_error(str(exc)):\n            raise ManimRenderError(\n                \"Render failed because local LaTeX is missing. \"\n                \"Please avoid Tex/MathTex in generated code or install a LaTeX distribution.\"\n            ) from exc\n        if attempt >= self.max_retries:\n            raise\n        retry_attempt = RetryAttempt(attempt=attempt + 1, error=str(exc))\n        retry_history.append(retry_attempt)\n        if self.on_retry is not None:\n            await self.on_retry(retry_attempt)\n        if self.on_status is not None:\n            await self.on_status(f\"Generating repaired code for retry #{attempt + 1}.\")\n        try:\n            repaired = await asyncio.wait_for(\n                self.repair_callback(code, str(exc), attempt + 1),\n                timeout=self.repair_timeout_seconds,\n            )\n        except asyncio.TimeoutError as timeout_exc:\n            raise ManimRenderError(\n                f\"Code repair attempt #{attempt + 1} timed out after \"\n                f\"{int(self.repair_timeout_seconds)}s.\"\n            ) from timeout_exc\n        code = repaired.code.strip() or code\n        if self.on_status is not None:\n            await self.on_status(f\"Retry #{attempt + 1} code generated. Re-rendering now.\")"
+        },
+        {
+          "file": "deeptutor/agents/math_animator/retry_manager.py",
+          "lines": "12-18",
+          "snippet": "def _is_non_retriable_environment_error(message: str) -> bool:\n    lowered = (message or \"\").lower()\n    return (\n        \"no such file or directory: 'latex'\" in lowered\n        or 'no such file or directory: \"latex\"' in lowered\n        or \"latex could not be found\" in lowered\n    )"
+        },
+        {
+          "file": "deeptutor/agents/math_animator/renderer.py",
+          "lines": "194-201",
+          "snippet": "if return_code != 0:\n    raise ManimRenderError(\n        trim_error_message(\n            \"\\n\".join(\n                part for part in [\"\\n\".join(stdout_lines), \"\\n\".join(stderr_lines)] if part\n            )\n        )\n    )"
+        },
+        {
+          "file": "deeptutor/agents/math_animator/utils.py",
+          "lines": "69-73, 81-86",
+          "snippet": "def trim_error_message(stderr: str, limit: int = 1200) -> str:\n    text = (stderr or \"\").strip()\n    if len(text) <= limit:\n        return text\n    return text[-limit:]\n...\n    if \"append_points\" in lowered and \"shape (1,2)\" in lowered and \"shape (1,3)\" in lowered:\n        hints.append(\n            \"Detected a 2D-to-3D point mismatch in Manim. Every point array passed into \"\n            \"Line/Polygon/VMobject/set_points_as_corners/append_points must be 3D.\"\n        )\n        hints.append("
+        },
+        {
+          "file": "deeptutor/agents/math_animator/pipeline.py",
+          "lines": "174-188",
+          "snippet": "retry_manager = CodeRetryManager(\n    renderer=renderer,\n    max_retries=4,\n    on_retry=on_retry,\n    on_status=on_retry_status,\n    review_callback=review_callback,\n    repair_callback=lambda current_code, error_message, attempt: self.code_agent.repair(\n        user_input=user_input,\n        output_mode=request_config.output_mode,\n        current_code=current_code,\n        error_message=error_message,\n        attempt=attempt,\n        duration_target_seconds=duration_target_seconds,\n    ),\n)"
+        },
+        {
+          "file": "deeptutor/agents/visualize/capability.py",
+          "lines": "424",
+          "snippet": "final_code, render_result = await pipeline.run_render("
+        }
+      ]
+    },
+    {
+      "name": "deterministic output validation with single targeted repair (visualize)",
+      "what_it_is": "Non-Manim visualization code is checked locally by code alone: svg must be well-formed XML with an <svg> root and a camelCase viewBox, chartjs must be strict JSON with type and data, mermaid must start with a known diagram keyword, html passes a structural heuristic. On failure exactly one repair call receives the concrete validation error, and the repaired code is validated again; a residual issue is reported as a warning. If the repair call raises, the unvalidated draft is used. Invalid html skips repair and is replaced by a minimal fallback template.",
+      "function_in_system": "Sits between code generation and output emission in the visualize capability. Catches unrenderable model output before it reaches the frontend. The code comment states it replaced a generic LLM review, so the passing case costs zero model calls and only failures pay for one targeted repair. Otherwise broken SVG/Chart.js/Mermaid code is shipped and renders as a blank or broken panel.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/visualize/capability.py",
+          "lines": "146-156, 170-177, 191-203, 223-228",
+          "snippet": "# Stage 3: Validate locally; repair only on failure.\n#\n# The old generic LLM review is replaced by a deterministic, zero-cost\n# local check (well-formed XML / strict-JSON / mermaid lint / HTML\n# sanity). When it passes we ship the draft as-is — saving a whole\n# serial LLM call. When it fails we spend one *targeted* repair call\n# driven by the concrete error, not an open-ended re-judgement.\nasync with stream.stage(\"reviewing\", source=self.name):\n    ok, validation_error = validate_visualization(code, analysis.render_type)\n    if ok:\n        final_code = code\n...\n    elif analysis.render_type == \"html\":\n        # html documents are 8-16k tokens; we don't run them through\n        # the repair loop — fall back to a minimal renderable template.\n        final_code = build_fallback_html(\n            title=analysis.description or \"Visualization\",\n            summary=analysis.data_description,\n            note=\"The model did not return a renderable HTML document.\",\n        )\n...\n    else:\n        await stream.thinking(\n            i18n.t(\"repairing\", \"Fixing a validation issue...\"),\n            source=self.name,\n            stage=\"reviewing\",\n        )\n        try:\n            review = await pipeline.run_repair(\n                user_input=context.user_message,\n                analysis=analysis,\n                code=code,\n                error=validation_error,\n            )\n...\n        else:\n            final_code = review.optimized_code or code\n            repaired_ok, repaired_error = validate_visualization(\n                final_code, analysis.render_type\n            )\n            if repaired_ok:"
+        },
+        {
+          "file": "deeptutor/agents/visualize/capability.py",
+          "lines": "204-214",
+          "snippet": "except Exception as exc:\n    # Repair wraps code inside a JSON string field; large/complex\n    # SVGs can trip JSON-mode escaping. Fall back to the draft so\n    # the user still gets a rendered result.\n    logger.warning(\"Visualize repair failed (%s); using unvalidated draft.\", exc)\n    review = ReviewResult(\n        optimized_code=code,\n        changed=False,\n        review_notes=f\"Repair skipped due to error: {exc}\",\n    )\n    final_code = code"
+        },
+        {
+          "file": "deeptutor/agents/visualize/utils.py",
+          "lines": "164-171, 177-183, 197-205",
+          "snippet": "def validate_visualization(code: str, render_type: str) -> tuple[bool, str]:\n    \"\"\"Cheap, deterministic, local render-ability check.\n\n    Returns ``(ok, error)``. When ``ok`` is False, ``error`` is a short,\n    LLM-actionable message used to drive a single repair pass — none of these\n    failures need an LLM call to *discover*. This replaces the generic LLM\n    review for the text render types: only when local validation fails do we\n    spend a model call (a targeted repair, not an open-ended review).\n...\n    if render_type == \"svg\":\n        if \"<svg\" not in text.lower():\n            return False, \"SVG must contain a root <svg> element.\"\n        try:\n            root = ET.fromstring(text)\n        except ET.ParseError as exc:\n            return False, f\"SVG is not well-formed XML: {exc}\"\n...\n    if render_type == \"chartjs\":\n        candidate = _strip_outer_fence(text)\n        try:\n            config = json.loads(candidate)\n        except (json.JSONDecodeError, TypeError):\n            return False, (\n                \"Chart.js config must be strict JSON: double-quoted keys, no \"\n                \"function callbacks, no comments, no trailing commas.\"\n            )"
+        },
+        {
+          "file": "deeptutor/agents/visualize/prompts/en/review_agent.yaml",
+          "lines": "1-5",
+          "snippet": "repair_system: |\n  You are a visualization code repair agent. The generated code failed a\n  deterministic local validation check, and you are given the exact error. Fix\n  THAT specific defect with the smallest change that makes the code valid and\n  renderable — do not redesign, restyle, or re-judge the rest."
+        }
+      ]
+    },
+    {
+      "name": "vision-LLM visual review critic for rendered animations",
+      "what_it_is": "After a successful Manim render, three frames are extracted with ffmpeg (at 15/50/85 % of the video duration) or the rendered images are used directly. A vision-capable LLM reviews them together with the code for overlap, readability and framing and returns a JSON verdict. passed=false feeds the review summary and suggested fix into the same repair callback as render errors and re-renders. When the retry budget is exhausted the best available result is returned with a warning. The review call is bounded by a 120 s timeout and is skipped (passed=True) when the frame list is empty or the model lacks vision support. The switch enable_visual_review defaults to False and neither the math_animator nor the visualize capability sets it, so the path is unreachable from the shipped entry points.",
+      "function_in_system": "Sits inside the render retry loop after each successful render, as an external critic on the visual output of generated code. Catches animations that run but are visually broken (overlapping text, off-screen elements). Otherwise such results pass as successful renders.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/agents/math_animator/pipeline.py",
+          "lines": "34, 61-70, 157",
+          "snippet": "enable_visual_review: bool = False,\n...\nself.visual_review_agent = (\n    VisualReviewAgent(\n        api_key=api_key,\n        base_url=base_url,\n        api_version=api_version,\n        language=language,\n    )\n    if enable_visual_review\n    else None\n)\n...\nif self.enable_visual_review and self.visual_review_agent is not None:"
+        },
+        {
+          "file": "deeptutor/agents/math_animator/retry_manager.py",
+          "lines": "64-87, 110-120",
+          "snippet": "if self.review_callback is not None:\n    if self.on_status is not None:\n        await self.on_status(\n            \"Reviewing rendered visuals for overlap, readability, and framing.\"\n        )\n    try:\n        review_result = await asyncio.wait_for(\n            self.review_callback(code, render_result),\n            timeout=self.review_timeout_seconds,\n        )\n    except asyncio.TimeoutError as timeout_exc:\n        raise ManimRenderError(\n            f\"Visual quality review timed out after {int(self.review_timeout_seconds)}s.\"\n        ) from timeout_exc\n    render_result.visual_review = review_result\n    if not review_result.passed:\n        if attempt >= self.max_retries:\n            if self.on_status is not None:\n                await self.on_status(\n                    \"Visual review still found issues after all retries. Returning the best available result with a warning.\"\n                )\n            render_result.retry_attempts = len(retry_history)\n            render_result.retry_history = retry_history\n            return code, render_result\n...\n        try:\n            repaired = await asyncio.wait_for(\n                self.repair_callback(code, retry_attempt.error, attempt + 1),\n                timeout=self.repair_timeout_seconds,\n            )\n        except asyncio.TimeoutError as timeout_exc:\n            raise ManimRenderError(\n                f\"Code repair attempt #{attempt + 1} timed out after \"\n                f\"{int(self.repair_timeout_seconds)}s.\"\n            ) from timeout_exc\n        code = repaired.code.strip() or code"
+        },
+        {
+          "file": "deeptutor/agents/math_animator/visual_review.py",
+          "lines": "120-130",
+          "snippet": "@staticmethod\ndef _choose_timestamps(duration: float) -> list[float]:\n    if duration <= 0:\n        return [0.0]\n    if duration < 2:\n        return [0.0, min(duration / 2, duration), max(duration - 0.05, 0.0)]\n    return [\n        max(duration * 0.15, 0.0),\n        min(duration * 0.5, duration),\n        max(duration * 0.85, 0.0),\n    ]"
+        },
+        {
+          "file": "deeptutor/agents/math_animator/agents/visual_review_agent.py",
+          "lines": "42-55",
+          "snippet": "if not attachments:\n    return VisualReviewResult(\n        passed=True,\n        summary=\"Visual review skipped because no review frames were available.\",\n        reviewed_frames=0,\n    )\n\nmodel = self.get_model()\nif not supports_vision(self.binding, model):\n    return VisualReviewResult(\n        passed=True,\n        summary=\"Visual review skipped because the current model does not support image inspection.\",\n        reviewed_frames=len(attachments),\n    )"
+        },
+        {
+          "file": "deeptutor/agents/math_animator/capability.py",
+          "lines": "58-64",
+          "snippet": "pipeline = MathAnimatorPipeline(\n    api_key=llm_config.api_key,\n    base_url=llm_config.base_url,\n    api_version=llm_config.api_version,\n    language=context.language,\n    trace_callback=self._build_trace_bridge(stream, i18n=i18n),\n)"
+        }
+      ]
+    },
+    {
+      "name": "sandboxed execution of model-issued code with isolation-level gating",
+      "what_it_is": "Commands from the exec and code_execution tools run through a SandboxService whose backend is chosen from the environment: a runner sidecar container over HTTP or bubblewrap mount namespaces (SYSTEM isolation), or a restricted subprocess with scrubbed env (APPLICATION isolation, only with DEEPTUTOR_SANDBOX_ALLOW_SUBPROCESS=1). A lazy, cached health probe (bwrap runs a trivial 'true', the runner answers /health) downgrades an unusable backend to OFF. The chat pipeline's policy gate mounts exec for every user at SYSTEM, for admins only at APPLICATION and for nobody at OFF, and disables exec when the gate itself fails. A regex deny list blocks obviously destructive commands (rm -rf, mkfs, fork bomb, user management) and the runner rejects workdirs outside the shared workspace roots.",
+      "function_in_system": "Sits between the tool dispatcher and the host whenever the model runs shell commands or code. Contains the effects of wrong or harmful LLM-generated commands inside an isolated, workspace-scoped environment and keeps exec away from deployments that cannot isolate it. Otherwise model-written code runs with the privileges of the application process on the host.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/sandbox/config.py",
+          "lines": "66, 75-84",
+          "snippet": "def build_backend(settings: SandboxSettings) -> SandboxBackend | None:\n...\n    if settings.runner_url:\n        return RunnerSidecarBackend(settings.runner_url)\n    if sys.platform.startswith(\"linux\"):\n        import shutil\n\n        if shutil.which(\"bwrap\"):\n            return BwrapBackend()\n    if settings.allow_subprocess:\n        return RestrictedSubprocessBackend()\n    return None"
+        },
+        {
+          "file": "deeptutor/services/sandbox/service.py",
+          "lines": "45-57, 65-69",
+          "snippet": "async def _ensure_healthy(self) -> bool:\n    if self._backend is None:\n        return False\n    if self._healthy is not None:\n        return self._healthy\n    async with self._health_lock:\n        if self._healthy is None:\n            try:\n                self._healthy, self._health_detail = await self._backend.health()\n            except Exception as exc:\n                self._healthy = False\n                self._health_detail = f\"health check failed: {exc}\"\n            if not self._healthy:\n...\nasync def isolation_level(self) -> IsolationLevel:\n    \"\"\"Effective isolation level (OFF when no healthy backend).\"\"\"\n    if not await self._ensure_healthy() or self._backend is None:\n        return IsolationLevel.OFF\n    return self._backend.level"
+        },
+        {
+          "file": "deeptutor/services/sandbox/backends.py",
+          "lines": "155-164",
+          "snippet": "async def health(self) -> tuple[bool, str]:\n    if shutil.which(self._bwrap) is None:\n        return False, \"bwrap not installed\"\n    # bwrap needs unprivileged user namespaces; a default-seccomp Docker\n    # container blocks them, so confirm a trivial sandbox actually runs.\n    probe = ExecRequest(command=\"true\")\n    result = await self.exec(probe)\n    if result.error:\n        return False, result.error\n    return True, \"bwrap functional\""
+        },
+        {
+          "file": "deeptutor/agents/chat/agentic_pipeline.py",
+          "lines": "488, 498-511, 516-519",
+          "snippet": "async def _exec_allowed(self, context: UnifiedContext) -> bool:\n...\n        level = await get_sandbox_service().isolation_level()\n        if level is IsolationLevel.SYSTEM:\n            # Admin can switch exec off per user (grant v2). ``None``\n            # follows the policy: SYSTEM isolation serves everyone.\n            from deeptutor.multi_user.tool_access import exec_override\n\n            return exec_override() is not False\n        if level is IsolationLevel.APPLICATION:\n            if is_partner:\n                return True\n            try:\n                from deeptutor.multi_user.context import get_current_user\n\n                return bool(get_current_user().is_admin)\n...\n        return False\n    except Exception:\n        logger.warning(\"exec policy gate failed; disabling exec\", exc_info=True)\n        return False"
+        },
+        {
+          "file": "deeptutor/tools/exec_tool.py",
+          "lines": "30-43, 85-91",
+          "snippet": "# Defence-in-depth deny list (mirrors TutorBot's ExecTool). The sandbox is the\n# real boundary; these patterns stop obviously destructive commands early.\n_DENY_PATTERNS: tuple[str, ...] = (\n    r\"\\brm\\s+-[rf]{1,2}\\b\",\n    r\"\\bdel\\s+/[fq]\\b\",\n    r\"\\brmdir\\s+/s\\b\",\n    r\"(?:^|[;&|]\\s*)format\\b\",\n    r\"\\b(mkfs|diskpart)\\b\",\n    r\"\\bdd\\s+if=\",\n    r\">\\s*/dev/sd\",\n    r\"\\b(shutdown|reboot|poweroff)\\b\",\n    r\":\\(\\)\\s*\\{.*\\};\\s*:\",\n    r\"(?:^|[;&|]\\s*)(useradd|usermod|passwd|chpasswd|crontab)\\b\",\n)\n...\n        lowered = command.lower()\n        for pattern in _DENY_PATTERNS:\n            if re.search(pattern, lowered):\n                return ToolResult(\n                    content=t(\"sandbox.command_blocked\"),\n                    success=False,\n                )"
+        },
+        {
+          "file": "deeptutor/services/sandbox/runner/server.py",
+          "lines": "156-166",
+          "snippet": "def _workdir_violation(workdir: str) -> str:\n    \"\"\"Return a rejection reason, or '' when *workdir* is acceptable.\"\"\"\n    resolved = os.path.realpath(workdir)\n    for root in _ALLOWED_WORKDIR_ROOTS:\n        root_real = os.path.realpath(root)\n        if resolved == root_real or resolved.startswith(root_real + os.sep):\n            return \"\"\n    return (\n        f\"workdir {workdir!r} is outside the shared workspace roots \"\n        f\"({':'.join(_ALLOWED_WORKDIR_ROOTS)}); refusing to execute\"\n    )"
+        }
+      ]
+    },
+    {
+      "name": "per-execution resource limits with head+tail output capping",
+      "what_it_is": "Every sandboxed execution carries ResourceLimits: a wall-clock timeout (default 30 s, model-selectable up to 300 s), and in the runner additionally RLIMIT_AS 512 MB, RLIMIT_CPU 30 s and RLIMIT_NOFILE 4096 applied in the forked child. On timeout the process is killed and the result reports exit_code 124 and timed_out; the runner also returns the output captured up to the kill. stdout/stderr are capped at 10,000 characters by keeping the head and the tail and eliding the middle.",
+      "function_in_system": "Wraps each exec/code_execution call and shapes its tool result. Bounds hanging or runaway programs (infinite loops, memory blow-ups, fd leaks) and keeps large outputs from flooding the context, while the start of the output and the final error lines stay visible to the model. Otherwise one bad program blocks the turn indefinitely or dumps megabytes of output into the next LLM call.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/sandbox/spec.py",
+          "lines": "31-38",
+          "snippet": "@dataclass(frozen=True)\nclass ResourceLimits:\n    \"\"\"Per-execution resource ceilings. Enforcement is best-effort per backend.\"\"\"\n\n    timeout_s: int = 30\n    memory_mb: int = 512\n    max_output_chars: int = 10_000\n    cpu_seconds: int = 30"
+        },
+        {
+          "file": "deeptutor/services/sandbox/spec.py",
+          "lines": "75-76, 87-94",
+          "snippet": "def render(self, max_chars: int) -> str:\n    \"\"\"Combine streams into a single model-facing string (head+tail capped).\"\"\"\n...\n    text = \"\\n\".join(parts) if parts else \"(no output)\"\n    if len(text) > max_chars:\n        half = max_chars // 2\n        text = (\n            text[:half]\n            + f\"\\n\\n... ({len(text) - max_chars:,} chars truncated) ...\\n\\n\"\n            + text[-half:]\n        )"
+        },
+        {
+          "file": "deeptutor/services/sandbox/backends.py",
+          "lines": "191-198",
+          "snippet": "async def _communicate(process: asyncio.subprocess.Process, timeout_s: int) -> ExecResult:\n    try:\n        stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=timeout_s)\n    except asyncio.TimeoutError:\n        process.kill()\n        with suppress(asyncio.TimeoutError):\n            await asyncio.wait_for(process.wait(), timeout=5.0)\n        return ExecResult(timed_out=True, exit_code=124)"
+        },
+        {
+          "file": "deeptutor/services/sandbox/runner/server.py",
+          "lines": "87-97",
+          "snippet": "def _truncate_head_tail(text: str, max_chars: int) -> str:\n    \"\"\"Cap *text* to *max_chars*, keeping the head and tail (eliding the middle).\n\n    Matches the head+tail style used by ``ExecResult.render`` so the most\n    useful context (start of output and final error lines) survives.\n    \"\"\"\n    if max_chars <= 0 or len(text) <= max_chars:\n        return text\n    half = max_chars // 2\n    dropped = len(text) - max_chars\n    return text[:half] + f\"\\n\\n... ({dropped:,} chars truncated) ...\\n\\n\" + text[-half:]"
+        },
+        {
+          "file": "deeptutor/services/sandbox/runner/server.py",
+          "lines": "120-125, 128-131, 134-136",
+          "snippet": "def _apply() -> None:\n    # Address space (bytes). Cap virtual memory as a secondary guard.\n    if memory_mb > 0:\n        mem_bytes = memory_mb * 1024 * 1024\n        try:\n            resource.setrlimit(resource.RLIMIT_AS, (mem_bytes, mem_bytes))\n...\n    # CPU time (seconds). SIGXCPU/SIGKILL the child if it burns this much CPU.\n    if cpu_seconds > 0:\n        try:\n            resource.setrlimit(resource.RLIMIT_CPU, (cpu_seconds, cpu_seconds))\n...\n    # Open file descriptors.\n    try:\n        resource.setrlimit(resource.RLIMIT_NOFILE, (_RLIMIT_NOFILE, _RLIMIT_NOFILE))"
+        },
+        {
+          "file": "deeptutor/services/sandbox/runner/server.py",
+          "lines": "212-235",
+          "snippet": "preexec_fn = _build_preexec_fn(memory_mb, cpu_seconds)\n\ntry:\n    completed = subprocess.run(  # noqa: S602 - shell=True is the contract\n        command,\n        shell=True,  # nosec B602 — the runner exists to execute shell commands in-sandbox\n        cwd=workdir,\n        env=env,\n        timeout=timeout_s,\n        capture_output=True,\n        text=True,\n        preexec_fn=preexec_fn,  # POSIX-only; None elsewhere\n    )\nexcept subprocess.TimeoutExpired as exc:\n    # Surface whatever was captured before the kill, head+tail capped.\n    stdout = _decode(exc.stdout)\n    stderr = _decode(exc.stderr)\n    return {\n        \"stdout\": _truncate_head_tail(stdout, max_output_chars),\n        \"stderr\": _truncate_head_tail(stderr, max_output_chars),\n        \"exit_code\": 124,  # conventional \"timed out\" exit status\n        \"timed_out\": True,\n        \"error\": \"\",\n    }"
+        },
+        {
+          "file": "deeptutor/tools/exec_tool.py",
+          "lines": "105-110",
+          "snippet": "try:\n    timeout = int(kwargs.get(\"timeout\") or _DEFAULT_TIMEOUT)\nexcept (TypeError, ValueError):\n    timeout = _DEFAULT_TIMEOUT\ntimeout = max(1, min(timeout, _MAX_TIMEOUT))\nlimits = ResourceLimits(timeout_s=timeout)"
+        }
+      ]
+    },
+    {
+      "name": "per-user execution quota (concurrency + rate)",
+      "what_it_is": "An in-process quota keyed by user id: a semaphore allows at most 2 concurrent executions and a sliding 60-second window allows at most 20 execution starts per minute (both overridable via DEEPTUTOR_SANDBOX_MAX_CONCURRENT / DEEPTUTOR_SANDBOX_MAX_PER_MINUTE). Exceeding either raises QuotaExceeded, which the service returns as an ExecResult error, so the model receives it as a failed tool result.",
+      "function_in_system": "Sits in SandboxService.run in front of every backend execution. The docstring names it a guard against 'a runaway or abusive session': a model that keeps firing exec calls in a loop is throttled, and one user cannot starve others of sandbox capacity. Otherwise a looping agent can saturate the sandbox host.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/sandbox/quota.py",
+          "lines": "1-13",
+          "snippet": "\"\"\"\nPer-user execution quotas.\n\nTwo cheap in-process guards against a runaway or abusive session:\n\n* a concurrency cap (semaphore per user) — no more than N executions in\n  flight at once;\n* a sliding 60-second rate cap — no more than M executions started per\n  minute.\n\nIn-process is sufficient for the single-container deployment; a multi-replica\ndeployment would move these to a shared store. Quotas are keyed by user id so\none user cannot starve another."
+        },
+        {
+          "file": "deeptutor/services/sandbox/quota.py",
+          "lines": "41-48, 69-75",
+          "snippet": "def _check_rate(self, user_id: str, now: float) -> None:\n    window = self._recent[user_id]\n    cutoff = now - 60.0\n    while window and window[0] < cutoff:\n        window.popleft()\n    if len(window) >= self._max_per_minute:\n        raise QuotaExceeded(f\"execution rate limit reached ({self._max_per_minute}/min)\")\n    window.append(now)\n...\n    now = time.monotonic() if now is None else now\n    sem = self._semaphore(user_id)\n    if sem.locked() and sem._value <= 0:  # type: ignore[attr-defined]\n        raise QuotaExceeded(f\"too many concurrent executions (max {self._max_concurrent})\")\n    self._check_rate(user_id, now)\n    await sem.acquire()\n    return UserExecQuota._Lease(sem)"
+        },
+        {
+          "file": "deeptutor/services/sandbox/config.py",
+          "lines": "46-47, 61-62",
+          "snippet": "max_concurrent_per_user: int = 2\nmax_runs_per_minute_per_user: int = 20\n...\n        max_concurrent_per_user=_int(MAX_CONCURRENT_ENV, 2),\n        max_runs_per_minute_per_user=_int(MAX_PER_MINUTE_ENV, 20),"
+        },
+        {
+          "file": "deeptutor/services/sandbox/service.py",
+          "lines": "90-95",
+          "snippet": "try:\n    lease = await self._quota.acquire(user_id)\nexcept QuotaExceeded as exc:\n    return ExecResult(error=str(exc))\nasync with lease:\n    return await self._backend.exec(request)"
+        }
+      ]
+    },
+    {
+      "name": "rolling conversation summary with token-budgeted history",
+      "what_it_is": "Before every turn a ContextBuilder assembles the conversation history within a budget of 35% of the effective context window, split into 40% for a stored summary and the rest for recent messages kept verbatim. When the unsummarized history exceeds the budget, an LLM call rewrites the summary of the older prefix under fixed headings (goals, key facts, decisions, progress, open items) and persists it with a watermark message id. Anti-drift: while the raw prefix fits half the context window the summary is rebuilt from the original messages; beyond that the previous summary and the older turns are folded together. The watermark advances only after a successful summarize; on failure the stale summary is kept and the oldest messages are dropped until the history fits, so the next turn retries. A branch guard discards a summary whose watermark lies outside the current edit branch, and a truncation guard trims the partial last line when the summary reaches 95% of its token cap.",
+      "function_in_system": "Runs in the turn runtime before the capability is invoked and determines the conversation_history every capability receives. Keeps long multi-turn sessions inside the model's window while preserving goals and decisions of early turns, and a failing summarizer degrades to truncation for one turn. Otherwise a long session eventually exceeds the context window or silently loses its early turns.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/session/turn_runtime.py",
+          "lines": "1349, 1356-1362",
+          "snippet": "builder = ContextBuilder(self.store)\n...\nhistory_result = await builder.build(\n    session_id=session_id,\n    llm_config=llm_config,\n    language=payload.get(\"language\", \"en\"),\n    on_event=_emit_context_event,\n    leaf_message_id=branch_parent_id,\n)"
+        },
+        {
+          "file": "deeptutor/services/session/context_builder.py",
+          "lines": "107-132",
+          "snippet": "def __init__(\n    self,\n    store: SessionStoreProtocol,\n    history_budget_ratio: float = 0.35,\n    summary_target_ratio: float = 0.40,\n) -> None:\n    self.store = store\n    self.history_budget_ratio = history_budget_ratio\n    self.summary_target_ratio = summary_target_ratio\n\ndef _effective_context_window(self, llm_config: LLMConfig) -> int:\n    return resolve_effective_context_window(\n        context_window=getattr(llm_config, \"context_window\", None),\n        model=str(getattr(llm_config, \"model\", \"\") or \"\"),\n        max_tokens=getattr(llm_config, \"max_tokens\", None),\n    )\n\ndef _history_budget(self, llm_config: LLMConfig) -> int:\n    effective_context_window = self._effective_context_window(llm_config)\n    return max(256, int(effective_context_window * self.history_budget_ratio))\n\ndef _summary_budget(self, budget: int) -> int:\n    return max(96, int(budget * self.summary_target_ratio))\n\ndef _recent_budget(self, budget: int) -> int:\n    return max(128, budget - self._summary_budget(budget))"
+        },
+        {
+          "file": "deeptutor/services/session/context_builder.py",
+          "lines": "134-137",
+          "snippet": "def _rebuild_source_budget(self, llm_config: LLMConfig) -> int:\n    # Raw-rebuild input may use up to half the effective context window;\n    # beyond that we degrade to fold-in (existing summary + new turns).\n    return max(1024, self._effective_context_window(llm_config) // 2)"
+        },
+        {
+          "file": "deeptutor/services/session/context_builder.py",
+          "lines": "283-285, 297-300",
+          "snippet": "# The instruction targets ~80% of the hard cap so the model's own\n# length control — not the max_tokens cut — is the binding limit.\ntarget_tokens = max(96, int(summary_budget * 0.8))\n...\n    \"Carry forward still-relevant entries from the existing summary unchanged \"\n    \"unless new information contradicts them; drop only what is obsolete. \"\n    \"Prefer concrete details (numbers, identifiers, exact terms) over \"\n    \"abstract restatement. Never invent information.\""
+        },
+        {
+          "file": "deeptutor/services/session/context_builder.py",
+          "lines": "373-381",
+          "snippet": "# Branch guard: the watermark must sit on this turn's ancestor chain.\n# After an edit-branch switch it may point into a sibling branch — the\n# stored summary would then carry content this branch never saw.\n# Discard both and rebuild from this branch's own messages.\nif summary_up_to_msg_id > 0 and not any(\n    int(item.get(\"id\", 0) or 0) == summary_up_to_msg_id for item in messages\n):\n    stored_summary = \"\"\n    summary_up_to_msg_id = 0"
+        },
+        {
+          "file": "deeptutor/services/session/context_builder.py",
+          "lines": "406-421",
+          "snippet": "# Anti-drift: while the raw prefix still fits the rebuild budget,\n# re-summarize from the original messages instead of folding the\n# previous summary into itself — summary-of-summary loses detail\n# monotonically. Only beyond that budget degrade to fold-in.\nrebuild_from_raw = bool(prefix_transcript) and count_tokens(\n    prefix_transcript\n) <= self._rebuild_source_budget(llm_config)\nmerge_parts: list[str] = []\nif rebuild_from_raw:\n    merge_parts.append(f\"Conversation history to summarize:\\n{prefix_transcript}\")\nelse:\n    if stored_summary:\n        merge_parts.append(f\"Existing summary:\\n{stored_summary}\")\n    older_transcript = format_messages_as_transcript(older_unsummarized)\n    if older_transcript:\n        merge_parts.append(f\"Older turns to fold in:\\n{older_transcript}\")"
+        },
+        {
+          "file": "deeptutor/services/session/context_builder.py",
+          "lines": "425-457",
+          "snippet": "summarize_ok = True\ntry:\n    new_summary, events = await self._summarize(\n        session_id=session_id,\n        language=language,\n        source_text=\"\\n\\n\".join(part for part in merge_parts if part.strip()),\n        summary_budget=summary_budget,\n        on_event=on_event,\n    )\nexcept Exception:\n    summarize_ok = False\n    new_summary = \"\"\n    events = []\n\nif summarize_ok and new_summary:\n    # Advance the watermark only on a successful summarize — never\n    # past turns that were not actually folded in.\n    up_to_msg_id = summary_up_to_msg_id\n    if prefix_messages:\n        up_to_msg_id = max(summary_up_to_msg_id, int(prefix_messages[-1].get(\"id\", 0) or 0))\n    await self.store.update_summary(session_id, new_summary, up_to_msg_id)\n    stored_summary = new_summary\n    final_history = self._build_history(stored_summary, recent_messages)\nelse:\n    # Degrade for this turn only: keep the stale summary and as many\n    # unsummarized turns as fit; nothing is marked as summarized, so\n    # the next turn retries with the full material.\n    final_history = self._build_history(stored_summary, unsummarized)\nwhile len(final_history) > 1 and count_tokens(build_history_text(final_history)) > budget:\n    summary_prefix = 1 if final_history and final_history[0].get(\"role\") == \"system\" else 0\n    if len(final_history) <= summary_prefix + 1:\n        break\n    final_history.pop(summary_prefix)"
+        },
+        {
+          "file": "deeptutor/services/session/context_builder.py",
+          "lines": "18-20, 333-334",
+          "snippet": "#: When the summarizer's output lands within this fraction of its hard token\n#: cap, assume the provider cut it mid-sentence and trim the partial tail.\nTRUNCATION_GUARD_RATIO = 0.95\n...\n            if count_tokens(summary) >= int(summary_budget * TRUNCATION_GUARD_RATIO):\n                summary = trim_incomplete_tail(summary)"
+        }
+      ]
+    },
+    {
+      "name": "non-stalling headless permission defaults for consulted CLI agents",
+      "what_it_is": "The local CLI agents that DeepTutor consults as subagents are launched with defaults that never wait for an approval prompt: Claude Code with --permission-mode bypassPermissions, Codex with sandbox_mode=\"workspace-write\", approval_policy=\"never\" and network access off, and stdin bound to DEVNULL. The values are per-backend settings in subagent.json that a user can tighten; extra_args is an escape hatch.",
+      "function_in_system": "Sits at process launch of every subagent consult. The config docstring states the reason: a headless agent that blocks on approval would hang the turn forever, since DeepTutor waits for the subagent unconditionally. Codex stays confined to its working directory. Otherwise a single approval prompt of the child agent freezes the whole chat turn.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "deeptutor/services/subagent/config.py",
+          "lines": "11-15",
+          "snippet": "* per-backend ``permission_mode`` / ``sandbox`` / ``approval`` — how the local\n  agent runs non-interactively. The defaults are chosen to never stall waiting\n  for an approval prompt (a headless agent that blocks on approval would hang\n  the turn forever, since we wait unconditionally). A cautious user can dial\n  these back; ``extra_args`` is an escape hatch for anything not modelled here."
+        },
+        {
+          "file": "deeptutor/services/subagent/config.py",
+          "lines": "49-59",
+          "snippet": "# Claude Code: --permission-mode value. \"bypassPermissions\" never stalls and\n# lets the agent act autonomously on the user's own machine (the explicit\n# trust model of \"connect my local CLI\"). Codex ignores this field.\npermission_mode: str = \"bypassPermissions\"\n# Codex: --sandbox / approval_policy. \"workspace-write\" + \"never\" runs\n# autonomously within the working dir without blocking on approvals.\nsandbox: str = \"workspace-write\"\napproval: str = \"never\"\n# Codex: allow model-run shell commands network access (workspace-write is\n# offline by default). The built-in web_search tool is unaffected.\nnetwork_access: bool = False"
+        },
+        {
+          "file": "deeptutor/services/subagent/claude_code.py",
+          "lines": "111-112",
+          "snippet": "if config.permission_mode:\n    cmd += [\"--permission-mode\", config.permission_mode]"
+        },
+        {
+          "file": "deeptutor/services/subagent/codex.py",
+          "lines": "91-102",
+          "snippet": "sandbox = (config.sandbox or \"workspace-write\").strip()\nbypass = sandbox in _BYPASS_SANDBOX\nif bypass:\n    cmd.append(\"--dangerously-bypass-approvals-and-sandbox\")\nelif sandbox:\n    # ``-c`` works on both ``exec`` and ``exec resume`` (resume has no\n    # ``-s`` flag). Approval policy + network access are config keys too.\n    cmd += [\"-c\", f'sandbox_mode=\"{sandbox}\"']\n    if config.approval:\n        cmd += [\"-c\", f'approval_policy=\"{config.approval}\"']\n    if config.network_access:\n        cmd += [\"-c\", \"sandbox_workspace_write.network_access=true\"]"
+        },
+        {
+          "file": "deeptutor/services/subagent/process.py",
+          "lines": "9-13",
+          "snippet": "There is deliberately **no timeout** on the wait: per the product contract,\nDeepTutor waits unconditionally for the subagent's own logic to finish; only the\nsubagent exiting (cleanly or with an error) ends the stream. Cancellation (the\nuser aborting the turn) propagates as ``CancelledError`` and the ``finally``\nblock terminates the child so no orphaned agent process is left behind."
+        },
+        {
+          "file": "deeptutor/services/subagent/process.py",
+          "lines": "46-53",
+          "snippet": "process = await asyncio.create_subprocess_exec(\n    *cmd,\n    cwd=cwd or None,\n    env=full_env,\n    stdin=asyncio.subprocess.DEVNULL,\n    stdout=asyncio.subprocess.PIPE,\n    stderr=asyncio.subprocess.PIPE,\n)"
+        }
+      ]
+    },
+    {
+      "name": "subagent child-process teardown on cancel or early exit",
+      "what_it_is": "Every subagent CLI run is spawned through stream_process_lines, whose finally block cancels the stdout/stderr reader tasks and tears the child down: terminate, wait up to 5 s, then kill. It runs on normal completion, when the consumer stops reading early and when the turn is cancelled (CancelledError).",
+      "function_in_system": "Wraps the lifetime of each consulted subagent process. Because the consult waits for the subagent unconditionally, user cancellation is the only way to stop a long subagent run, and this teardown makes that stop effective. Otherwise an aborted turn leaves an orphaned agent process running and acting in the workspace.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/subagent/process.py",
+          "lines": "1-13",
+          "snippet": "\"\"\"Stream a child process's stdout/stderr line-by-line as it runs.\n\nThe single low-level primitive the subagent backends share: spawn a command and\nyield every stdout and stderr line the moment it arrives — so a long, multi-step\nagent run surfaces live in the sidebar instead of all at once at the end — then\nguarantee the process is torn down when the consumer stops early or the turn is\ncancelled.\n\nThere is deliberately **no timeout** on the wait: per the product contract,\nDeepTutor waits unconditionally for the subagent's own logic to finish; only the\nsubagent exiting (cleanly or with an error) ends the stream. Cancellation (the\nuser aborting the turn) propagates as ``CancelledError`` and the ``finally``\nblock terminates the child so no orphaned agent process is left behind."
+        },
+        {
+          "file": "deeptutor/services/subagent/process.py",
+          "lines": "86-91",
+          "snippet": "finally:\n    for task in readers:\n        task.cancel()\n    with contextlib.suppress(Exception):\n        await asyncio.gather(*readers, return_exceptions=True)\n    await _terminate(process)"
+        },
+        {
+          "file": "deeptutor/services/subagent/process.py",
+          "lines": "94-110",
+          "snippet": "async def _terminate(process: asyncio.subprocess.Process) -> None:\n    \"\"\"Best-effort teardown: terminate, wait briefly, then kill.\"\"\"\n    if process.returncode is not None:\n        return\n    with contextlib.suppress(ProcessLookupError):\n        process.terminate()\n    try:\n        await asyncio.wait_for(process.wait(), timeout=_TERMINATE_GRACE_SECONDS)\n        return\n    except (TimeoutError, asyncio.TimeoutError):\n        pass\n    except ProcessLookupError:  # pragma: no cover\n        return\n    with contextlib.suppress(ProcessLookupError):\n        process.kill()\n    with contextlib.suppress(Exception):\n        await process.wait()"
+        }
+      ]
+    },
+    {
+      "name": "MCP tool call timeout with single transient retry",
+      "what_it_is": "Each call to an MCP server tool is bounded by a per-server tool_timeout (default 30 s, configurable 1 to 600 s). BrokenPipeError and ConnectionResetError trigger exactly one retry of the same call. Timeouts, a disconnected server, leaked cancellations and all other errors are returned as a text tool result. Server connections are established per server with a 15 s connect timeout; a failing server only gets status error. The streamable-HTTP transport uses an explicit 60 s client timeout so httpx's 5 s default cannot preempt the tool timeout.",
+      "function_in_system": "Sits in the MCP tool adapter between the dispatcher and external MCP servers. Absorbs dropped transport connections and bounds hanging servers, and the outcome reaches the model as an observation. Otherwise a stuck or flaky MCP server blocks the turn or aborts it with an exception.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/mcp/manager.py",
+          "lines": "49-56",
+          "snippet": "_CONNECT_TIMEOUT_S = 15\n_NAME_SANITIZE_RE = re.compile(r\"[^a-zA-Z0-9_-]\")\n\n# Transient transport errors worth exactly one retry (mirrors nanobot).\n_TRANSIENT_ERRORS = (\n    BrokenPipeError,\n    ConnectionResetError,\n)"
+        },
+        {
+          "file": "deeptutor/services/mcp/manager.py",
+          "lines": "202-219",
+          "snippet": "\"\"\"Invoke a tool on a connected server; one retry on transient errors.\"\"\"\nconn = self._connections.get(server_name)\nif conn is None or conn.session is None or conn.status != \"connected\":\n    return f\"(MCP server {server_name!r} is not connected)\"\ntry:\n    return await self._call_once(conn, tool_name, arguments, timeout)\nexcept _TRANSIENT_ERRORS:\n    logger.warning(\n        \"MCP tool %s/%s hit a transient transport error; retrying once\",\n        server_name,\n        tool_name,\n    )\n    try:\n        return await self._call_once(conn, tool_name, arguments, timeout)\n    except Exception as exc:\n        return f\"(MCP tool call failed after retry: {type(exc).__name__})\"\nexcept asyncio.TimeoutError:\n    return f\"(MCP tool call timed out after {timeout}s)\""
+        },
+        {
+          "file": "deeptutor/services/mcp/manager.py",
+          "lines": "240-243",
+          "snippet": "result = await asyncio.wait_for(\n    conn.session.call_tool(tool_name, arguments=arguments),\n    timeout=timeout,\n)"
+        },
+        {
+          "file": "deeptutor/services/mcp/manager.py",
+          "lines": "280-290",
+          "snippet": "try:\n    await asyncio.wait_for(ready, timeout=_CONNECT_TIMEOUT_S)\n    conn.status = \"connected\"\n    conn.error = \"\"\n    self._register_adapters(conn)\n    logger.info(\"MCP server %r connected (%d tools)\", name, len(conn.adapters))\nexcept asyncio.TimeoutError:\n    conn.status = \"error\"\n    conn.error = f\"connect timed out after {_CONNECT_TIMEOUT_S}s\"\n    conn.shutdown.set()\n    logger.error(\"MCP server %r: %s\", name, conn.error)"
+        },
+        {
+          "file": "deeptutor/services/mcp/manager.py",
+          "lines": "376-383",
+          "snippet": "# Explicit client so the transport doesn't inherit httpx's 5s\n# default timeout and preempt the per-tool timeout.\nhttp_client = await stack.enter_async_context(\n    httpx.AsyncClient(\n        headers=cfg.headers or None,\n        follow_redirects=True,\n        timeout=httpx.Timeout(60.0, connect=10.0),\n    )"
+        },
+        {
+          "file": "deeptutor/services/mcp/config.py",
+          "lines": "45",
+          "snippet": "tool_timeout: int = Field(default=30, ge=1, le=600)"
+        }
+      ]
+    },
+    {
+      "name": "backup-model retry for partner turns",
+      "what_it_is": "A partner (an IM-channel bot such as Telegram or Slack running the chat orchestrator) can be configured with a backup_llm_selection. When a turn on the primary model ends with an empty answer and at least one error, the whole turn is re-run once with the backup model selection. Setup failures such as a missing active model are deliberately folded into the error list so they also trigger the fallback. If the backup run fails too, the user receives an error message.",
+      "function_in_system": "Wraps each complete partner turn in the partner runtime. Absorbs outages, errors or misconfiguration of the primary model by switching to a second model for the same message. Otherwise a failing primary model leaves every incoming channel message unanswered.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/services/partners/runtime.py",
+          "lines": "190-210",
+          "snippet": "primary = getattr(self.config, \"llm_selection\", None) or None\nbackup = getattr(self.config, \"backup_llm_selection\", None) or None\n\nfinal_text, errors, events = await self._execute_turn(\n    msg, selection=primary, on_event=on_event, delivery_meta=delivery_meta\n)\nif not final_text and errors and backup and backup != primary:\n    logger.warning(\n        \"Partner %s turn failed on primary model (%s); retrying with backup\",\n        self.partner_id,\n        errors[-1][:200],\n    )\n    if delivery_meta is not None:\n        delivery_meta.pop(\"_streamed\", None)\n    final_text, errors, events = await self._execute_turn(\n        msg, selection=backup, on_event=on_event, delivery_meta=delivery_meta\n    )\n\nif not final_text and errors:\n    final_text = f\"Sorry, the turn failed: {errors[-1]}\"\nreturn final_text, events"
+        },
+        {
+          "file": "deeptutor/services/partners/runtime.py",
+          "lines": "226-228, 259-261",
+          "snippet": "A failed turn is ``(\"\", [error, …], events)`` — the caller decides\nwhether a backup model gets a second attempt. Exceptions are folded into\nthe error list so the retry policy sees them too.\n...\n# message and skipping the backup-model retry. Folding it here keeps the\n# actual reason (\"No active LLM model is configured…\") and lets\n# _run_turn fall back to the backup selection."
+        },
+        {
+          "file": "deeptutor/services/partners/manager.py",
+          "lines": "114-116",
+          "snippet": "# Fallback model: when a turn fails outright on the primary selection\n# (LLM error, no output), the runner re-runs the turn once with this.\nbackup_llm_selection: dict[str, str] | None = None"
+        }
+      ]
+    },
+    {
+      "name": "reasoning-effort downgrade retry for structured JSON calls (book)",
+      "what_it_is": "Structured book blocks (timeline, code, section, flash cards, deep dive) obtain their content through llm_json. The first call uses the configured reasoning mode with at least 2,600 output tokens; the response is parsed tolerantly (thinking preamble stripped, json-repair on the raw text as second pass). If the parsed object is empty or lacks the expected top-level key, the call is repeated once with reasoning_effort=\"low\" and the retry is recorded in _metadata.",
+      "function_in_system": "Sits inside every structured block generator of the book engine. Addresses reasoning models that spend the whole response budget on hidden reasoning tokens and return an empty JSON object, as the docstring states. Otherwise such blocks end up empty or fail generation.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "deeptutor/book/blocks/_llm_writer.py",
+          "lines": "143-150",
+          "snippet": "\"\"\"Run a structured JSON LLM call with robust parsing and one safe retry.\n\nReasoning models can spend the whole response budget on hidden/scratchpad\ntokens and leave the visible JSON object empty. For structured book blocks\nwe first honor the configured reasoning mode, then retry once with low\nreasoning effort if parsing fails or the expected top-level key is missing.\n(\"low\" rather than \"minimal\": local/Qwen models served via vLLM reject\n\"minimal\", and \"minimal\" disables thinking entirely.)"
+        },
+        {
+          "file": "deeptutor/book/blocks/_llm_writer.py",
+          "lines": "178-186",
+          "snippet": "data = await _once(None)\nif _json_has_expected(data, expected_key):\n    return data\n\nretry_data = await _once(\"low\")\nif _json_has_expected(retry_data, expected_key):\n    retry_data.setdefault(\"_metadata\", {})[\"reasoning_retry\"] = \"low\"\n    return retry_data\nreturn data or retry_data"
+        },
+        {
+          "file": "deeptutor/book/blocks/_llm_writer.py",
+          "lines": "160-161, 169-176",
+          "snippet": "    # Floor of 2600: room for thinking + JSON, but let callers raise it.\n    max_tokens=max(max_tokens, 2600),\n...\ncleaned = _strip_thinking_preamble(raw)\nparsed = parse_json_response(cleaned, fallback={})\nif parsed:\n    return _normalize_json_payload(parsed, expected_key=expected_key)\n# Second pass: if stripping failed, feed the raw response to\n# parse_json_response — json-repair may extract JSON from mixed text.\nrecovered = parse_json_response(raw, fallback={})\nreturn _normalize_json_payload(recovered, expected_key=expected_key)"
+        }
+      ]
+    }
+  ]
+}

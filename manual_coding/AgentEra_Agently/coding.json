@@ -1,0 +1,853 @@
+{
+  "repo": "AgentEra/Agently",
+  "commit": "1db342ad6a",
+  "system_type": "framework",
+  "system_type_reason": "Python framework for building LLM application backends (request contract, Action Runtime, TriggerFlow); no end-user agent of its own.",
+  "repo_overview": {
+    "summary": "Agently (v4.1.3.7) is a Python framework for building LLM application backends. It gives a unified request contract across model providers, with schema-as-prompt structured output and response parsing. On top of that sit an Action Runtime that executes tools, MCP and sandboxed code and feeds the results back to the model, an AgentTaskLoop / Skills Executor for multi-step goal-driven execution, and TriggerFlow, a signal-driven workflow engine with pause/resume and persistence. Agentic behaviour comes from the framework's built-in loops (action loop, task loop, ReAct skills strategy), which applications wire together.",
+    "components": [
+      {
+        "path": "agently/core/Agent.py, agently/base.py, agently/_default_settings.yaml",
+        "purpose": "Agent facade (prompt slots, .output(), .use_actions(), .start()), global Agently entry point, default settings (runtime raise_error, bash timeout 20s, bash aliases)"
+      },
+      {
+        "path": "agently/core/model/",
+        "purpose": "request lifecycle: ModelRequest builds the prompt and calls the requester, ModelResponse/DataFlow/Result parse and stream, AttemptRunner handles retry attempts"
+      },
+      {
+        "path": "agently/core/application/",
+        "purpose": "high-level execution: AgentTask/Task.py (goal/success-criteria task loop, effort()), DynamicTask (model-generated DAG), AgentExecution (prompt draft, context, stream, result), SkillsExecutor facade"
+      },
+      {
+        "path": "agently/core/operation/",
+        "purpose": "Action Runtime core: Action, ActionDispatcher, ActionFlowController, normalization/registry/artifacts, ExecutionEnvironment lifecycle, PolicyApproval"
+      },
+      {
+        "path": "agently/core/orchestration/",
+        "purpose": "TriggerFlow (signal-driven workflow engine: execution, persistence save/load, interrupts pause/resume, recovery diagnostics, sub-flows, processes) and TaskDAG (validation, resolver, runtime executor)"
+      },
+      {
+        "path": "agently/core/session/",
+        "purpose": "Session (chat history, max_length), Workspace (local backend stores, profiles), Recall"
+      },
+      {
+        "path": "agently/core/runtime/",
+        "purpose": "EventCenter, runtime events and context used for observation"
+      },
+      {
+        "path": "agently/core/extension/",
+        "purpose": "plugin manager and extension handlers"
+      },
+      {
+        "path": "agently/builtins/plugins/",
+        "purpose": "swappable plugin implementations: ModelRequester (OpenAI-, Anthropic-, Responses-compatible), ResponseParser (json/xml/yaml/markdown/hybrid), PromptGenerator, ActionRuntime, ActionFlow (TriggerFlow and DAG variants), ActionExecutor (bash/python/node/docker/sqlite/MCP/browse), ExecutionEnvironmentProvider, SkillsExecutor (planner, registry, executor, react/staged and effort strategies), AgentOrchestrator (routing, limits, state, diagnostics), TaskDAGPlanner, ToolManager"
+      },
+      {
+        "path": "agently/builtins/agent_extensions/",
+        "purpose": "Agent mixins: ActionExtension (action loop), ConfigurePrompt, ChatSession/Session, KeyWaiter (early key yield), Workspace, AutoFunc, StreamingPrint"
+      },
+      {
+        "path": "agently/builtins/blocks/",
+        "purpose": "reusable reasoning blocks: Intent, Read, Reason, Act, Observe, Finalize"
+      },
+      {
+        "path": "agently/builtins/actions/, agently/builtins/tools/",
+        "purpose": "built-in Browse, Search, Cmd actions and tools"
+      },
+      {
+        "path": "agently/builtins/hookers/",
+        "purpose": "event sinks: console, storage, channel"
+      },
+      {
+        "path": "agently/utils/",
+        "purpose": "shared helpers: StreamingJSONParser/Completer, DataGuardian, PythonSandbox, MCP client, ModelPool, Settings, Storage"
+      },
+      {
+        "path": "agently/types/, agently/integrations/",
+        "purpose": "typed data and plugin protocols, settings schemas; FastAPI and ChromaDB adapters"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "agently/builtins/plugins/ActionRuntime/AgentlyActionRuntime.py",
+        "lines": "276-283",
+        "snippet": ").instruct(\n    [\n        \"Plan next actions to respond to {input.user_input} with {input.available_actions}.\",\n        \"Decide this round action first via 'next_action': 'execute' or 'response'.\",\n        \"If next_action is 'response', return empty 'execution_commands'.\",\n        \"If next_action is 'execute', return one or more 'execution_commands' for parallel execution.\",\n        \"Each command must include 'todo_suggestion' for next round decision making.\",\n        \"Use {info.done_plans}, {info.last_round_result}, {info.round_index}, and {info.max_rounds} for decision.\","
+      },
+      {
+        "file": "agently/builtins/plugins/ActionFlow/TriggerFlowActionFlow.py",
+        "lines": "243-246",
+        "snippet": "if action._should_continue(decision, round_index=round_index, max_rounds=max_rounds):\n    await data.async_emit(\"EXECUTE\", decision.get(\"action_calls\", []))\nelse:\n    await data.async_emit(\"DONE\", [*done_plans, *diagnostic_records])"
+      },
+      {
+        "file": "agently/builtins/plugins/ActionFlow/TriggerFlowActionFlow.py",
+        "lines": "492-494",
+        "snippet": "data.set_state(\"last_round_records\", records)\ndata.set_state(\"round_index\", round_index + 1)\nawait data.async_emit(\"PLAN\", None)"
+      },
+      {
+        "file": "agently/core/operation/Action/ActionNormalization.py",
+        "lines": "357-364",
+        "snippet": "if isinstance(max_rounds, int) and max_rounds >= 0 and round_index >= max_rounds:\n    return False\nif decision.get(\"next_action\") != \"execute\":\n    return False\nif decision.get(\"use_action\") is not True:\n    return False\ncommands = decision.get(\"action_calls\")\nreturn isinstance(commands, list) and len(commands) > 0"
+      },
+      {
+        "file": "agently/builtins/agent_extensions/ActionExtension.py",
+        "lines": "948-950",
+        "snippet": "if len(records) > 0:\n    prompt.set(\"action_results\", self.action.to_action_results(records))\n    prompt.set(\"extra_instruction\", self.action.ACTION_RESULT_QUOTE_NOTICE)"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "Each round a planning ModelRequest returns next_action ('execute' | 'response') plus execution_commands chosen from the available actions (AgentlyActionRuntime.py:276-283); TriggerFlowActionFlow emits EXECUTE with exactly these calls (TriggerFlowActionFlow.py:243-244).",
+      "consumes_feedback": "After execution the records are stored as last_round_records and the flow re-emits PLAN (TriggerFlowActionFlow.py:492-494); the next planning prompt receives done_plans and last_round_result as info (AgentlyActionRuntime.py:283).",
+      "multi_turn_until_termination": "The PLAN/EXECUTE cycle repeats until the model chooses 'response', returns no calls or max_rounds (default 5) is reached (ActionNormalization.py:357-364); the collected action_results then feed the final answer request (ActionExtension.py:948-950)."
+    }
+  },
+  "topology": {
+    "verdict": "single-agent",
+    "evidence": [
+      {
+        "file": "agently/builtins/plugins/AgentOrchestrator/AgentlyAgentOrchestrator/modules/routing.py",
+        "lines": "129-131",
+        "snippet": "async def _select_ambiguous_route(self, candidates: list[dict[str, Any]]) -> tuple[str, dict[str, Any]]:\n    request_factory = getattr(self.agent, \"create_temp_request\", None)\n    if callable(request_factory):"
+      },
+      {
+        "file": "agently/core/application/AgentTask/Task.py",
+        "lines": "669, 724",
+        "snippet": "execution = self.agent.create_execution(\n...\nrequest = self.agent.create_temp_request()"
+      },
+      {
+        "file": "agently/core/orchestration/TaskDAG/TaskDAGRuntime.py",
+        "lines": "441-452",
+        "snippet": "async def _execute_handler(handler: Any, context: TaskDAGContext):\n    from agently.core.orchestration.TriggerFlow import TriggerFlow\n\n    if isinstance(handler, TriggerFlow):\n        execution = handler.create_execution(\n            auto_close=True,\n            runtime_resources=dict(context.resources),\n            parent_run_context=context.runtime_data.chunk_run_context,\n        )\n        return await execution.async_start(dict(context.task_input))\n    if callable(handler):\n        return await FunctionShifter.asyncify(handler)(context)"
+      }
+    ],
+    "justification": "One agent instance carries all roles: route selection (routing.py:130), AgentTask planning, step execution and verification (Task.py:669, 724) and action planning (ActionExtension.py:936) are all requests or executions on the same self.agent with role-specific prompts. DynamicTask/TaskDAG handlers are TriggerFlows or callables (TaskDAGRuntime.py:441-452); the framework defines no second agent type acting autonomously. Multiple agents arise only when user code wires them into handlers, so by the criterion 'Tools != Agents' the system is single-agent.",
+    "verdict_raw": "single-agent"
+  },
+  "resilience": [
+    {
+      "name": "output-constraint verification with re-request",
+      "what_it_is": "After parsing, the response is checked against three constraint layers: required ensure_keys (explicit or auto-derived from $ensure markers in the .output() schema, with presence or not_null policy), strict output via ensure_all_keys (parsed result object must exist), and user-registered validate handlers that may return retryable/stop/raise. On failure the full request is re-issued as a fresh ModelResponse with the same prompt, up to max_retries=3; afterwards a ValueError is raised unless raise_ensure_failure=False. Each retry emits a model.retrying runtime event.",
+      "function_in_system": "Sits between the model response and the point where the application or the action loop consumes the structured data (ModelResponseResult.async_get_data). Catches incomplete or semantically invalid structured outputs by re-sampling. Otherwise missing fields or invalid values flow silently into business logic, action dispatch or downstream workflow signals.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/model/ModelResponseDataFlow.py",
+          "lines": "699-716",
+          "snippet": "if active_ensure_keys:\n    for ensure_key in active_ensure_keys:\n        empty = object()\n        if not isinstance(constraint_data, (Mapping, Sequence)) or isinstance(constraint_data, str):\n            raise ValueError(f\"Missing ensure key: { ensure_key }\")\n        located_value = DataLocator.locate_path_in_dict(\n            constraint_data,\n            ensure_key,\n            key_style,\n            default=empty,\n        )\n        if located_value is empty:\n            raise ValueError(f\"Missing ensure key: { ensure_key }\")"
+        },
+        {
+          "file": "agently/core/model/ModelResponseDataFlow.py",
+          "lines": "727-742",
+          "snippet": "if retry_count < max_retries:\n    return await self.retry_get_data(\n        type=type,\n        ensure_keys=active_ensure_keys,\n        validate_handler=validate_handler,\n        key_style=key_style,\n        max_retries=max_retries,\n        raise_ensure_failure=raise_ensure_failure,\n        retry_count=retry_count + 1,\n    )\nif raise_ensure_failure:\n    raise self.build_output_retry_failure_exception("
+        },
+        {
+          "file": "agently/core/model/ModelResponseDataFlow.py",
+          "lines": "748-754",
+          "snippet": "validation_outcome = await self.run_validate_handlers_once(\n    active_validate_handlers,\n    retry_count=retry_count,\n    max_retries=max_retries,\n)\nif validation_outcome is not None and not validation_outcome[\"ok\"]:\n    if validation_outcome.get(\"retryable\", True) and retry_count < max_retries:"
+        },
+        {
+          "file": "agently/core/model/ModelResponseDataFlow.py",
+          "lines": "598-607",
+          "snippet": "return await ModelResponse(\n    result.agent_name,\n    result.plugin_manager,\n    result.settings,\n    result.prompt,\n    result._extension_handlers,\n    run_context=result.request_run_context,\n    attempt_index=result.attempt_index + 1,\n    warn_deprecated=False,\n).result.async_get_data("
+        }
+      ]
+    },
+    {
+      "name": "automatic output-format degradation to JSON",
+      "what_it_is": "When the output format was auto-resolved to a lightweight format (flat_markdown, hybrid, xml_field, yaml_literal) and the parser yields no parsed result, the prompt is switched to output_format=json and the request is re-issued, counted against max_retries and reported as a model.retrying event with retry_reason=format_degradation.",
+      "function_in_system": "Runs at data materialization before the constraint checks. Falls back to a more robust output format when a model fails to follow the cheaper format chosen automatically. Otherwise the caller receives empty or None data from an unparseable response.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/model/ModelResponseDataFlow.py",
+          "lines": "517-528",
+          "snippet": "if not (\n    getattr(prompt_object, \"output_format_resolved_from_auto\", False)\n    and prompt_object.output_format in (\"flat_markdown\", \"hybrid\", \"xml_field\", \"yaml_literal\")\n):\n    return None\nparsed_result = result._response_parser.full_result_data.get(\"parsed_result\")\nif parsed_result is not None:\n    return None\n\noriginal_format = prompt_object.output_format\nparse_error = result._response_parser.full_result_data.get(\"extra\", {}).get(\"parse_error\")\nresult.prompt.set(\"output_format\", \"json\")"
+        },
+        {
+          "file": "agently/core/model/ModelResponseDataFlow.py",
+          "lines": "674-686",
+          "snippet": "if type in (\"parsed\", \"all\") and retry_count < max_retries:\n    degraded_data = await self.try_auto_degradation(\n        type=type,\n        data=data,\n        active_ensure_keys=active_ensure_keys,\n        validate_handler=validate_handler,\n        key_style=key_style,\n        max_retries=max_retries,\n        raise_ensure_failure=raise_ensure_failure,\n        retry_count=retry_count,\n    )\n    if degraded_data is not None:\n        return degraded_data"
+        }
+      ]
+    },
+    {
+      "name": "stream-safe transient provider-error retry",
+      "what_it_is": "A provider-agnostic AttemptRunner wraps each model request; plugin handlers classify errors into retry, yield_error or stop. The OpenAICompatible requester retries transport failures only (httpx RequestError, TimeoutError, SSEError; HTTP status errors are passed through), default 2 attempts, configurable or disabled via request_retry. A retry is blocked once output has started streaming (retry_blocked observation). Anthropic and Responses requesters use the same runner with a handler that always yields the error.",
+      "function_in_system": "Sits around the provider call inside ModelResponse, below any agent step. Absorbs network disconnects and timeouts before they surface as a failed step, while the output-started guard keeps a replay from duplicating already streamed tokens to the consumer. Otherwise a transient connection drop fails the request, or a naive replay corrupts the streamed output.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/model/AttemptRunner.py",
+          "lines": "102-128",
+          "snippet": "if decision.action == \"retry\":\n    if self.state.output_started and not decision.allow_after_output_started:\n        await self._observe(\n            AttemptObservation(\n                \"retry_blocked\",\n                ...\n        raise error\n    if self.state.max_attempts is not None and self.state.attempt_index >= self.state.max_attempts:\n        raise error\n    self.state.attempt_index += 1\n    self.state.output_started = False\n    ...\n    continue"
+        },
+        {
+          "file": "agently/builtins/plugins/ModelRequester/OpenAICompatible/modules/handlers.py",
+          "lines": "47-56, 74-81",
+          "snippet": "def _is_retryable_provider_error(error: BaseException) -> bool:\n    if isinstance(error, HTTPStatusError):\n        return False\n    if isinstance(error, (RequestError, TimeoutError, SSEError)):\n        ...\n        return not str(error).lstrip().startswith(\"Status Code:\")\n    return False\n\nasync def handle_error(error: BaseException, state: AttemptState) -> AttemptDecision:\n    if (\n        not state.output_started\n        and self._is_retryable_provider_error(error)\n        and state.attempt_index < max_attempts\n    ):\n        return AttemptDecision.retry(reason=\"provider_transient_error\")\n    return AttemptDecision.yield_error(error)"
+        },
+        {
+          "file": "agently/builtins/plugins/ModelRequester/OpenAICompatible/modules/handlers.py",
+          "lines": "33-40",
+          "snippet": "def _get_request_retry_max_attempts(self) -> int:\n    retry_config = self.plugin_settings.get(\"request_retry\", None)\n    if retry_config is False:\n        return 1\n    if isinstance(retry_config, dict):\n        raw_attempts = retry_config.get(\"max_attempts\", 2)\n    else:\n        raw_attempts = self.plugin_settings.get(\"request_retry_max_attempts\", 2)"
+        }
+      ]
+    },
+    {
+      "name": "model-call stall detection (first-token, stream-idle and materialization timeouts)",
+      "what_it_is": "Layered timeouts that turn a hanging model call into a RuntimeStageStallError with stage-specific diagnostics. Transport level (all three requesters): with the default timeout_mode=first_token the httpx read timeout (default 120s) applies only until the first SSE event, afterwards the stream may run as long as it keeps producing; connect/write/pool are bounded at 30s; an optional stream_idle_timeout bounds the gap between events. Parse level: awaiting the parsed result is bounded by response.materialization_idle_timeout and emits an ERROR event model.response_materialization_stalled. On expiry the stream generator is closed.",
+      "function_in_system": "Sits in the provider transport and at data materialization in ModelResponseResult, below every agent step. Detects providers that never start answering or stall mid-stream and converts the hang into an explicit error that the transient-error retry and key failover can handle, while long healthy streams are left running. Otherwise the calling agent step or workflow blocks indefinitely on a dead connection.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/builtins/plugins/ModelRequester/OpenAICompatible/modules/transport.py",
+          "lines": "61-65, 67-77",
+          "snippet": "def _get_timeout_mode(self) -> Literal[\"http\", \"first_token\"]:\n    timeout_mode = self.plugin_settings.get(\"timeout_mode\", \"first_token\")\n    if timeout_mode == \"http\":\n        return \"http\"\n    return \"first_token\"\n\ndef _get_timeout_configs(self) -> dict[str, Any]:\n    return DataFormatter.to_str_key_dict(\n        self.plugin_settings.get(\n            \"timeout\",\n            {\n                \"connect\": 30.0,\n                \"read\": 120.0,\n                \"write\": 30.0,\n                \"pool\": 30.0,\n            },"
+        },
+        {
+          "file": "agently/builtins/plugins/ModelRequester/OpenAICompatible/modules/transport.py",
+          "lines": "140-148",
+          "snippet": "try:\n    first_item = await asyncio.wait_for(anext(generator), timeout=timeout_seconds)\nexcept asyncio.TimeoutError as e:\n    await generator.aclose()\n    raise self._build_stream_stall_error(\n        stage=\"response_first_event\",\n        timeout_seconds=timeout_seconds,\n        message=f\"First token timeout after { timeout_seconds } seconds.\",\n    ) from e"
+        },
+        {
+          "file": "agently/builtins/plugins/ModelRequester/OpenAICompatible/modules/transport.py",
+          "lines": "171-182",
+          "snippet": "while True:\n    try:\n        item = await asyncio.wait_for(anext(generator), timeout=timeout_seconds)\n    except StopAsyncIteration:\n        return\n    except asyncio.TimeoutError as e:\n        await generator.aclose()\n        raise self._build_stream_stall_error(\n            stage=\"response_stream\",\n            timeout_seconds=timeout_seconds,\n            message=f\"Stream idle timeout after { timeout_seconds } seconds.\",\n        ) from e"
+        },
+        {
+          "file": "agently/core/model/ModelResponseDataFlow.py",
+          "lines": "198-217",
+          "snippet": "async def await_materialization(self, awaitable: Awaitable[Any], *, stage: str):\n    result = self._result\n    timeout = self.materialization_idle_timeout()\n    try:\n        if timeout is None:\n            return await awaitable\n        return await asyncio.wait_for(awaitable, timeout=timeout)\n    except asyncio.TimeoutError as error:\n        stall_error = RuntimeStageStallError(\n            f\"Response materialization idle timeout after { timeout } seconds.\",\n            ...\n        await self.emit_materialization_stall(stall_error)\n        raise stall_error from error"
+        },
+        {
+          "file": "agently/core/model/ModelResponseDataFlow.py",
+          "lines": "186-189",
+          "snippet": "def materialization_idle_timeout(self) -> float | None:\n    raw_timeout = self._result.settings.get(\"response.materialization_idle_timeout\", None)\n    if raw_timeout is None or raw_timeout == -1 or raw_timeout == \"-1\":\n        return None"
+        }
+      ]
+    },
+    {
+      "name": "API-key pool failover",
+      "what_it_is": "Model profiles can reference an api_key_pools entry with a selection strategy (fixed, random, round_robin, least_used) and a failover policy. On a provider error with a retryable status (default 401, 403, 429) or a timeout, the policy or a user handler picks try_next, retry_same, a specific key or raise; the new key is written into the request-local settings, auth headers are rebuilt and the request is re-sent. Attempts are capped at the number of keys by default, and failover is blocked once output has streamed unless allow_stream_retry_after_output is set. Implemented identically in all three model requesters.",
+      "function_in_system": "Sits inside the provider HTTP transport, below the AttemptRunner. Handles rate-limit, quota and revoked-key failures that the transient-error retry deliberately passes through. Otherwise a single exhausted or blocked key fails the request although working keys remain in the pool.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/utils/ModelPool.py",
+          "lines": "40, 424-429",
+          "snippet": "_DEFAULT_FAILOVER_STATUS_CODES = {401, 403, 429}\n...\nmax_attempts = _failover_max_attempts(failover_config, len(key_entries))\nattempts = runtime.setdefault(\"attempts\", [])\nif len(attempts) >= max_attempts:\n    return APIKeyFailoverDecision(False, \"raise\", reason=\"max_attempts_exhausted\")\n\nallow_stream_retry = bool(failover_config.get(\"allow_stream_retry_after_output\", False))"
+        },
+        {
+          "file": "agently/utils/ModelPool.py",
+          "lines": "448-469",
+          "snippet": "if handler is not None:\n    raw_choice = _call_handler(handler, context)\nelse:\n    strategy = _normalize_failover_action(failover_config.get(\"strategy\", \"raise\"))\n    raw_choice = strategy if _status_is_retryable(failover_config, status_code) else \"raise\"\n\naction, entry = _parse_failover_choice(raw_choice, runtime)\n...\nif action in {\"try_next\"}:\n    entry = _next_key_entry(runtime)\n...\nplugin_settings.set(\"api_key\", str(entry[\"value\"]))"
+        },
+        {
+          "file": "agently/builtins/plugins/ModelRequester/OpenAICompatible/modules/transport.py",
+          "lines": "303-317",
+          "snippet": "except HTTPStatusError as e:\n    failover_headers = self._build_failover_headers(\n        request_data,\n        error=e,\n        status_code=e.response.status_code,\n        response_text=e.response.text,\n        full_request_data=full_request_data,\n        stream_started=stream_started,\n    )\n    if failover_headers is not None:\n        headers_with_auth = failover_headers\n        client.headers.update(headers_with_auth)\n        continue\n    yield \"error\", e\n    break"
+        }
+      ]
+    },
+    {
+      "name": "lenient JSON extraction and repair",
+      "what_it_is": "Deterministic recovery chain in the JSON response parser: all JSON blocks are located in the free-text response and, if several exist, the one with the best match score against the .output() schema is chosen; truncated brackets, strings and comments are auto-closed (StreamingJSONCompleter); the result is parsed leniently with json5; on failure structural characters are repaired (full-width punctuation, typographic quotes) and parsing is retried, flagging repaired=true; the parsed data is optionally validated into a Pydantic result object.",
+      "function_in_system": "Runs in the ResponseParser right after the model response and before the output-constraint verification with re-request. Recovers typical model formatting faults (surrounding prose or code fences, truncation, non-ASCII punctuation) locally in the parser, saving a model call. Otherwise each of these faults yields None data or triggers a costly re-request.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/builtins/plugins/ResponseParser/modules/json_output.py",
+          "lines": "50-71",
+          "snippet": "cleaned_json = DataLocator.locate_output_json(text, output_schema)\nif cleaned_json is None:\n    return None, None, None, False\n\ncompleter = StreamingJSONCompleter()\ncompleter.reset(cleaned_json)\ncompleted = completer.complete()\ntry:\n    parsed = json5.loads(completed)\n    return completed, parsed, build_result_object(parsed), False\nexcept Exception:\n    repaired_json = DataLocator.repair_json_fragment(cleaned_json)\n    if repaired_json == cleaned_json:\n        return completed, None, None, False\n\n    completer.reset(repaired_json)\n    repaired_completed = completer.complete()\n    try:\n        parsed = json5.loads(repaired_completed)\n        return repaired_completed, parsed, build_result_object(parsed), True"
+        },
+        {
+          "file": "agently/utils/DataLocator.py",
+          "lines": "253-273",
+          "snippet": "def locate_output_json(original_text: str, output_prompt_dict: \"PromptOutputStructure\"):\n    all_json = DataLocator.locate_all_json(original_text)\n    if len(all_json) == 0:\n        return None\n    if len(all_json) == 1:\n        return all_json[0]\n    else:\n        best_json = None\n        best_score = -1\n        for json_string in all_json:\n            try:\n                parsed_json = json5.loads(json_string)\n                score = DataLocator._score_output_schema_match(parsed_json, output_prompt_dict)"
+        },
+        {
+          "file": "agently/utils/DataLocator.py",
+          "lines": "298-299",
+          "snippet": "def repair_json_fragment(original_text: str) -> str:\n    \"\"\"Repair structural quote and punctuation issues without rewriting string contents.\"\"\""
+        }
+      ]
+    },
+    {
+      "name": "schema-as-prompt output contract",
+      "what_it_is": "The .output() schema is rendered by the PromptGenerator into an OUTPUT REQUIREMENT prompt section with the data format, the field structure and, under ensure_all_keys, a strict-structure guarantee stating that all fields are required and extra fields are disallowed. Fields carrying an $ensure marker are rendered as required.",
+      "function_in_system": "Sits at prompt construction before every structured model call. Steers the model toward output that the parser and the constraint checks can accept on the first attempt, which reduces repair work and re-requests. Its effect depends on model compliance; the code-level enforcement of the same contract lives in the lenient JSON repair and the output-constraint verification.",
+      "activation": "default_on",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agently/builtins/plugins/PromptGenerator/AgentlyPromptGenerator.py",
+          "lines": "611-628",
+          "snippet": "if prompt_object.output:\n    match prompt_object.output_format:\n        case \"json\":\n            final_output = DataFormatter.sanitize(prompt_object.output)\n            prompt_text_list.extend(\n                [\n                    f\"[{ prompt_title_mapping.get('output_requirement', 'OUTPUT REQUIREMENT') }]:\",\n                    \"Data Format: JSON\",\n                    *(\n                    [\n                        \"Output Guarantee: STRICT structure\",\n                        \"All defined fields are required and extra fields are not allowed.\",\n                    ]\n                        if getattr(prompt_object, \"ensure_all_keys\", False)\n                        else []\n                    ),\n                    \"Data Structure:\",\n                    self._generate_json_output_prompt(final_output, title_mapping=prompt_title_mapping),"
+        },
+        {
+          "file": "agently/builtins/plugins/PromptGenerator/AgentlyPromptGenerator.py",
+          "lines": "1114-1116",
+          "snippet": "ensure_marker = self._is_ensure_marker(third_value)\nfield_required = strict_output or ensure_marker\nif field_required:"
+        }
+      ]
+    },
+    {
+      "name": "human approval gate for side-effecting actions",
+      "what_it_is": "Actions whose spec sets approval_required, or whose merged policy has approval_mode='always', are routed through policy_approval.async_resolve before the executor runs. The default handler input_timeout_fail asks for [y/N] on the console and denies after input_timeout_seconds (default 30); in a non-interactive environment it denies immediately (fail closed). The same gate guards provisioning of execution environments (approval_mode='never' denies outright). TriggerFlowActionFlow persists the pending approval key and decisions in flow state so an interrupted run resumes at the gated action. In TaskDAG graphs, a fail_closed approval policy requires an approval requirement on every task that declares side effects and rejects the graph otherwise, and approval tasks pause the graph through the same policy_approval gate.",
+      "function_in_system": "Sits between the planned action and executor.execute() inside ActionDispatcher. Stops the model from triggering side effects (exec, write, resource allocation) unsupervised; a denial returns an approval_required or blocked result that the next planning round sees. Otherwise a wrong or harmful plan executes immediately against the host.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/operation/Action/ActionDispatcher.py",
+          "lines": "400-407",
+          "snippet": "if spec.get(\"approval_required\") is True or policy.get(\"approval_mode\") == \"always\":\n    approved, approved_policy, approval_result = await self._resolve_action_approval(\n        spec=spec,\n        action_call=action_call,\n        policy=policy,\n    )\n    if not approved:\n        return cast(ActionResult, approval_result)"
+        },
+        {
+          "file": "agently/core/operation/PolicyApproval/PolicyApproval.py",
+          "lines": "229-245",
+          "snippet": "if not sys.stdin or not sys.stdin.isatty():\n    return {\n        \"status\": \"denied\",\n        \"approved\": False,\n        \"wait_strategy\": \"input_timeout_fail\",\n        \"reason\": f\"Policy approval input is unavailable for '{ subject }' in a non-interactive environment.\",\n    }\nprompt = f\"Approve '{ subject }'? This will fail after { timeout_seconds:g}s. [y/N] \"\ntry:\n    answer = await asyncio.wait_for(asyncio.to_thread(input, prompt), timeout=timeout_seconds)\nexcept (asyncio.TimeoutError, EOFError):\n    return {\n        \"status\": \"denied\",\n        \"approved\": False,\n        \"wait_strategy\": \"input_timeout_fail\",\n        \"reason\": f\"Policy approval timed out for '{ subject }'.\",\n    }"
+        },
+        {
+          "file": "agently/core/operation/ExecutionEnvironment/ExecutionEnvironment.py",
+          "lines": "216-227",
+          "snippet": "approval_mode = str(policy.get(\"approval_mode\", \"auto\"))\napproval_required = bool(requirement.get(\"approval_required\", False)) or approval_mode == \"always\"\nif not approval_required:\n    return policy\nawait self._emit(\n    \"execution_environment.approval_required\",\n    requirement=requirement,\n    status=\"pending_approval\",\n    message=\"Execution environment approval is required.\",\n)\nif approval_mode == \"never\":\n    raise ExecutionEnvironmentApprovalDenied(requirement, \"Execution environment approval is disabled by policy.\")"
+        },
+        {
+          "file": "agently/builtins/plugins/ActionFlow/TriggerFlowActionFlow.py",
+          "lines": "319-330",
+          "snippet": "approval_needed = spec.get(\"approval_required\") is True or policy.get(\"approval_mode\") == \"always\"\napproval_key = f\"{ round_index }:{ command_index }:{ action_id }\"\nif not approval_needed:\n    continue\nif approval_key in approval_decisions:\n    approved_override = dict(policy_override)\n    approved_override[\"policy_approval_granted\"] = True\n    approved_override[\"policy_approval_decision\"] = approval_decisions[approval_key]\n    command[\"policy_override\"] = approved_override\n    continue\ndata.set_state(\"pending_policy_approval_key\", approval_key)\ndata.set_state(\"pending_policy_approval_action\", dict(command))"
+        },
+        {
+          "file": "agently/core/orchestration/TaskDAG/TaskDAGHelpers.py",
+          "lines": "89-106",
+          "snippet": "def _validate_side_effects(graph: TaskDAG) -> None:\n    approval_policy = str(graph.policies.get(\"approval\", graph.policies.get(\"side_effect_approval\", \"allow\")))\n    if approval_policy not in {\"require\", \"required\", \"fail_closed\"}:\n        return\n    for task in graph.tasks:\n        side_effects = task.side_effect_policy\n        if not side_effects:\n            continue\n        has_external_write = bool(\n            side_effects.get(\"external_write\")\n            or side_effects.get(\"credential_usage\")\n            or side_effects.get(\"local_write\")\n            or side_effects.get(\"network\")\n        )\n        if has_external_write and not _approval_required(task):\n            raise ValueError(\n                f\"Dynamic task '{ task.id }' declares side effects but has no approval policy.\"\n            )"
+        },
+        {
+          "file": "agently/core/orchestration/TaskDAG/TaskDAGRuntime.py",
+          "lines": "244-265",
+          "snippet": "gate_result = await policy_approval.async_gate(\n    data,\n    {\n        \"source\": \"task_dag\",\n        \"capability\": _approval_type(resolved_task),\n        \"subject\": resolved_task.title or resolved_task.id,\n        \"risk\": \"task_dag_approval\",\n        \"payload\": _approval_payload(resolved_task, task_input),\n        \"policy\": dict(graph.policies),\n        \"lineage\": {\n            \"graph_id\": graph.graph_id,\n            \"task_id\": resolved_task.id,\n        },\n        \"execution_id\": str(getattr(data.execution, \"id\", \"\")),\n    },\n    interrupt_id=f\"task:{ graph.graph_id }:{ resolved_task.id }\",\n    resume_to=\"self\",\n)\nif isinstance(gate_result, TriggerFlowPauseSignal):\n    return gate_result\nif gate_result.get(\"status\") != \"approved\":\n    raise RuntimeError(str(gate_result.get(\"reason\", \"Task DAG approval was denied.\")))"
+        }
+      ]
+    },
+    {
+      "name": "allowlist-restricted sandbox executors and workspace path confinement",
+      "what_it_is": "Shell actions (Cmd) run only if the command matches an allowlisted prefix (default ls, rg, cat, pwd, whoami, date, head, tail) and the workdir resolves under allowed roots; violations return need_approval, which the dispatcher maps to an approval_required result. The subprocess has a 20 s timeout. The model-visible kwarg allow_unsafe lets the model bypass the command allowlist itself. Python actions run via exec with a whitelisted __builtins__ set (no __import__), a return-type whitelist and blocked access to underscore attributes. The dispatcher blocks any action with sandbox_required whose executor is unsandboxed. Workspace file actions resolve every path against the workspace root and reject paths outside it; reads are capped at max_file_bytes=20000, write access is disabled by default, and an isolated temp directory can serve as root.",
+      "function_in_system": "Sits inside the executor layer at the point where model-generated code or commands hit the host. Contains the blast radius of wrong or injected commands to read-mostly tools in a bounded directory. Otherwise any model output runs with full user privileges.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/builtins/actions/Cmd.py",
+          "lines": "31-35, 128-147",
+          "snippet": "self.allowed_cmd_prefixes = set(\n    allowed_cmd_prefixes\n    if allowed_cmd_prefixes is not None\n    else [\"ls\", \"rg\", \"cat\", \"pwd\", \"whoami\", \"date\", \"head\", \"tail\"]\n)\n...\nif not self._is_workdir_allowed(workdir):\n    return {\n        \"ok\": False,\n        \"need_approval\": True,\n        \"reason\": \"workdir_not_allowed\",\n        \"workdir\": str(workdir_path),\n    }\nif not self._is_cmd_allowed(args) and not allow_unsafe:\n    return {\n        \"ok\": False,\n        \"need_approval\": True,\n        \"reason\": \"cmd_not_allowed\",\n        \"cmd\": args,\n    }\nresult = subprocess.run(\n    args,\n    cwd=str(workdir_path),\n    capture_output=True,\n    text=True,\n    timeout=self.timeout,"
+        },
+        {
+          "file": "agently/utils/PythonSandbox.py",
+          "lines": "55-66",
+          "snippet": "    self.safe_globals = MappingProxyType(\n        {\n            \"__builtins__\": SAFE_BUILTINS,\n            **self.preset_objects,\n            **self.base_vars,\n        }\n    )\n\ndef _check_safe_value(self, value):\n    if isinstance(value, tuple(self.allowed_return_types)):\n        return value\n    raise ValueError(f\"Type of return '{ type(value) }' can not be used in Python Sandbox.\")"
+        },
+        {
+          "file": "agently/core/operation/Action/ActionDispatcher.py",
+          "lines": "410-413, 423",
+          "snippet": "if spec.get(\"sandbox_required\") is True and not getattr(executor, \"sandboxed\", False):\n    return {\n        \"ok\": False,\n        \"status\": \"blocked\",\n...\n\"error\": f\"Action '{ action_id }' requires a sandboxed executor.\","
+        },
+        {
+          "file": "agently/builtins/agent_extensions/ActionExtension.py",
+          "lines": "400-409, 434-443",
+          "snippet": "root: str | Path | object = _WORKSPACE_ROOT_UNSET,\nisolated: bool = False,\nread: bool = True,\nwrite: bool = False,\nsearch: bool = True,\nlist_files: bool = True,\naction_prefix: str = \"\",\nexpose_to_model: bool = True,\nmax_file_bytes: int = 20000,\nmax_search_file_bytes: int = 200000,\n...\ndef resolve_workspace_path(path: str | Path = \".\"):\n    candidate = Path(path)\n    if not candidate.is_absolute():\n        candidate = root_path / candidate\n    resolved = candidate.expanduser().resolve()\n    try:\n        resolved.relative_to(root_path)\n    except ValueError as error:\n        raise ValueError(f\"Path is outside workspace root: { path }\") from error\n    return resolved"
+        },
+        {
+          "file": "agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/registry.py",
+          "lines": "804-808",
+          "snippet": "resource_path = (skill_root / path).resolve()\nif skill_root not in resource_path.parents and resource_path != skill_root:\n    raise SkillInstallError(\n        f\"Resource path '{ path }' escapes skill root for '{ skill_id }'.\"\n    )"
+        },
+        {
+          "file": "agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/registry.py",
+          "lines": "571-577",
+          "snippet": "def _resolve_source_subpath(root: Path, subpath: str | None) -> Path:\n    if not subpath:\n        return root\n    resolved_root = root.resolve()\n    resolved = (resolved_root / subpath).resolve()\n    if resolved != resolved_root and resolved_root not in resolved.parents:\n        raise SkillInstallError(f\"Skills pack subpath '{ subpath }' escapes source root.\")"
+        }
+      ]
+    },
+    {
+      "name": "per-action execution budget (timeout and output byte cap)",
+      "what_it_is": "policy.timeout_seconds wraps executor.execute in asyncio.wait_for; on timeout the dispatcher releases action-scoped environment handles and returns an error result. policy.max_output_bytes truncates the JSON-serialized action output to the byte limit and sets meta.truncated. Both policy values have no default, so this policy budget is opt_in. Separately, the built-in workspace read_file action caps every read at max_file_bytes=20000 by default and reports truncated in its result; this tool-level cap is active whenever the workspace tools are mounted.",
+      "function_in_system": "Sits around the single action execution inside ActionDispatcher.async_execute. Converts a hanging tool into an error observation for the next planning round and caps how much tool output enters the context. Otherwise one stuck tool blocks the whole action loop and one oversized output floods the prompt.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/operation/Action/ActionDispatcher.py",
+          "lines": "498-510, 518-519, 534",
+          "snippet": "timeout = policy.get(\"timeout_seconds\", None)\ntimeout_seconds = float(timeout) if isinstance(timeout, (int, float)) else 0.0\ntry:\n    if isinstance(timeout, (int, float)) and timeout > 0:\n        output = await asyncio.wait_for(\n            executor.execute(\n                spec=spec,\n                action_call=action_call,\n                policy=policy,\n                settings=execution_settings,\n            ),\n            timeout=float(timeout),\n        )\n...\nexcept asyncio.TimeoutError:\n    for handle in ensured_handles:\n...\n\"error\": f\"Action '{ action_id }' timed out after { timeout_seconds } seconds.\","
+        },
+        {
+          "file": "agently/core/operation/Action/ActionDispatcher.py",
+          "lines": "571-582",
+          "snippet": "max_output_bytes = policy.get(\"max_output_bytes\")\nif isinstance(max_output_bytes, int) and max_output_bytes > 0:\n    serialized = json.dumps(result.get(\"data\"), ensure_ascii=False, default=str)\n    if len(serialized.encode(\"utf-8\")) > max_output_bytes:\n        truncated = serialized.encode(\"utf-8\")[:max_output_bytes].decode(\"utf-8\", errors=\"ignore\")\n        result[\"data\"] = truncated\n        result[\"result\"] = truncated\n        result_meta = result.get(\"meta\")\n        if not isinstance(result_meta, dict):\n            result_meta = {}\n        result_meta[\"truncated\"] = True\n        result[\"meta\"] = result_meta"
+        },
+        {
+          "file": "agently/builtins/agent_extensions/ActionExtension.py",
+          "lines": "509-521",
+          "snippet": "def read_file(path: str, max_bytes: int = max_file_bytes):\n    target = resolve_workspace_path(path)\n    if not target.is_file():\n        raise FileNotFoundError(f\"Workspace file not found: { path }\")\n    content_bytes = target.read_bytes()\n    truncated = len(content_bytes) > max_bytes\n    content = content_bytes[:max_bytes].decode(\"utf-8\", errors=\"replace\")\n    return {\n        \"path\": str(target.relative_to(root_path)),\n        \"content\": content,\n        \"truncated\": truncated,\n        \"bytes\": len(content_bytes),\n    }"
+        }
+      ]
+    },
+    {
+      "name": "action-result digest with artifact offloading and recall",
+      "what_it_is": "Results of instruction-heavy executors (bash, python, nodejs, docker, sqlite, browse, search) are stored in full as artifacts; the model sees a digest with compacted previews (strings cut at 4000/8000 chars, max 40 items, depth 2) and artifact refs. A read_action_artifact action is injected into the action list so the model can fetch the full value on demand. Keys matching api_key, token, password, secret, authorization etc. are replaced by [REDACTED] in stored artifacts and previews.",
+      "function_in_system": "Sits between action execution and the next planning prompt (done_plans / last_round_records are converted to model-visible records in every ActionFlow round). Keeps per-round context growth bounded while the full data stays retrievable, and keeps credentials out of the prompt. Otherwise raw tool dumps accumulate across rounds and exhaust the context window.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/operation/Action/ActionArtifactManager.py",
+          "lines": "273-274, 328-332",
+          "snippet": "if not self._is_instruction_heavy_record(record):\n    return record\n...\nrecord[\"model_digest\"] = self._build_execution_digest(\n    record,\n    artifact_refs=artifact_refs,\n    redaction_report=redaction_report,\n)"
+        },
+        {
+          "file": "agently/core/operation/Action/ActionArtifactManager.py",
+          "lines": "351-360",
+          "snippet": "@classmethod\ndef _to_model_visible_record(cls, record: ActionResult) -> ActionResult:\n    if not isinstance(record, dict):\n        return record\n    digest = record.get(\"model_digest\")\n    if not isinstance(digest, dict):\n        return record\n    visible = cast(ActionResult, dict(record))\n    visible[\"result\"] = digest\n    visible[\"data\"] = digest"
+        },
+        {
+          "file": "agently/core/operation/Action/ActionArtifactManager.py",
+          "lines": "134-143",
+          "snippet": "@classmethod\ndef _redact_value(cls, value: Any) -> Any:\n    if isinstance(value, dict):\n        redacted: dict[str, Any] = {}\n        for key, item in value.items():\n            if cls._is_sensitive_key(key):\n                redacted[str(key)] = \"[REDACTED]\"\n            else:\n                redacted[str(key)] = cls._redact_value(item)\n        return redacted"
+        },
+        {
+          "file": "agently/builtins/plugins/ActionFlow/DAGActionFlow.py",
+          "lines": "178-180",
+          "snippet": "model_visible_done_plans = action.to_model_visible_records(done_plans)\nmodel_visible_last_round_records = action.to_model_visible_records(last_round_records)\nvisible_action_list = action._with_action_artifact_recall_action("
+        }
+      ]
+    },
+    {
+      "name": "execution-environment health check before reuse",
+      "what_it_is": "Execution environments (docker, node, browser, sqlite, ...) are ref-counted and reused by reuse_key. Before reuse, provider.async_health_check runs; a failing or raising check marks the handle unhealthy, emits execution_environment.unhealthy, force-releases it and provisions a fresh environment.",
+      "function_in_system": "Sits in ExecutionEnvironmentManager.async_ensure, which the dispatcher calls before each action that needs a resource. Replaces dead containers or browser sessions transparently. Otherwise every subsequent action against a crashed environment fails.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/operation/ExecutionEnvironment/ExecutionEnvironment.py",
+          "lines": "280-302",
+          "snippet": "if existing_id and existing_id in self._handles:\n    existing_handle = self._handles[existing_id]\n    if existing_handle.get(\"status\") == \"ready\":\n        health_error = None\n        try:\n            health_status = await provider.async_health_check(existing_handle)\n        except Exception as error:\n            health_status = cast(ExecutionEnvironmentStatus, \"unhealthy\")\n            health_error = str(error)\n        if health_status == \"ready\":\n            existing_handle[\"ref_count\"] = int(existing_handle.get(\"ref_count\", 0)) + 1\n            return existing_handle\n        existing_handle[\"status\"] = \"unhealthy\"\n        await self._emit(\n            \"execution_environment.unhealthy\",\n            handle=existing_handle,\n            status=\"unhealthy\",\n            message=\"Execution environment health check failed before reuse.\",\n            error=health_error,\n        )\n        await self._async_release_handle(existing_id, force=True)\n    else:\n        await self._async_release_handle(existing_id, force=True)"
+        }
+      ]
+    },
+    {
+      "name": "action-loop round cap and wall-clock timeout",
+      "what_it_is": "action.loop.max_rounds defaults to 5; should_continue ends the loop once round_index reaches max_rounds and the agent request proceeds with the results collected so far. action.loop.timeout (default None, opt-in) wraps the whole loop in asyncio.wait_for; on expiry the flow execution is closed with pending_interrupts='cancel' and a stall error is raised.",
+      "function_in_system": "Sits at the continue decision after each planning round and around the whole ActionFlow execution. Bounds model calls, tool executions and latency when the planner keeps choosing 'execute'. Otherwise a planner stuck in a repeat pattern loops indefinitely and burns tokens.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/builtins/agent_extensions/ActionExtension.py",
+          "lines": "53-55",
+          "snippet": "self.settings.setdefault(\"action.loop.max_rounds\", 5, inherit=True)\nself.settings.setdefault(\"action.loop.concurrency\", None, inherit=True)\nself.settings.setdefault(\"action.loop.timeout\", None, inherit=True)"
+        },
+        {
+          "file": "agently/core/operation/Action/ActionNormalization.py",
+          "lines": "357-358",
+          "snippet": "if isinstance(max_rounds, int) and max_rounds >= 0 and round_index >= max_rounds:\n    return False"
+        },
+        {
+          "file": "agently/builtins/plugins/ActionFlow/TriggerFlowActionFlow.py",
+          "lines": "516-530",
+          "snippet": "try:\n    if timeout is None:\n        result = await run_action_loop()\n    else:\n        result = await asyncio.wait_for(run_action_loop(), timeout=float(timeout))\nexcept asyncio.TimeoutError as error:\n    try:\n        await execution.async_close(\n            reason=\"action_loop_timeout\",\n            timeout=0,\n            pending_interrupts=\"cancel\",\n        )\n    except BaseException:\n        pass\n    raise self._build_action_loop_close_stall(timeout, planning_protocol) from error"
+        }
+      ]
+    },
+    {
+      "name": "source-attribution notice for action-grounded answers",
+      "what_it_is": "Whenever action results are placed into the final prompt, the constant ACTION_RESULT_QUOTE_NOTICE is set as extra_instruction, telling the model it MUST quote key info or mark the source (preferably with URL) from {action_results}. A user-supplied extra_instruction takes precedence.",
+      "function_in_system": "Sits between the end of the action loop and the final answer request. Ties the answer to the tool observations and makes its provenance checkable by the user. Otherwise the model can answer beyond or against the tool results with no visible trace.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agently/core/operation/Action/Action.py",
+          "lines": "116-119",
+          "snippet": "ACTION_RESULT_QUOTE_NOTICE = (\n    \"NOTICE: MUST QUOTE KEY INFO OR MARK SOURCE (PREFER URL INCLUDED) FROM {action_results} \"\n    \"IN REPLY IF YOU USE {action_results} TO IMPROVE REPLY!\"\n)"
+        },
+        {
+          "file": "agently/builtins/agent_extensions/ActionExtension.py",
+          "lines": "948-950",
+          "snippet": "if len(records) > 0:\n    prompt.set(\"action_results\", self.action.to_action_results(records))\n    prompt.set(\"extra_instruction\", self.action.ACTION_RESULT_QUOTE_NOTICE)"
+        }
+      ]
+    },
+    {
+      "name": "verifier-gated plan/execute/verify iteration loop",
+      "what_it_is": "Each AgentTask iteration builds a context pack, asks the model to plan one bounded step, runs the step as an agent execution that must return evidence, then issues a separate verifier request against every success criterion. The verifier prompt counts numeric criteria exactly, demands source evidence and forbids completion when any required action or validation command failed. is_complete ends the task as accepted, requires_block ends it as blocked, otherwise the replan_instruction drives the next iteration; after max_iterations (default 3) the task ends with accepted=False and artifact_status 'partial'.",
+      "function_in_system": "Wraps the whole agent execution as an outer task loop with a critic step between execution and acceptance. Catches steps that claim completion on insufficient evidence and turns the gap into a concrete replan. Otherwise an incomplete or hallucinated result is returned as the final task result.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/application/AgentTask/Task.py",
+          "lines": "132-136",
+          "snippet": "for iteration_index in range(1, self.max_iterations + 1):\n    result = await self._run_iteration(iteration_index)\n    await data.async_set_state(\"agent_task.latest_iteration\", result, emit=False)\n    if result[\"terminal\"]:\n        break"
+        },
+        {
+          "file": "agently/core/application/AgentTask/Task.py",
+          "lines": "364-368, 388-390, 412-414",
+          "snippet": "if bool(verification.get(\"is_complete\")):\n    self.status = \"completed\"\n    self.result = {\n        \"status\": \"completed\",\n        \"accepted\": True,\n...\nif verification.get(\"requires_block\"):\n    self.status = \"blocked\"\n    self.result = {\n...\nif iteration_index >= self.max_iterations:\n    self.status = \"max_iterations\"\n    self.result = {"
+        },
+        {
+          "file": "agently/core/application/AgentTask/Task.py",
+          "lines": "739-751",
+          "snippet": "request.instruct(\n    \"Verify the task against every success criterion. \"\n    \"Treat numeric criteria such as 'at least N' as exact counting rules and fail verification when the \"\n    \"evidence does not meet the count. \"\n    \"Require source/evidence references when the criteria ask for evidence. \"\n    \"If execution metadata, action records, diagnostics, command output, or verifier-visible evidence shows \"\n    \"a failed required action or failed validation command, do not mark complete. \"\n    \"If a criterion requires a script, command, test, or external validation to pass, require explicit \"\n    \"successful evidence for that validation before completion. \"\n    \"When marking complete, put every required final deliverable in final_result; if final_result would omit \"\n    \"a required deliverable, keep is_complete=false and ask for a replan. \"\n    \"If evidence is incomplete, set is_complete=false and give a concrete replan_instruction. \"\n    \"Set requires_block=true only when the task cannot continue.\""
+        }
+      ]
+    },
+    {
+      "name": "per-execution model-request budget",
+      "what_it_is": "Before every model request ModelResponse calls consume_model_request on the current AgentExecution context; once max_model_requests is reached it records a limit_exceeded event and raises AgentExecutionLimitExceeded before the request is sent. AgentTask passes limits={'max_model_requests': 3} by default to each step execution; plain agent executions have no limit unless configured. Effort presets (e.g. effort='medium') can set max_model_requests, max_seconds and max_no_progress_seconds as one bundle when effort is configured.",
+      "function_in_system": "Sits at the single chokepoint for all model calls inside an execution, including the inner action loop and output re-requests. Caps the cost of one execution step. Otherwise nested retries and planning rounds multiply model calls unboundedly.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/application/AgentExecution/Context.py",
+          "lines": "165-186",
+          "snippet": "def consume_model_request(self, *, response_id: str | None = None, run_id: str | None = None):\n    limit = self.limits.get(\"max_model_requests\")\n    if limit is not None and self.model_request_count >= int(limit):\n        event = {\n            \"type\": \"limit_exceeded\",\n            \"limit_name\": \"max_model_requests\",\n            \"limit_value\": limit,\n            \"used\": self.model_request_count,\n            \"response_id\": response_id,\n            \"run_id\": run_id,\n        }\n        self.limit_events.append(event)\n        raise AgentExecutionLimitExceeded(\n            (\n                \"AgentExecution model request budget exceeded: \"\n                f\"max_model_requests={ limit }, used={ self.model_request_count }.\"\n            ),\n            limit_name=\"max_model_requests\",\n            limit_value=limit,\n            used=self.model_request_count,\n        )\n    self.model_request_count += 1"
+        },
+        {
+          "file": "agently/core/model/ModelResponse.py",
+          "lines": "570-579",
+          "snippet": "consume_model_request = getattr(\n    get_current_agent_execution_context(),\n    \"consume_model_request\",\n    None,\n)\nif callable(consume_model_request):\n    consume_model_request(\n        response_id=self.id,\n        run_id=self.model_run_context.run_id,\n    )"
+        },
+        {
+          "file": "agently/core/application/AgentTask/Task.py",
+          "lines": "86",
+          "snippet": "self.limits = dict(limits or {\"max_model_requests\": 3})"
+        },
+        {
+          "file": "agently/builtins/plugins/AgentOrchestrator/AgentlyAgentOrchestrator/modules/state.py",
+          "lines": "186-198, 205-208",
+          "snippet": "def apply_effort_strategy_limits(owner: \"AgentExecution\"):\n    strategy = owner.effective_options.get(\"effort_strategy\")\n    if not isinstance(strategy, dict):\n        return owner\n    effort_applied_limits = getattr(owner, \"_effort_applied_limits\", set())\n    applied: dict[str, tuple[str, Any]] = {\n        \"max_model_requests\": (\"effort.budget.model_call_limit\", strategy.get(\"max_model_requests\")),\n        \"max_seconds\": (\"effort.budget.wall_time_seconds\", strategy.get(\"max_seconds\")),\n        \"max_no_progress_seconds\": (\n            \"effort.budget.no_progress_seconds\",\n            strategy.get(\"max_no_progress_seconds\"),\n        ),\n    }\n...\nif owner.limits.get(limit_name) is not None and limit_name not in effort_applied_limits:\n    continue\nowner.limits[limit_name] = value\neffort_applied_limits.add(limit_name)"
+        }
+      ]
+    },
+    {
+      "name": "hard deadline and no-progress watchdog",
+      "what_it_is": "ActionRuntime stages run under a sliding idle deadline: the deadline is recomputed from context.last_progress_at, which every progress event refreshes, and only when no progress arrived for stage_idle_timeout or limits.max_no_progress_seconds is the stage task cancelled and RuntimeStageStallError raised with the last progress event. AgentTask wraps each plan, execute and verify request in asyncio.wait_for with request_timeout_seconds, falling back to max_no_progress_seconds or max_seconds. All values are unset by default. At the orchestrator level await_route_with_limits wraps the whole route execution with a hard deadline (max_seconds from execution start) and the sliding idle deadline (max_no_progress_seconds), waits until the nearer one, then cancels the route and raises RuntimeStageStallError with status 'timed_out' or 'stalled'.",
+      "function_in_system": "Sits around the long-running phases of an agent execution (action planning and execution stages, task-level model requests). Distinguishes slow but active work from a hung stage and aborts only the latter with a diagnosable error. Otherwise a stalled stage blocks the task indefinitely with no signal to the caller.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/builtins/plugins/ActionRuntime/AgentlyActionRuntime.py",
+          "lines": "158-164, 176-183",
+          "snippet": "task = asyncio.create_task(awaitable)\ntry:\n    while True:\n        last_progress_at = float(getattr(context, \"last_progress_at\", time.monotonic()))\n        timeout = max(0.0, (last_progress_at + idle_limit) - time.monotonic())\n        try:\n            result = await asyncio.wait_for(asyncio.shield(task), timeout=timeout)\n...\nnow = time.monotonic()\nidle_seconds = now - float(getattr(context, \"last_progress_at\", now))\nif idle_seconds < idle_limit:\n    continue\ntask.cancel()\nawait asyncio.gather(task, return_exceptions=True)\nlast_event = getattr(context, \"last_progress_event\", None) or {}\nraise RuntimeStageStallError("
+        },
+        {
+          "file": "agently/builtins/plugins/ActionRuntime/AgentlyActionRuntime.py",
+          "lines": "204-217",
+          "snippet": "def _resolve_stage_idle_timeout(self, settings: \"Settings\", context: Any) -> float | None:\n    for namespace in (\n        SettingsNamespace(settings, \"action\"),\n        self.action_settings,\n        SettingsNamespace(settings, \"runtime\"),\n    ):\n        raw_timeout = namespace.get(\"stage_idle_timeout\", None)\n        timeout = self._normalize_timeout(raw_timeout)\n        if timeout is not None:\n            return timeout\n    limits = getattr(context, \"limits\", None)\n    if isinstance(limits, dict):\n        return self._normalize_timeout(limits.get(\"max_no_progress_seconds\"))\n    return None"
+        },
+        {
+          "file": "agently/core/application/AgentTask/Task.py",
+          "lines": "876-883",
+          "snippet": "\nasync def _await_task_request(self, awaitable, *, stage: str):\n    timeout = self._task_request_timeout()\n    if timeout is None:\n        return await awaitable\n    try:\n        return await asyncio.wait_for(awaitable, timeout=timeout)\n    except TimeoutError as error:"
+        },
+        {
+          "file": "agently/builtins/plugins/AgentOrchestrator/AgentlyAgentOrchestrator/modules/limits.py",
+          "lines": "27-38, 52-60, 71-75",
+          "snippet": "async def await_route_with_limits(owner: \"AgentExecution\", run_coro: Any):\n    max_seconds = owner.limits.get(\"max_seconds\")\n    max_no_progress_seconds = owner.limits.get(\"max_no_progress_seconds\")\n    if max_seconds is None and max_no_progress_seconds is None:\n        return await run_coro\n\n    hard_deadline = (\n        owner.execution_context.started_at + float(max_seconds)\n        if max_seconds is not None\n        else None\n    )\n    idle_limit = float(max_no_progress_seconds) if max_no_progress_seconds is not None else None\n...\ntry:\n    return await asyncio.wait_for(asyncio.shield(task), timeout=min(next_timeouts))\nexcept asyncio.TimeoutError as error:\n    if task.done():\n        return await task\n    now = time.monotonic()\n    if hard_deadline is not None and now >= hard_deadline:\n        await cancel_limited_task(task)\n        raise build_execution_stall_error(\n...\nif idle_limit is not None:\n    idle_seconds = now - owner.execution_context.last_progress_at\n    if idle_seconds >= idle_limit:\n        await cancel_limited_task(task)\n        raise build_execution_stall_error("
+        }
+      ]
+    },
+    {
+      "name": "required-action evidence gate",
+      "what_it_is": "After the model_request route finishes, the action logs are checked against the action ids declared via require_actions; every required action must appear with status success or partial_success. Missing or failed required actions end the execution as 'blocked' with accepted=False and a reason listing the missing and failed actions.",
+      "function_in_system": "Sits at route completion, between the agent's answer and its acceptance as the execution result. Deterministically checks that the mandated tools actually ran and succeeded. Otherwise the model answers from its own knowledge while the caller assumes a tool-backed result.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/builtins/plugins/AgentOrchestrator/AgentlyAgentOrchestrator/modules/routes.py",
+          "lines": "91-99",
+          "snippet": "capability_failure = await _required_action_failure(execution, route=\"model_request\")\nif capability_failure is not None:\n    execution.status = \"blocked\"\n    execution.close_snapshot = {\n        \"status\": \"blocked\",\n        \"route\": \"model_request\",\n        \"required_capabilities\": capability_failure,\n    }\n    execution.diagnostics.setdefault(\"required_capabilities\", []).append(capability_failure)"
+        },
+        {
+          "file": "agently/builtins/plugins/AgentOrchestrator/AgentlyAgentOrchestrator/modules/routes.py",
+          "lines": "133-146",
+          "snippet": "successful_statuses = {\"success\", \"succeeded\", \"partial_success\"}\nmissing = [action_id for action_id in required_actions if action_id not in statuses]\nfailed = [\n    action_id\n    for action_id in required_actions\n    if action_id in statuses and statuses[action_id] not in successful_statuses\n]\nif not missing and not failed:\n    return None\nreason_bits = []\nif missing:\n    reason_bits.append(f\"missing required action evidence: {', '.join(missing)}\")\nif failed:\n    reason_bits.append(f\"required action did not succeed: {', '.join(failed)}\")"
+        }
+      ]
+    },
+    {
+      "name": "durable execution snapshot with validated reload",
+      "what_it_is": "execution.save() serializes interrupts, runtime and flow data, result, lease state and a resume ledger into a snapshot (optionally only when idle via require_idle). async_save() writes it to a snapshot store with an optional compare-and-swap on expected_state_version. load() checks the snapshot contract and, with validate_resources=True, refuses to restore when required runtime resources are missing. On inspection the resume ledger is diagnosed for requests that were accepted or dispatched but never completed.",
+      "function_in_system": "Sits at the boundary of a TriggerFlow execution, the runtime that hosts action loops and TaskDAG graphs. Lets a paused or crashed execution continue in a new process from its last saved state, and the CAS write stops two workers from overwriting each other's progress. Otherwise a process restart loses all intermediate work of a long workflow and half-finished resumes stay invisible.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/orchestration/TriggerFlow/ExecutionPersistence.py",
+          "lines": "55-67",
+          "snippet": "def save(\n    self,\n    path: str | Path | None = None,\n    *,\n    encoding: str | None = \"utf-8\",\n    require_idle: bool = False,\n):\n    execution = self._execution\n    if require_idle and not execution.is_idle():\n        raise RuntimeError(\n            f\"Can not save TriggerFlowExecution { execution.id } with require_idle=True while tasks are active.\"\n        )\n    snapshot_id = uuid.uuid4().hex"
+        },
+        {
+          "file": "agently/core/orchestration/TriggerFlow/Execution.py",
+          "lines": "2256-2275",
+          "snippet": "await self._maybe_apply_compaction_policy(\n    snapshot_store=resolved_snapshot_store,\n    run_id=resolved_run_id,\n)\nstate = self.save(require_idle=require_idle)\nresolved_step_id = step_id or f\"state:{ self._state_version }\"\nput_snapshot = resolved_snapshot_store.put_snapshot\nput_kwargs = self._filter_callable_kwargs(\n    put_snapshot,\n    {\n        \"step_id\": resolved_step_id,\n        \"expected_state_version\": expected_state_version,\n    },\n)\nreturn await put_snapshot(\n    resolved_run_id,\n    state,\n    **put_kwargs,\n)\n"
+        },
+        {
+          "file": "agently/core/orchestration/TriggerFlow/ExecutionPersistence.py",
+          "lines": "371-384",
+          "snippet": "execution = self._execution\nstate = self._load_state_content(state, encoding=encoding)\nself._validate_state_sections(state)\nsnapshot_state = state\nself._raise_for_snapshot_contract(snapshot_state)\nif validate_resources:\n    load = self.inspect_load_state(\n        snapshot_state,\n        runtime_resources=runtime_resources,\n        execution_environments=execution_environments,\n    )\n    if not load.get(\"ready\", False):\n        raise RuntimeError(\n            f\"Can not load TriggerFlow execution { state.get('execution_id', execution.id) }; \""
+        },
+        {
+          "file": "agently/core/orchestration/TriggerFlow/ExecutionPersistence.py",
+          "lines": "1300-1310",
+          "snippet": "for request_id, request in requests.items():\n    if not isinstance(request, dict):\n        continue\n    status = request.get(\"status\")\n    if status == \"accepted\" and interrupt_status == \"waiting\":\n        diagnostics.append(\n            {\n                \"code\": \"triggerflow.resume.accepted_not_dispatched\",\n                \"severity\": \"warning\",\n                \"message\": \"Resume request was accepted but not durably dispatched.\",\n                \"interrupt_id\": str(interrupt_id),"
+        }
+      ]
+    },
+    {
+      "name": "idempotent interrupt resume with self-resume cap and lease fencing",
+      "what_it_is": "continue_with() deduplicates resumes by resume_request_id: a repeated request with the same value returns the existing interrupt, a conflicting value raises. Interrupts that resume to themselves are capped by max_resumes (default 1) and exceeding the cap emits triggerflow.self_resume_limit_reached and raises. When an owner lease (claim_lease/heartbeat_lease with lease_ttl) has expired, the resume is rejected with a triggerflow.lease.expired event.",
+      "function_in_system": "Sits at the resume entry point of paused executions (human approval, external waits). Blocks duplicate side effects from client retries, stops pause/resume cycles from looping forever and fences out a worker whose lease ran out. Otherwise a retried webhook runs a step twice, a self-resuming node loops indefinitely and two workers continue the same execution concurrently.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/orchestration/TriggerFlow/ExecutionInterrupts.py",
+          "lines": "667-678",
+          "snippet": "if resume_request_id is not None:\n    existing_request = resume_requests.get(resume_request_id)\n    if isinstance(existing_request, dict):\n        if not self._same_resume_request_value(existing_request, value):\n            raise ValueError(\n                f\"Can not continue execution { execution.id }, interrupt '{ interrupt_id }' with \"\n                f\"conflicting resume_request_id '{ resume_request_id }'.\"\n            )\n        if interrupt.get(\"status\") != \"waiting\":\n            return interrupt\n        if existing_request.get(\"status\") == \"completed\":\n            return interrupt"
+        },
+        {
+          "file": "agently/core/orchestration/TriggerFlow/ExecutionInterrupts.py",
+          "lines": "332, 693-697",
+          "snippet": "max_resumes: int | None = 1,\n...\nresume_count += 1\nif max_resumes is not None and resume_count > max_resumes:\n    await execution._emit_runtime_event(\n        \"triggerflow.self_resume_limit_reached\",\n        level=\"ERROR\","
+        },
+        {
+          "file": "agently/core/orchestration/TriggerFlow/ExecutionInterrupts.py",
+          "lines": "654-658, 618-621",
+          "snippet": "await self._raise_for_expired_lease_callback(\n    interrupt_id=interrupt_id,\n    resume_request_id=resume_request_id,\n    actor=actor,\n)\n...\nraise RuntimeError(\n    f\"Can not continue TriggerFlow execution { execution.id }; lease for owner \"\n    f\"'{ lease_context['owner_id'] }' expired at { lease_context['lease_until'] }.\"\n)"
+        },
+        {
+          "file": "agently/core/orchestration/TriggerFlow/Execution.py",
+          "lines": "2313-2317",
+          "snippet": "ttl = self._lease_ttl if lease_ttl is None else lease_ttl\nself._owner_id = str(owner_id)\nself._lease_ttl = ttl\nself._heartbeat_at = timestamp\nself._lease_until = timestamp + ttl if ttl is not None else None"
+        }
+      ]
+    },
+    {
+      "name": "per-task failure isolation with skip fallback",
+      "what_it_is": "When a TaskDAG task raises, the error type and message are stored in task_failures, the task status is set to failed and a failed:<task_id> event is emitted. If the task declares fallback {'on_error': 'skip'}, the runner records a skipped result and returns it so dependent tasks keep running; otherwise the error propagates.",
+      "function_in_system": "Sits inside the per-task runner of the TaskDAG executor. Contains the failure of one branch of a planned graph and records it for later inspection. Otherwise a single failing optional task aborts the whole plan.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/orchestration/TaskDAG/TaskDAGRuntime.py",
+          "lines": "282-291",
+          "snippet": "except Exception as error:\n    await _record_task_failure(data, graph, resolved_task, error, result_lock=result_lock)\n    await _put_task_event(data, graph, resolved_task, \"fail\", error=str(error))\n    if _fallback_action(resolved_task) == \"skip\":\n        output = {\"status\": \"skipped\", \"reason\": str(error)}\n        await _record_task_success(data, graph, resolved_task, output, result_lock=result_lock)\n        await _put_task_event(data, graph, resolved_task, \"skipped\", output=output)\n        return output\n    raise\n"
+        },
+        {
+          "file": "agently/core/orchestration/TaskDAG/TaskDAGRuntime.py",
+          "lines": "495-506",
+          "snippet": "async with result_lock:\n    failures = dict(data.get_state(\"task_failures\", {}) or {})\n    statuses = dict(data.get_state(\"task_statuses\", {}) or {})\n    failures[task.id] = {\n        \"type\": type(error).__name__,\n        \"message\": str(error),\n    }\n    statuses[task.id] = \"failed\"\n    await data.async_set_state(\"task_failures\", failures, emit=False)\n    await data.async_set_state(\"task_statuses\", statuses, emit=False)\n    failure_payload = failures[task.id]\nawait data.async_emit(_failed_task_event(task.id), failure_payload)"
+        },
+        {
+          "file": "agently/core/orchestration/TaskDAG/TaskDAGHelpers.py",
+          "lines": "69-75",
+          "snippet": "def _fallback_action(task: TaskDAGNode) -> str | None:\n    if isinstance(task.fallback, str):\n        return task.fallback\n    if isinstance(task.fallback, Mapping):\n        value = task.fallback.get(\"on_error\") or task.fallback.get(\"action\")\n        return str(value) if value is not None else None\n    return None"
+        }
+      ]
+    },
+    {
+      "name": "structural plan validation with re-plan",
+      "what_it_is": "The TaskDAG planner registers validate_output as validate handler on the planning request. It runs validate_task_dag on the model's graph (duplicate ids, missing dependencies, dependency cycles via topological sort, executor resolver entries, semantic output refs, side-effect approval policy, schema version) and returns ok=False with a reason on failure. The generic output-constraint retry then re-requests the plan, up to max_retries=3.",
+      "function_in_system": "Sits between the planner model call and graph execution in DynamicTask. Rejects plans that cannot execute before any task runs and makes the model produce a new one. Otherwise a cyclic or unresolvable graph fails at execution time after partial work.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/builtins/plugins/TaskDAGPlanner/AgentlyTaskDAGPlanner.py",
+          "lines": "178-179",
+          "snippet": "def validate_output(self, result: dict[str, Any], context: Any = None):\n    return self.validator.validate_planner_output(result, context)"
+        },
+        {
+          "file": "agently/builtins/plugins/TaskDAGPlanner/AgentlyTaskDAGPlanner.py",
+          "lines": "251-265",
+          "snippet": "async def async_plan(\n    self,\n    request: Any,\n    graph_input: Any = None,\n    *,\n    max_retries: int = 3,\n) -> Any:\n    prepared = self.prepare_request(request, graph_input)\n    if not hasattr(prepared, \"async_start\"):\n        raise TypeError(\"Task DAG planner request must provide async_start(...).\")\n    return await prepared.async_start(\n        ensure_keys=self.ensure_keys(),\n        validate_handler=self.validate_output,\n        max_retries=max_retries,\n    )"
+        },
+        {
+          "file": "agently/core/orchestration/TaskDAG/TaskDAGValidation.py",
+          "lines": "149-151, 165-171",
+          "snippet": "if len(ordered) != len(tasks):\n    cycle_ids = sorted(task_id for task_id, count in indegree.items() if count > 0)\n    raise ValueError(f\"Task DAG contains a dependency cycle: { ', '.join(cycle_ids) }.\")\n...\n    if resolved_resolver.resolve(task) is None:\n        raise ValueError(\n            f\"Dynamic task '{ task.id }' kind '{ task.kind }' has no executor resolver entry.\"\n        )\n\n_validate_semantic_outputs(normalized, task_by_id)\n_validate_side_effects(normalized)"
+        },
+        {
+          "file": "agently/core/orchestration/TaskDAG/TaskDAGValidation.py",
+          "lines": "188-195",
+          "snippet": "try:\n    validation = validate_task_dag(result, resolver=resolver)\nexcept Exception as error:\n    return {\n        \"ok\": False,\n        \"reason\": str(error),\n        \"validator_name\": \"task_dag\",\n    }"
+        }
+      ]
+    },
+    {
+      "name": "session context-window trimming with pluggable resize strategy",
+      "what_it_is": "A Session keeps the full_context and a separate context_window that is injected as chat_history into each request. After every history change, with auto_resize=True (hard-set by SessionExtension), an analysis handler measures the window in serialized characters and selects the simple_cut strategy once it exceeds session.max_length. simple_cut keeps the most recent messages that fit the limit and, when even the last message is too long, keeps only its last max_length characters. Custom analysis and resize handlers can be registered, and a memo they return is injected into the prompt as CHAT SESSION MEMO.",
+      "function_in_system": "Sits between the multi-turn chat history and prompt assembly of every agent request with an active session. Bounds the prompt size of long conversations while the full history stays available for custom strategies. Otherwise the growing chat history eventually overflows the model context window or inflates the cost of every turn.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/_default_settings.yaml",
+          "lines": "41-42",
+          "snippet": "session:\n  max_length: null"
+        },
+        {
+          "file": "agently/core/session/Session.py",
+          "lines": "86-97",
+          "snippet": "async def _default_analysis_handler(\n    self,\n    full_context: Sequence[ChatMessage],\n    context_window: Sequence[ChatMessage],\n    memo: \"SerializableValue\",\n    session_settings: SettingsNamespace,\n):\n    max_length = session_settings.get(\"max_length\", None)\n    context_window_length = self._calculate_context_length(context_window)\n    if isinstance(max_length, int) and context_window_length > max_length:\n        return \"simple_cut\"\n    return None"
+        },
+        {
+          "file": "agently/core/session/Session.py",
+          "lines": "99-138",
+          "snippet": "async def _simple_cut_resize_handler(\n    self,\n    full_context: Sequence[ChatMessage],\n    context_window: Sequence[ChatMessage],\n    memo: \"SerializableValue\",\n    session_settings: SettingsNamespace,\n):\n    max_length = session_settings.get(\"max_length\", None)\n    if isinstance(max_length, int):\n        new_context_window: list[ChatMessage] = []\n        total_length = 0\n        for message in reversed(context_window):\n            message_length = len(str(message.model_dump()))\n            if total_length + message_length > max_length:\n                break\n            new_context_window.append(message)\n            total_length += message_length\n        new_context_window.reverse()\n\n        if len(new_context_window) == 0 and context_window:\n            new_content = str(context_window[-1].content)\n            new_content = new_content[len(new_content) - max_length :]\n            return (\n                None,\n                [\n                    ChatMessage(\n                        role=context_window[-1].role,\n                        content=new_content,\n                    )\n                ],\n                None,\n            )\n\n        if self._calculate_context_length(new_context_window) <= max_length:\n            return (\n                None,\n                self._to_standard_chat_messages(new_context_window),\n                None,\n            )\n    return None, None, None"
+        },
+        {
+          "file": "agently/core/session/Session.py",
+          "lines": "233-234, 271-274",
+          "snippet": "if self._auto_resize:\n    await self.async_resize()\n...\nasync def async_resize(self):\n    strategy_name = await self.async_analyze_context()\n    if strategy_name is not None:\n        await self.async_run_resize_strategy(strategy_name)"
+        },
+        {
+          "file": "agently/builtins/agent_extensions/SessionExtension.py",
+          "lines": "102-105",
+          "snippet": "self.activated_session = Session(\n    id=session_id,\n    auto_resize=True,\n    settings=self.settings,"
+        },
+        {
+          "file": "agently/core/session/Session.py",
+          "lines": "376-380",
+          "snippet": "if \"chat_history\" in prompt:\n    del prompt[\"chat_history\"]\nprompt.set(\"chat_history\", activated_session.context_window)\nif activated_session.memo is not None:\n    prompt.set(\"CHAT SESSION MEMO\", activated_session.memo)"
+        }
+      ]
+    },
+    {
+      "name": "budgeted recall context pack",
+      "what_it_is": "Workspace.build_context runs a recall profile (plan, retrieve, build) over workspace records and packs them into a character budget: AgentTask passes {'chars': 6000} by default, the builder falls back to 12000 chars or tokens*4. Each record excerpt is capped at 1200 characters and marked [truncated], records that exceed the remaining budget are skipped and reported as omitted with reason budget. If building the context raises, AgentTask retries it with an empty goal and records the error under recall_fallbacks.",
+      "function_in_system": "Sits in front of each plan and verify step of the AgentTask loop, where accumulated observations, decisions and verifications are recalled into the prompt. Keeps the recalled evidence within a fixed size as the task workspace grows and keeps the loop running when recall fails. Otherwise every iteration's prompt grows with the whole task history and a recall error aborts the task.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/core/application/AgentTask/Task.py",
+          "lines": "85",
+          "snippet": "self.context_budget = dict(context_budget or {\"chars\": 6000})"
+        },
+        {
+          "file": "agently/core/session/Recall/Defaults.py",
+          "lines": "96-118",
+          "snippet": "char_budget = _char_budget(budget)\nused_chars = 0\nomitted_count = 0\nitems: list[WorkspaceContextItem] = []\nfor record in records:\n    content = await _safe_read(workspace, record)\n    excerpt = _excerpt(content, max_chars=min(1200, max(200, char_budget - used_chars)))\n    item_chars = len(record.get(\"summary\") or \"\") + len(excerpt or \"\")\n    if used_chars + item_chars > char_budget and items:\n        omitted_count += 1\n        continue\n    used_chars += item_chars\n    items.append(\n        {\n            \"ref\": record,\n            \"kind\": record.get(\"kind\"),\n            \"summary\": record.get(\"summary\") or \"\",\n            \"content\": excerpt,\n            \"use\": \"evidence\",\n        }\n    )\nomitted: list[WorkspaceContextOmission] = (\n    [{\"reason\": \"budget\", \"count\": omitted_count}] if omitted_count else []"
+        },
+        {
+          "file": "agently/core/session/Recall/Defaults.py",
+          "lines": "135-140, 151-156",
+          "snippet": "def _char_budget(budget: dict[str, Any]) -> int:\n    if isinstance(budget.get(\"chars\"), int):\n        return max(1, int(budget[\"chars\"]))\n    if isinstance(budget.get(\"tokens\"), int):\n        return max(1, int(budget[\"tokens\"]) * 4)\n    return 12000\n...\ndef _excerpt(content: str | None, *, max_chars: int) -> str | None:\n    if content is None:\n        return None\n    if len(content) <= max_chars:\n        return content\n    return content[: max(0, max_chars - 12)].rstrip() + \"\\n[truncated]\""
+        },
+        {
+          "file": "agently/core/application/AgentTask/Task.py",
+          "lines": "458-480",
+          "snippet": "async def _build_context(self) -> \"WorkspaceContextPack\":\n    try:\n        return await self.workspace.build_context(\n            goal=self.goal,\n            scope={\"task_id\": self.id},\n            budget=self.context_budget,\n            profile=self.recall_profile,\n        )\n    except Exception as error:\n        fallback = await self.workspace.build_context(\n            goal=\"\",\n            scope={\"task_id\": self.id},\n            budget=self.context_budget,\n            profile=self.recall_profile,\n        )\n        diagnostics = fallback.setdefault(\"diagnostics\", {})\n        diagnostics[\"fallback_reason\"] = {\n            \"type\": error.__class__.__name__,\n            \"message\": str(error),\n            \"stage\": \"workspace.build_context\",\n        }\n        self.diagnostics.setdefault(\"recall_fallbacks\", []).append(diagnostics[\"fallback_reason\"])\n        return fallback"
+        }
+      ]
+    },
+    {
+      "name": "model-based route selection with deterministic fallback",
+      "what_it_is": "When several execution routes qualify (dynamic_task, skills, model_request), AgentExecution asks a temporary model request for a JSON route choice (max_retries=2, raise_ensure_failure=False). An unknown route or any exception selects the first candidate and records selected_by 'fallback'. A skills route in model_decision mode that matches no skill emits route.fallback and runs the plain model_request route.",
+      "function_in_system": "Sits at the start of every AgentExecution, which is the default path of agent.get_data() and async_get_data(). Keeps the execution running when the routing classifier fails or when the chosen skills route has nothing to execute. Otherwise a malformed routing answer aborts the whole request and an unmatched skill route returns no result.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/builtins/plugins/AgentOrchestrator/AgentlyAgentOrchestrator/modules/routing.py",
+          "lines": "146-154, 162-169",
+          "snippet": "    .output(\n        {\n            \"selected_route\": (str, \"one of: dynamic_task, skills, model_request\", True),\n            \"reason\": (str, \"concise business reason for the route choice\"),\n        },\n        format=\"json\",\n    )\n    .async_start(max_retries=2, raise_ensure_failure=False)\n)\n...\n    except Exception:\n        pass\ncandidate = candidates[0]\nroute = str(candidate.get(\"route\"))\nmeta = {key: value for key, value in candidate.items() if key != \"route\"}\nmeta[\"selected_by\"] = \"fallback\"\nmeta[\"route_choice_reason\"] = \"Model route choice failed; selected first optional route candidate.\"\nreturn route, meta"
+        },
+        {
+          "file": "agently/builtins/plugins/AgentOrchestrator/AgentlyAgentOrchestrator/modules/routes.py",
+          "lines": "200-214",
+          "snippet": "await execution.emit_stream(\n    \"route.fallback\",\n    {\"from\": \"skills\", \"to\": \"model_request\", \"reason\": \"no_matching_skill\"},\n    route=\"model_request\",\n)\nreturn await run_model_request_route(\n    execution,\n    type=\"parsed\",\n    ensure_keys=None,\n    ensure_all_keys=None,\n    validate_handler=None,\n    key_style=\"dot\",\n    max_retries=3,\n    raise_ensure_failure=True,\n)"
+        },
+        {
+          "file": "agently/builtins/plugins/AgentOrchestrator/AgentlyAgentOrchestrator/modules/execution.py",
+          "lines": "757-758",
+          "snippet": "else:\n    route, route_meta = await self.route_planner.select_route()"
+        }
+      ]
+    },
+    {
+      "name": "default-off skill capability mounting with approval",
+      "what_it_is": "Every capability_need declared by a selected Skill is resolved against skills.capability_policy. The default mode is 'off', which blocks the need. Mode 'approval' asks policy_approval and blocks unless the decision is approved. Mode 'allow' mounts the capability, and a mount error also blocks. Any blocked or unapproved need stops the Skill execution before an effort strategy runs and returns status 'blocked' with diagnostics.",
+      "function_in_system": "Sits between Skill planning and Skill execution in the skills route. Restricts which tools and resources a Skill can attach to the agent to those explicitly granted by the operator. Otherwise an installed Skill silently extends the agent with arbitrary capabilities such as bash or network access.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/executor.py",
+          "lines": "427-463",
+          "snippet": "for need in needs:\n    need_name = str(need.get(\"need\") or \"\")\n    skill_id = str(need.get(\"skill_id\") or \"\")\n    mode = self._policy_mode(policy, need_name)\n    event_policy_mode = mode\n    if mode == \"off\":\n        diagnostics.append(self._capability_diagnostic(\"capability_disabled\", need, mode=mode))\n        runtime_stream.append(self._capability_event(\"skills.capability.disabled\", need, mode=mode))\n        blocked = True\n        continue\n    if mode == \"approval\":\n        decision = await self._resolve_capability_approval(\n            context=context,\n            need=need,\n            policy=policy,\n        )\n        if decision.get(\"approved\") is not True:\n            diagnostics.append({\n                **self._capability_diagnostic(\"approval_required\", need, mode=mode),\n                \"approval\": _copy_public(decision),\n            })\n            runtime_stream.append({\n                **self._capability_event(\"skills.capability.approval_required\", need, mode=mode),\n                \"approval\": _copy_public(decision),\n            })\n            approval_required = True\n            continue\n        runtime_stream.append({\n            **self._capability_event(\"skills.capability.approved\", need, mode=mode),\n            \"approval\": _copy_public(decision),\n        })\n        mode = \"allow\"\n    if mode != \"allow\":\n        diagnostics.append(self._capability_diagnostic(\"capability_policy_missing\", need, mode=mode))\n        runtime_stream.append(self._capability_event(\"skills.capability.policy_missing\", need, mode=mode))\n        blocked = True\n        continue"
+        },
+        {
+          "file": "agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/executor.py",
+          "lines": "523-533",
+          "snippet": "def _policy_mode(self, policy: dict[str, Any], need_name: str) -> str:\n    auto_load = _ensure_dict(policy.get(\"auto_load\"))\n    raw = auto_load.get(need_name, policy.get(need_name, \"off\"))\n    if isinstance(raw, dict):\n        raw = raw.get(\"mode\", raw.get(\"policy\", \"off\"))\n    mode = str(raw or \"off\").strip().lower()\n    if mode in {\"allow\", \"allowed\", \"true\", \"yes\", \"auto\"}:\n        return \"allow\"\n    if mode in {\"approval\", \"approve\", \"ask\"}:\n        return \"approval\"\n    return \"off\""
+        },
+        {
+          "file": "agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/executor.py",
+          "lines": "138-152",
+          "snippet": "capability_result = await self._prepare_capabilities(context=context, plan=plan)\nruntime_stream.extend(capability_result[\"runtime_stream\"])\nif capability_result[\"status\"] in {\"blocked\", \"approval_required\"}:\n    return self._build_execution(\n        execution_id=execution_id,\n        status=\"blocked\",\n        plan=plan,\n        runtime_stream=runtime_stream,\n        skill_logs=skill_logs,\n        output={\n            \"error\": \"Skill capability preparation is blocked.\",\n            \"diagnostics\": capability_result[\"diagnostics\"],\n        },\n        effort=effort,\n    )"
+        }
+      ]
+    },
+    {
+      "name": "budgeted skill context injection",
+      "what_it_is": "Skill material entering the prompt is size-capped. SkillContextPack packs guidance and resources into budget_chars=12000 with max_resource_chars=6000 per resource; guidance gets at most a quarter of the remaining budget (minimum 800) and cut content carries a truncation marker. read_resource truncates at max_bytes with a marker, prompt guidance per skill is cut at skills.prompt.max_guidance_chars_per_skill=6000 with a truncated flag, and the resource index lists at most 24 entries.",
+      "function_in_system": "Sits where Skill guidance and bundled resources are injected into the request prompt or the TaskDAG skill context. Keeps prompt size bounded as Skills with large SKILL.md files and resource folders are attached. Otherwise one large skill fills the context window and inflates cost on every call.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/context_pack.py",
+          "lines": "269-282",
+          "snippet": "if include_guidance and remaining_budget > 0:\n    guidance = _ensure_dict(contract.get(\"guidance\"))\n    content = str(guidance.get(\"content\") or \"\")\n    guidance_budget = min(remaining_budget, max(800, remaining_budget // 4))\n    excerpt, truncated = self._take_budget(content, guidance_budget)\n    if excerpt:\n        skill_item[\"guidance\"] = {\n            \"path\": str(guidance.get(\"path\") or \"SKILL.md\"),\n            \"excerpt\": excerpt,\n            \"truncated\": truncated,\n            \"citation\": f\"skills/{ skill_id }/SKILL.md\",\n        }\n        used_chars += len(excerpt)\n        remaining_budget -= len(excerpt)"
+        },
+        {
+          "file": "agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/context_pack.py",
+          "lines": "296-304",
+          "snippet": "for resource in resources:\n    if remaining_budget <= 0:\n        break\n    path = str(resource.get(\"path\") or \"\")\n    if not path:\n        continue\n    read_budget = min(remaining_budget, max_resource_chars)\n    try:\n        content = self.registry.read_resource(skill_id, path, max_bytes=read_budget)"
+        },
+        {
+          "file": "agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/context_pack.py",
+          "lines": "605-613",
+          "snippet": "def _take_budget(self, content: str, budget: int) -> tuple[str, bool]:\n    if budget <= 0 or not content:\n        return \"\", bool(content)\n    if len(content) <= budget:\n        return content, False\n    if budget <= 32:\n        return content[:budget], True\n    marker = \"\\n\\n... [truncated by SkillContextPack budget]\"\n    return content[:max(0, budget - len(marker))] + marker, True"
+        },
+        {
+          "file": "agently/builtins/plugins/SkillsExecutor/AgentlySkillsExecutor/modules/registry.py",
+          "lines": "813-822",
+          "snippet": "file_size = resource_path.stat().st_size\ncontent = _read_text(resource_path)\nif len(content) <= max_bytes:\n    return content\ntruncated = content[:max_bytes]\nmarker = (\n    f\"\\n\\n... [truncated at { max_bytes }/{ file_size } bytes; \"\n    f\"use max_bytes=N to increase]\"\n)\nreturn truncated + marker"
+        },
+        {
+          "file": "agently/builtins/agent_extensions/SkillsExtension/SkillsExtension.py",
+          "lines": "538, 576-588",
+          "snippet": "max_guidance_chars = int(settings.get(\"skills.prompt.max_guidance_chars_per_skill\", 6000) or 6000)\n...\ndef _collect_prompt_guidance(self, contract: SkillContract, *, max_chars: int) -> list[dict[str, Any]]:\n    guidance = _ensure_dict(contract.get(\"guidance\"))\n    content = str(guidance.get(\"content\") or \"\")\n    if not content.strip():\n        return []\n    trimmed = content[:max_chars]\n    return [{\n        \"skill_id\": str(contract.get(\"skill_id\", \"\")),\n        \"path\": str(guidance.get(\"path\") or \"SKILL.md\"),\n        \"title\": str(contract.get(\"card\", {}).get(\"display_name\", \"\")),\n        \"content\": trimmed,\n        \"truncated\": len(content) > len(trimmed),\n    }]"
+        }
+      ]
+    }
+  ]
+}

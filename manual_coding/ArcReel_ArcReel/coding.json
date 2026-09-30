@@ -1,0 +1,1231 @@
+{
+  "repo": "ArcReel/ArcReel",
+  "commit": "18dada2b94",
+  "system_type": "application",
+  "system_type_reason": "End-user platform that turns novels into short videos via a fixed orchestrator agent and subagents.",
+  "repo_overview": {
+    "summary": "AI video generation platform that turns novels into short videos (narration, drama and ad content modes). A React SPA talks to a FastAPI server that hosts a Claude Agent SDK runtime: an orchestrator agent, driven by a content-mode specific system prompt, calls skills, six subagents and in-process MCP tools, and the MCP tools enqueue image/video/audio generation jobs that a background worker executes against many third-party media providers.",
+    "components": [
+      {
+        "path": "server/agent_runtime/",
+        "purpose": "Claude Agent SDK integration: AssistantService and SessionManager (session lifecycle, SDK options, SSE subscribers), SessionActor (one asyncio task per session serializing all ClaudeSDKClient calls), SessionStore (transcript DB mirror), StreamProjector and transcript/turn adapters for live and replayed replies"
+      },
+      {
+        "path": "server/agent_runtime/sdk_tools/",
+        "purpose": "in-process MCP tools exposed to the agent (enqueue assets/grid/storyboards/videos, text generation), the bridge from agent decisions to the generation queue"
+      },
+      {
+        "path": "agent_runtime_profile/",
+        "purpose": "agent runtime configuration: CLAUDE.narration/drama/ad.md system prompt variants injected per content_mode, .claude/agents/ with six subagent definitions, .claude/skills/ with nine workflow skills (script, assets, storyboard, grid, video, audio, compose, project management) and their scripts"
+      },
+      {
+        "path": "server/routers/",
+        "purpose": "FastAPI /api/v1 endpoints: assistant/agent chat (SSE), generation enqueueing, tasks, projects and asset CRUD, versions/rollback, usage and cost estimation, provider and credential configuration, auth"
+      },
+      {
+        "path": "server/services/",
+        "purpose": "business service layer: generation task orchestration, reference-video tasks, resume_executor for continuing provider-side jobs, cost estimation, project export/archive, project events, diagnostics"
+      },
+      {
+        "path": "server/app.py, server/auth.py",
+        "purpose": "app startup and wiring, including check_sandbox_available (bwrap sandbox for agent tool calls, Windows bash prefix whitelist fallback), authentication"
+      },
+      {
+        "path": "lib/generation_queue.py, lib/generation_worker.py, lib/generation_queue_client.py, lib/task_failure.py",
+        "purpose": "async task queue on SQLAlchemy with lease-based concurrency control, background worker with separate image and video lanes, enqueue_and_wait client, task failure handling"
+      },
+      {
+        "path": "lib/{image,video,text,audio}_backends/, lib/custom_provider/, lib/*_shared.py, lib/httpx_shared.py",
+        "purpose": "multi-provider media and text backends (Gemini, Ark, Grok, OpenAI, Vidu, DashScope, Kling, MiniMax, newapi, custom OpenAI/Google compatible) behind registry and factory patterns, shared SDK clients"
+      },
+      {
+        "path": "lib/retry.py",
+        "purpose": "shared exponential backoff retry decorator reused by the provider backends"
+      },
+      {
+        "path": "lib/backend_assembly/, lib/config/, lib/providers.py, lib/agent_provider_catalog.py, lib/agent_profile.py, lib/profile_manifest.py",
+        "purpose": "provider configuration (ConfigService, repository with secret masking, resolver, preset registry, Anthropic probe), backend assembly from config, agent profile sync via manifest and sha256 checks"
+      },
+      {
+        "path": "lib/media_generator.py, lib/version_manager.py, lib/usage_tracker.py, lib/cost_calculator.py, lib/pricing/",
+        "purpose": "MediaGenerator combining a backend with versioning and usage tracking; resource version history; API usage and cost accounting with per-provider pricing strategies"
+      },
+      {
+        "path": "lib/script_generator.py, lib/text_generator.py, lib/script_models.py, lib/data_validator.py, lib/script_structure_validator.py, lib/script_editor.py, lib/prompt_builders*.py, lib/prompt_rules/, lib/episode_planner.py, lib/episode_ledger.py",
+        "purpose": "script and text generation, Pydantic script models (NarrationSegment, DramaScene), validators for project.json and episode JSON structure and references, prompt builders per mode, episode planning and ledger"
+      },
+      {
+        "path": "lib/project_manager.py, lib/status_calculator.py, lib/project_migrations/, lib/asset_types.py, lib/json_io.py, lib/path_safety.py",
+        "purpose": "project filesystem and project.json management, read-time status computation, versioned project schema migrations, unified character/scene/prop asset specs, JSON IO and path safety helpers"
+      },
+      {
+        "path": "lib/grid/, lib/reference_video/, lib/source_loader/, lib/reference_compression.py, lib/image_utils.py, lib/thumbnail.py",
+        "purpose": "grid image layout/prompt/splitting, reference-video shot parsing and limits, novel import (txt/docx/epub/pdf), media helpers"
+      },
+      {
+        "path": "lib/db/, lib/agent_session_store/, alembic/",
+        "purpose": "async SQLAlchemy ORM (tasks, API calls, sessions, config, credentials, custom providers, assets) with repositories, agent transcript DB mirror, schema migrations"
+      },
+      {
+        "path": "frontend/",
+        "purpose": "React 19 + Tailwind SPA (wouter, zustand), talks to the server via REST and SSE"
+      },
+      {
+        "path": "tests/, scripts/, deploy/, docs/, openspec/",
+        "purpose": "test suite, migration and smoke scripts, docker deployment, provider docs, ADRs and design specs"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "server/agent_runtime/session_actor.py",
+        "lines": "123-131",
+        "snippet": "while True:\n    done, _ = await asyncio.wait({msg_task, cmd_task}, return_when=asyncio.FIRST_COMPLETED)\n\n    if msg_task in done:\n        try:\n            self._on_message(msg_task.result())\n            msg_task = asyncio.create_task(msg_iter.__anext__())\n        except StopAsyncIteration:\n            query_cmd.done.set()"
+      },
+      {
+        "file": "server/agent_runtime/session_manager.py",
+        "lines": "721-725",
+        "snippet": "return ClaudeAgentOptions(\n    cwd=str(project_cwd),\n    setting_sources=self.DEFAULT_SETTING_SOURCES,  # type: ignore[arg-type]\n    allowed_tools=allowed_tools,\n    max_turns=self.max_turns,"
+      },
+      {
+        "file": "server/agent_runtime/session_manager.py",
+        "lines": "708-714",
+        "snippet": "allowed_tools = list(self.DEFAULT_ALLOWED_TOOLS)\nif not self._sandbox_enabled:\n    bash_tools = set(self._BASH_TOOLS)\n    allowed_tools = [t for t in allowed_tools if t not in bash_tools]\n# 内置 ArcReel SDK MCP server — handler 跑在主进程，绕过 sandbox。\n# 通配符让后续新增 tool 不必同步改 allowed_tools。\nallowed_tools.append(\"mcp__arcreel__*\")"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "The Claude Agent SDK client streams the model's assistant messages; the tool_use blocks it emits (Skill, Task, Bash, Read/Write/Edit, mcp__arcreel__* tools, session_manager.py:318-332, 714) are executed by claude_agent_sdk and each resulting message is dispatched via self._on_message (session_actor.py:126-129).",
+      "consumes_feedback": "Tool results (MCP tool texts incl. is_error, hook deny reasons, Bash output) return into the SDK conversation, and _drive_query re-arms msg_task for the next streamed message (session_actor.py:129), so the next model call sees them.",
+      "multi_turn_until_termination": "while True in _drive_query (session_actor.py:123) runs until StopAsyncIteration after the SDK ResultMessage (session_actor.py:130-131); the turn count is optionally bounded by max_turns (session_manager.py:725)."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent",
+    "evidence": [
+      {
+        "file": "server/agent_runtime/session_manager.py",
+        "lines": "318-320, 333",
+        "snippet": "DEFAULT_ALLOWED_TOOLS = [\n    \"Skill\",\n    \"Task\",\n...\nDEFAULT_SETTING_SOURCES = [\"project\"]"
+      },
+      {
+        "file": "agent_runtime_profile/CLAUDE.narration.md",
+        "lines": "79-89",
+        "snippet": "主 Agent（编排层 — 极轻量）\n  │  只持有：项目状态摘要 + 用户对话历史\n  │  职责：状态检测、流程决策、用户确认、dispatch subagent\n  │\n  ├─ dispatch → analyze-assets               全局角色/场景/道具提取\n  ├─ dispatch → split-narration-segments     说书模式片段拆分\n  ├─ dispatch → normalize-drama-script       剧集模式规范化剧本\n  ├─ dispatch → split-reference-video-units  参考模式 video_unit 拆分\n  ├─ dispatch → create-episode-script        JSON 剧本生成（预加载 generate-script skill）\n  └─ dispatch → generate-assets              资产生成（角色/场景/道具/分镜/视频/旁白配音）"
+      },
+      {
+        "file": "agent_runtime_profile/CLAUDE.narration.md",
+        "lines": "101-103",
+        "snippet": "- **Subagent 不能 spawn subagent**：多步工作流只能通过主 agent 链式 dispatch\n- **小说原文不进入主 agent**：由 subagent 自行读取，主 agent 只传文件路径\n- **每个 subagent 一个聚焦任务**：完成即返回，不在内部做多步用户确认"
+      },
+      {
+        "file": "agent_runtime_profile/.claude/agents/create-episode-script.md",
+        "lines": "1-8",
+        "snippet": "---\nname: create-episode-script\ndescription: \"单集 JSON 剧本生成 subagent。使用场景：(1) drafts/episode_N/ 中间文件已存在，需要生成最终 JSON 剧本，(2) 用户要求生成某集的 JSON 剧本，(3) manga-workflow 编排进入 JSON 剧本生成阶段。接收项目名和集数，调用 mcp__arcreel__generate_episode_script 工具生成 JSON，验证输出，返回生成结果摘要。\"\nskills:\n  - generate-script\n---\n\n你的任务是调用 `mcp__arcreel__generate_episode_script` 工具生成最终的 JSON 格式剧本。"
+      }
+    ],
+    "justification": "The main agent has the Task tool enabled (session_manager.py:318-320) and loads project settings (session_manager.py:333), through which the SDK picks up the six subagent definitions in .claude/agents/ that the profile sync copies into each project. The mode-specific CLAUDE.md defines the main agent as a lightweight orchestrator that holds only project state and user dialogue and dispatches analyze-assets, split-narration-segments, normalize-drama-script, split-reference-video-units, create-episode-script and generate-assets (CLAUDE.narration.md:79-89). Each subagent has its own system prompt and role (e.g. create-episode-script.md:1-8, which also preloads the generate-script skill), runs in its own context, finishes one focused task and returns a summary; subagents cannot spawn further subagents, so multi-step work is chained by the orchestrator (CLAUDE.narration.md:101-103). This is a two-level orchestrator-worker hierarchy of LLM agents.",
+    "verdict_raw": "multi-agent"
+  },
+  "resilience": [
+    {
+      "name": "JSON write guard with pre-check and rollback",
+      "what_it_is": "A PreToolUse hook on Write/Edit targeting .json files simulates the resulting file content (Edit: string replacement on the current file) and validates it with json.loads; invalid results and curly quotes in new_string are denied with a correction hint. The pre-hook stores a backup of the file keyed by tool_use_id. A PostToolUse hook re-validates the written file, restores the backup if it is invalid JSON and returns additionalContext telling the agent the file was rolled back.",
+      "function_in_system": "Sits around the agent's built-in Write/Edit tool calls inside the SDK tool loop. Project state (project.json, episode scripts, drafts) lives in JSON files that every later step and the generation worker read. The deny reason and the additionalContext feed back into the conversation so the agent retries with corrected input. Otherwise a single malformed edit corrupts a project file and breaks all downstream skills and generation tasks.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "686-700",
+          "snippet": "    HookMatcher(\n        matcher=\"Write|Edit\",\n        hooks=[\n            self._build_json_validation_hook(project_cwd, json_backups),\n        ],\n    ),\n],\n\"PostToolUse\": [\n    HookMatcher(\n        matcher=\"Write|Edit\",\n        hooks=[\n            self._build_json_post_validation_hook(project_cwd, json_backups),\n        ],\n    ),\n],"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1014-1027",
+          "snippet": "except json.JSONDecodeError as exc:\n    logger.warning(\n        \"PreToolUse JSON 校验拦截: file=%s tool=%s error=%s\",\n        file_path,\n        tool_name,\n        exc,\n    )\n    return {\n        \"hookSpecificOutput\": {\n            \"hookEventName\": \"PreToolUse\",\n            \"permissionDecision\": \"deny\",\n            \"permissionDecisionReason\": (\n                f\"操作被阻止：此次 {tool_name} 会导致 {file_path} \"\n                f\"变成无效 JSON。错误：{exc}。\""
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1099-1105",
+          "snippet": "# File is corrupt — restore from backup if available\nrestored = False\nif backup:\n    backup_path, backup_content = backup\n    try:\n        backup_path.write_text(backup_content, encoding=\"utf-8\")\n        restored = True"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1126-1131, 1140-1145",
+          "snippet": "if restored:\n    ctx = (\n        f\"⚠ JSON 损坏已检测并回滚：{tool_name} 导致 \"\n        f\"{file_path} 变成无效 JSON（{exc}）。\"\n        \"文件已恢复到编辑前状态，请修正后重试。\"\n    )\n...\nreturn {\n    \"hookSpecificOutput\": {\n        \"hookEventName\": \"PostToolUse\",\n        \"additionalContext\": ctx,\n    },\n}"
+        }
+      ]
+    },
+    {
+      "name": "agent turn limit",
+      "what_it_is": "max_turns is passed into ClaudeAgentOptions for every session; the value comes from the DB setting assistant_max_turns with fallback to the env var ASSISTANT_MAX_TURNS. Both are empty by default, which leaves max_turns=None.",
+      "function_in_system": "Bounds the number of agent turns the SDK runs for one user query. Guards against an agent that keeps calling tools in a loop and accumulates cost and time. Otherwise a looping agent only stops through a user interrupt.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "508-511",
+          "snippet": "def _load_config(self) -> None:\n    \"\"\"Load configuration from environment (sync fallback).\"\"\"\n    max_turns_env = os.environ.get(\"ASSISTANT_MAX_TURNS\", \"\").strip()\n    self.max_turns = int(max_turns_env) if max_turns_env else None"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "521-524",
+          "snippet": "raw = await svc.get_setting(\"assistant_max_turns\", \"\")\nraw = raw.strip()\nif raw:\n    self.max_turns = int(raw)"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "725",
+          "snippet": "max_turns=self.max_turns,"
+        }
+      ]
+    },
+    {
+      "name": "path-based tool access fence",
+      "what_it_is": "A PreToolUse hook fires for every Read/Write/Edit/Glob/Grep call and checks the resolved path: sensitive files (.env, DB, system config, vertex_keys, logs, agent settings.json) are always denied; reads outside the current project, the SDK temp outputs and the repo reference docs are denied; writes are restricted to the project cwd, code file extensions are denied, and scripts/*.json plus project.json are denied with a message that names the MCP tools to use instead.",
+      "function_in_system": "Step 1 of the SDK permission chain, so it overrides allow rules for all built-in file tools. Contains the agent to its own project and keeps it away from credentials. The deny reasons are returned to the agent as tool feedback and redirect structured edits to the validated MCP tools. Otherwise the agent can read secrets, touch other projects or bypass the script validation by writing JSON directly.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "856-869",
+          "snippet": "if file_path:\n    allowed, deny_reason = self._is_path_allowed(\n        file_path,\n        tool_name,\n        project_cwd,\n    )\n    if not allowed:\n        return {\n            \"hookSpecificOutput\": {\n                \"hookEventName\": \"PreToolUse\",\n                \"permissionDecision\": \"deny\",\n                \"permissionDecisionReason\": deny_reason,\n            },\n        }"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "2234-2240",
+          "snippet": "# 规则 0: 敏感文件强制拒绝\nif self._is_sensitive_path(resolved):\n    return False, f\"访问被拒绝：敏感文件不可访问 ({resolved})\"\n\nif tool_name in self._WRITE_TOOLS:\n    return self._check_write_access(resolved, project_cwd, logical_norm=logical_norm)\nreturn self._check_read_access(resolved, project_cwd)"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "2330-2347",
+          "snippet": "if not any(resolved.is_relative_to(base) for base in bases):\n    return False, (f\"访问被拒绝：不允许写入当前项目目录之外的路径 ({resolved})\")\n\nif any(self._is_protected_project_json(target, bases) for target in (resolved, logical_norm)):\n    return False, (\n        \"访问被拒绝：scripts/*.json 与 project.json 不可用 Write/Edit 直改，\"\n        \"请改用 MCP 工具——剧本编辑走 mcp__arcreel__patch_episode_script / \"\n        \"mcp__arcreel__insert_segment / mcp__arcreel__remove_segment / mcp__arcreel__split_segment，\"\n        \"角色/场景/道具走 mcp__arcreel__patch_project。\"\n    )\n\next = resolved.suffix.lower()\nif ext in self._CODE_EXTENSIONS_FORBIDDEN:\n    return False, (\n        f\"不允许在项目内创建/编辑 {ext} 类型的代码文件。\"\n        \"Write/Edit 应用于数据文件 (.json/.md/.txt 等)；\"\n        \"代码逻辑请通过现有 skill 脚本完成。\"\n    )"
+        }
+      ]
+    },
+    {
+      "name": "OS-level Bash sandbox with whitelist fallback",
+      "what_it_is": "Bash runs inside the SDK sandbox (bwrap on Linux, Seatbelt on macOS) with a network domain allowlist, kernel-level denyRead for sensitive paths, denyWrite for scripts/ and project.json, and allowUnsandboxedCommands=False. When no sandbox is available (native Windows) Bash is removed from allowed_tools and a default-deny can_use_tool callback only permits ffmpeg, ffprobe and skill scripts under .claude/skills/<skill>/scripts/, rejecting shell metacharacters and .. path segments. Every denied tool call returns a hint text to the agent.",
+      "function_in_system": "Wraps all Bash commands the agent issues, the one channel the path hook cannot inspect (e.g. echo > project.json, python -c). Contains the blast radius of arbitrary commands and blocks the agent from asking for an unsandboxed retry. Otherwise a single generated shell command can overwrite protected project files, exfiltrate data or run arbitrary code on the host.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "2125-2137",
+          "snippet": "if not self._sandbox_enabled:\n    return {\"enabled\": False}\nreturn {\n    \"enabled\": True,\n    \"autoAllowBashIfSandboxed\": True,\n    \"allowUnsandboxedCommands\": False,\n    \"network\": {\"allowedDomains\": list(self._DEFAULT_SANDBOX_ALLOWED_DOMAINS)},\n    \"enableWeakerNestedSandbox\": bool(self._in_docker),\n    \"filesystem\": {\n        \"denyRead\": self._build_sensitive_abs_paths(),\n        \"denyWrite\": self._build_protected_json_abs_paths(project_cwd),\n    },\n}"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "706-711",
+          "snippet": "# Windows 回退：sandbox 关闭时把 Bash 系列从 allowed_tools 剥离，\n# 让 _can_use_tool 接管 prefix 白名单匹配（_WINDOWS_BASH_PREFIX_WHITELIST）。\nallowed_tools = list(self.DEFAULT_ALLOWED_TOOLS)\nif not self._sandbox_enabled:\n    bash_tools = set(self._BASH_TOOLS)\n    allowed_tools = [t for t in allowed_tools if t not in bash_tools]"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "2513-2520",
+          "snippet": "if not self._sandbox_enabled and tool_name == \"Bash\":\n    cmd = str((input_data or {}).get(\"command\") or \"\").strip()\n    if self._is_bash_command_whitelisted(cmd):\n        return PermissionResultAllow(updated_input=input_data)\n    if PermissionResultDeny is not None:\n        return PermissionResultDeny(\n            message=self._format_bash_whitelist_deny_message(cmd),\n        )"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "2527-2537",
+          "snippet": "if PermissionResultDeny is not None:\n    reason = getattr(_context, \"decision_reason\", None)  # SDK 0.1.74+\n    reason_line = f\"上游决策原因: {reason}\\n\" if reason else \"\"\n    hint = (\n        f\"未授权的工具调用: {tool_name}\"\n        f\"({json.dumps(input_data, ensure_ascii=False)[:200]})\\n\"\n        f\"{reason_line}\"\n        \"请检查工具名是否正确，以及 file_path / 命令是否触发了 \"\n        \"settings.json 的 deny 规则或 PreToolUse hook（跨项目/cwd 外写/代码扩展名）。\"\n    )\n    return PermissionResultDeny(message=hint)"
+        }
+      ]
+    },
+    {
+      "name": "secret env scrubbing for Bash",
+      "what_it_is": "A PreToolUse hook on Bash rewrites every command to env -u <VAR> ... sh -c '<cmd>', unsetting the Anthropic and other provider credential variables plus any env var whose name matches API_KEY, AUTH_TOKEN, ACCESS_KEY, ACCESS_TOKEN, SECRET_KEY, CREDENTIAL or CLIENT_SECRET.",
+      "function_in_system": "Sits on the Bash tool path when the sandbox is enabled. The SDK subprocess holds real Anthropic credentials and Bash inherits the parent env, so the agent could read keys via env or pass them to generated commands. Otherwise credentials leak into the agent context and transcripts.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "775-781",
+          "snippet": "keys: set[str] = set(ANTHROPIC_ENV_KEYS)\nkeys.update(OTHER_PROVIDER_ENV_KEYS)\nfor name in os.environ:\n    upper = name.upper()\n    if any(pat in upper for pat in cls._SECRET_ENV_NAME_PATTERNS):\n        keys.add(name)\nreturn tuple(sorted(keys))"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "820-830",
+          "snippet": "if not self._sandbox_enabled:\n    return {\"continue_\": True}\n\nwrapped = f\"{self._env_scrub_wrap_prefix()}{shlex.quote(command)}\"\nupdated_input = {**tool_input, \"command\": wrapped}\nreturn {\n    \"hookSpecificOutput\": {\n        \"hookEventName\": \"PreToolUse\",\n        \"updatedInput\": updated_input,\n    },\n}"
+        }
+      ]
+    },
+    {
+      "name": "human-in-the-loop via AskUserQuestion",
+      "what_it_is": "The can_use_tool callback intercepts the AskUserQuestion tool, registers a pending question, pushes it to the frontend stream and awaits the user's answer future; answers are merged into the tool input. On interrupt or session close the pending question is cancelled and the call is denied with interrupt=True. The persona prompt instructs the agent to present options for uncertain creative decisions.",
+      "function_in_system": "Pauses the agent loop inside a tool call until a human decides. Keeps the user in control of creative choices before the agent triggers expensive image and video generation. Otherwise the agent decides alone and wrong assumptions propagate into paid generation runs.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "2451-2465",
+          "snippet": "pending = managed.add_pending_question(payload)\nmanaged.add_message(payload)\n\ntry:\n    answers = await pending.answer_future\nexcept Exception as exc:\n    if PermissionResultDeny is not None:\n        return PermissionResultDeny(\n            message=str(exc) or \"session interrupted by user\",\n            interrupt=True,\n        )\n    raise\nmerged_input = dict(input_data or {})\nmerged_input[\"answers\"] = answers\nreturn PermissionResultAllow(updated_input=merged_input)"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "2503-2509",
+          "snippet": "if normalized_tool == \"askuserquestion\":\n    managed = managed_ref[0] if managed_ref else self.sessions.get(session_id)\n    return await self._handle_ask_user_question(\n        managed,\n        tool_name,\n        input_data,\n    )"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "538-539",
+          "snippet": "- 主动引导用户完成视频创作工作流，而不仅仅被动回答问题\n- 遇到不确定的创作决策时，向用户提出选项并给出建议，而不是自行决定"
+        }
+      ]
+    },
+    {
+      "name": "user interrupt of a running agent turn",
+      "what_it_is": "interrupt_session marks the session as interrupt_requested, cancels pending questions and sends an interrupt command to the SessionActor, which calls client.interrupt() on the SDK client while the response stream is being drained; the result is persisted as status interrupted.",
+      "function_in_system": "External stop signal into the running agent loop, reachable via the assistant API. Lets the user halt an agent that goes in a wrong direction or burns cost. Otherwise a running turn continues until the SDK finishes or max_turns (if set) is hit.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1609-1614",
+          "snippet": "managed.pending_user_echoes.clear()\nmanaged.interrupt_requested = True\nmanaged.cancel_pending_questions(\"session interrupted by user\")\n\ntry:\n    await managed.send_interrupt()"
+        },
+        {
+          "file": "server/agent_runtime/session_actor.py",
+          "lines": "147-157",
+          "snippet": "if next_cmd.type == \"interrupt\":\n    # 无论 client.interrupt() 成败都要唤醒等待者——常规失败时\n    # 把异常挂到 cmd.error 透传给 send_interrupt；CancelledError 等\n    # 控制流异常不拦截，但 finally 仍保证 cmd 被 complete 避免挂死。\n    caught: Exception | None = None\n    try:\n        await client.interrupt()\n    except Exception as exc:\n        caught = exc\n    finally:\n        next_cmd.complete(caught)"
+        }
+      ]
+    },
+    {
+      "name": "session concurrency cap and idle eviction",
+      "what_it_is": "Before a new session starts, _ensure_capacity compares active sessions with agent_max_concurrent_sessions (default 5); at the limit the least recently active non-running session is evicted, and if all sessions are running the request is rejected with SessionCapacityError. Finished sessions are evicted after agent_session_cleanup_delay_seconds (default 300 s, min 10 s), and a patrol loop every 300 s evicts sessions idle for more than twice that delay.",
+      "function_in_system": "Server level, around all agent sessions; each session holds its own Claude SDK subprocess. Bounds memory, process count and concurrent API usage. Otherwise sessions accumulate until the host runs out of resources.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1977-1983",
+          "snippet": "async def _get_max_concurrent(self) -> int:\n    \"\"\"返回最大并发会话数，默认 5。\"\"\"\n    try:\n        async with async_session_factory() as session:\n            svc = ConfigService(session)\n            val = await svc.get_setting(\"agent_max_concurrent_sessions\", \"5\")\n        return max(int(val), 1)"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1993-2003, 2020-2021",
+          "snippet": "if len(active) < max_concurrent:\n    return\n\n# 可淘汰的会话：非 running 状态（idle / completed / error / interrupted）\nevictable = sorted(\n    [s for s in active if s.status != \"running\"],\n    key=lambda s: s.last_activity or 0,\n)\n\nif evictable:\n    victim = evictable[0]\n...\n# 所有会话都在 running → 拒绝\nraise SessionCapacityError(f\"当前有{len(active)}个正在进行的会话，已达到最大上限，请稍后重试\")"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1884-1885, 1891-1894",
+          "snippet": "delay = await self._get_cleanup_delay()\nawait asyncio.sleep(delay)\n...\nif managed.status in (\"idle\", \"interrupted\", \"error\", \"completed\"):\n    # Clear our own reference first so _evict_one's cleanup-task cancel doesn't self-cancel\n    managed._cleanup_task = None\n    await self._evict_one(managed)"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "2033-2034",
+          "snippet": "if activity_age > cleanup_delay * 2:\n    logger.info(\"巡检兜底清理会话 session_id=%s status=%s\", sid, managed.status)"
+        }
+      ]
+    },
+    {
+      "name": "stuck session recovery",
+      "what_it_is": "Session creation waits at most 60 s (_SDK_ID_TIMEOUT) for the SDK session id while also watching the actor task, failing fast with cleanup if the actor dies. Eviction sends a disconnect with a 15 s budget and cancels the actor task on timeout. Sessions still marked running at close are persisted as interrupted, and on service startup all sessions left running in the DB are set to interrupted.",
+      "function_in_system": "Session lifecycle around the agent loop. Handles a hanging SDK subprocess, a crashed actor and server restarts. Otherwise a session stays in status running forever, blocks new messages (send_message rejects running sessions) and keeps holding a concurrency slot.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1356-1363",
+          "snippet": "if not managed.sdk_id_event.is_set():\n    if actor_task is not None and actor_task.done():\n        logger.error(\"session actor 提前退出，未获得 sdk_session_id temp_id=%s\", temp_id)\n    else:\n        logger.error(\"等待 sdk_session_id 超时 temp_id=%s\", temp_id)\n    managed.cancel_pending_questions(\"session creation timed out\")\n    await _cleanup_on_error()\n    raise TimeoutError(\"SDK 会话创建超时\")"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1917-1929",
+          "snippet": "try:\n    await asyncio.wait_for(\n        managed.send_disconnect(),\n        timeout=self._session_actor_shutdown_timeout,\n    )\nexcept TimeoutError:\n    logger.warning(\n        \"actor disconnect 超时，走 cancel 兜底 session_id=%s\",\n        session_id,\n    )\n    if managed.actor is not None:\n        await managed.actor.cancel_and_wait()\n    managed.status = \"interrupted\""
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1955-1960",
+          "snippet": "if managed.resolved_sdk_id is not None:\n    if managed.status == \"running\":\n        managed.status = \"interrupted\"\n    if managed.status in (\"interrupted\", \"error\"):\n        with contextlib.suppress(BaseException):\n            await self.meta_store.update_status(managed.resolved_sdk_id, managed.status)"
+        },
+        {
+          "file": "server/agent_runtime/service.py",
+          "lines": "96-98",
+          "snippet": "async def _interrupt_stale_running_sessions(self) -> None:\n    \"\"\"On service restart, stale running sessions cannot safely resume.\"\"\"\n    interrupted_count = await self.meta_store.interrupt_running_sessions()"
+        }
+      ]
+    },
+    {
+      "name": "usage and cost tracking",
+      "what_it_is": "When a turn finishes, _finalize_turn extracts input, output and prompt-cache tokens plus total_cost_usd from the SDK ResultMessage and records them per project via UsageTracker (start_call/finish_call) with model, provider and success or failed status. MediaGenerator wraps every image, video and audio generation in start_call/finish_call as well; failed calls are recorded as failed at zero cost, costs come from the per-model pricing declarations in CostCalculator, and the ApiCall id is persisted to the task so a resumed video finalizes its pending cost record.",
+      "function_in_system": "Runs after each agent turn and around every media generation. Makes the agent's own LLM spend and the spend of the generations it triggers visible per project and segment. Otherwise the cost of the agent loop and of agent-triggered generation stays invisible and cannot be monitored or budgeted.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1650-1651",
+          "snippet": "try:\n    await self._record_assistant_usage(managed, result_msg, final_status)"
+        },
+        {
+          "file": "server/agent_runtime/session_manager.py",
+          "lines": "1671-1687",
+          "snippet": "call_id = await self.usage_tracker.start_call(\n    project_name=managed.project_name,\n    call_type=\"text\",\n    model=self._resolve_assistant_model(result_msg, managed.assistant_model),\n    prompt=managed.last_user_prompt[:500] if managed.last_user_prompt else None,\n    provider=PROVIDER_ANTHROPIC,\n    user_id=getattr(self, \"_user_id\", DEFAULT_USER_ID),\n)\nawait self.usage_tracker.finish_call(\n    call_id,\n    status=\"success\" if final_status == \"completed\" else \"failed\",\n    input_tokens=input_tokens,\n    output_tokens=output_tokens,\n    usage_tokens=usage_tokens,\n    cost_amount=total_cost_usd,\n    currency=\"USD\" if total_cost_usd is not None else None,\n)"
+        },
+        {
+          "file": "lib/media_generator.py",
+          "lines": "375-383",
+          "snippet": "except Exception as e:\n    # 记录调用失败\n    logger.exception(\"生成失败 (%s)\", \"image\")\n    await self.usage_tracker.finish_call(\n        call_id=call_id,\n        status=\"failed\",\n        error_message=str(e),\n    )\n    raise"
+        },
+        {
+          "file": "lib/db/repositories/usage_repo.py",
+          "lines": "130-132",
+          "snippet": "- cost_amount=None + status='success' → 按 ApiCall 行字段调 cost_calculator\n  算实际 cost（与 generate 路径等价记账，避免视频已生成但 cost=0 永久漏记）\n- cost_amount=None + status='failed' → 走 0.0/USD（失败不计费）"
+        },
+        {
+          "file": "lib/video_backends/base.py",
+          "lines": "104-105",
+          "snippet": "async def persist_api_call_id(task_id: str, call_id: int) -> None:\n    \"\"\"Start_call 拿到 call_id 后立即调：把 ApiCall.id 写入 task.payload。"
+        }
+      ]
+    },
+    {
+      "name": "session-bound MCP tools",
+      "what_it_is": "Each agent session gets its own in-process MCP server built with project_name captured in a ToolContext closure; tools never take a project argument, and script arguments are validated to be bare filenames; path separators and dot segments are rejected.",
+      "function_in_system": "The MCP tools run in the server main process outside the sandbox with DB and provider access. Binding them to one project contains the agent's actions. Otherwise a prompt injection or a hallucinated path can redirect generation and edits to another project or arbitrary files.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/sdk_tools/__init__.py",
+          "lines": "84-86",
+          "snippet": "def build_arcreel_mcp_server(*, project_name: str, projects_root: Path) -> Any:\n    \"\"\"Build the per-session in-process MCP server with all ArcReel tools.\"\"\"\n    ctx = ToolContext(project_name=project_name, projects_root=projects_root)"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/_context.py",
+          "lines": "64-66",
+          "snippet": "    raise ValueError(\"script 文件名不能为空\")\nif \"/\" in value or \"\\\\\" in value or value in (\".\", \"..\"):\n    raise ValueError(f\"script 必须是纯文件名，禁止路径分隔符: {value!r}\")"
+        }
+      ]
+    },
+    {
+      "name": "tool errors returned as observations",
+      "what_it_is": "Every MCP tool handler wraps its body in try/except and returns tool_error(), a text result with is_error=True; batch tools also set is_error when some items failed and list each failure.",
+      "function_in_system": "Return channel from the tools into the agent loop. The agent sees the error text as a tool result and can fix arguments, retry or report to the user. Otherwise an exception aborts the agent turn and the agent has no information to react to.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/sdk_tools/_context.py",
+          "lines": "32-36",
+          "snippet": "def tool_error(name: str, exc: BaseException, log: list[str] | None = None) -> dict[str, Any]:\n    \"\"\"Build the ``{\"is_error\": True}`` response every SDK tool handler emits on failure.\"\"\"\n    msg = f\"{name} 失败: {exc}\"\n    text = \"\\n\".join([msg, *log]) if log else msg\n    return {\"content\": [{\"type\": \"text\", \"text\": text}], \"is_error\": True}"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_storyboards.py",
+          "lines": "222-228",
+          "snippet": "    header = f\"generate_storyboards summary: {len(successes)} succeeded, {len(failures)} failed\"\n    return {\n        \"content\": [{\"type\": \"text\", \"text\": \"\\n\".join([header, *details])}],\n        \"is_error\": bool(failures),\n    }\nexcept Exception as exc:  # noqa: BLE001\n    return tool_error(\"generate_storyboards\", exc)"
+        }
+      ]
+    },
+    {
+      "name": "checkpoint resume for video batches",
+      "what_it_is": "Episode and selection video tools write a checkpoint file (videos/.checkpoint_ep<N>.json or .checkpoint_selected_<hash>.json) with completed ids after every successful video. With resume=true the checkpoint is loaded and reconciled with the mp4 files on disk, and only missing items are enqueued; the failure message tells the agent to rerun with resume=true. The checkpoint is deleted after a complete run.",
+      "function_in_system": "Inside the long-running video generation tools the agent calls. Video generation is the slowest and most expensive step, and batches can fail midway. Otherwise a rerun after a partial failure regenerates and pays for all videos again.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_videos.py",
+          "lines": "93-104",
+          "snippet": "def _save_checkpoint_at(path: Path, completed: list[str], started_at: str, **extra: Any) -> None:\n    path.parent.mkdir(parents=True, exist_ok=True)\n    payload: dict[str, Any] = {\n        \"completed_scenes\": completed,\n        \"started_at\": started_at,\n        \"updated_at\": datetime.now(UTC).isoformat(),\n        **extra,\n    }\n    path.write_text(\n        json.dumps(payload, ensure_ascii=False, indent=2),\n        encoding=\"utf-8\",\n    )"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_videos.py",
+          "lines": "227-236",
+          "snippet": "for idx, item in enumerate(items):\n    item_id = item.get(id_field, item.get(\"scene_id\", f\"item_{idx}\"))\n    if item_id not in completed_scenes:\n        continue\n    video_output = videos_dir / f\"scene_{item_id}.mp4\"\n    if video_output.exists():\n        ordered_paths[idx] = video_output\n        already_done.append(item_id)\n    else:\n        stale_completions.add(item_id)"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_videos.py",
+          "lines": "348-352",
+          "snippet": "if resume:\n    ckpt = _load_checkpoint_at(ckpt_path)\n    if ckpt:\n        completed = ckpt.get(\"completed_scenes\", [])\n        started_at = ckpt.get(\"started_at\", started_at)"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_videos.py",
+          "lines": "546-551",
+          "snippet": "    fallback_relpath=_scene_fallback_relpath,\n    save_fn=lambda: _save_checkpoint_at(ckpt_path, completed, started_at, episode=episode),\n    log=log,\n)\nif failures:\n    raise RuntimeError(f\"{len(failures)} 个视频生成失败（使用 resume=true 续传）\")"
+        }
+      ]
+    },
+    {
+      "name": "generate only missing items",
+      "what_it_is": "When the agent passes no explicit ids, the generation tools select only items that still lack output: storyboards lacking generated_assets.storyboard_image and assets lacking a design image are selected, and video units whose mp4 already exists are skipped.",
+      "function_in_system": "Default selection in the enqueue tools. Makes repeated tool calls idempotent. Otherwise each call regenerates and pays for already finished media.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_storyboards.py",
+          "lines": "90-96",
+          "snippet": "def _select_items(items: list[dict[str, Any]], id_field: str, segment_ids: list[str] | None) -> list[dict[str, Any]]:\n    # ``None`` 和 ``[]`` 含义不同：``None`` = \"不传过滤，默认扫所有缺图项\"；\n    # ``[]`` = \"显式空选择，应当返回空列表交由 handler 报错\"。\n    if segment_ids is not None:\n        wanted = {str(s) for s in segment_ids}\n        return [item for item in items if str(item.get(id_field)) in wanted]\n    return [item for item in items if not item.get(\"generated_assets\", {}).get(\"storyboard_image\")]"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_videos.py",
+          "lines": "359-366",
+          "snippet": "for idx, unit in enumerate(units):\n    unit_id = unit[\"unit_id\"]\n    candidate = output_dir / f\"{unit_id}.mp4\"\n    if candidate.exists() and (reuse_existing is None or reuse_existing(unit)):\n        ordered_paths[idx] = candidate\n        already_done.append(unit_id)\n        if unit_id not in completed:\n            completed.append(unit_id)"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_assets.py",
+          "lines": "61-69",
+          "snippet": "pending = _get_pending(pm, project_name, asset_type)\nresolved = []\nfor item in pending:\n    name = item[\"name\"]\n    desc = assets_dict.get(name, {}).get(\"description\")\n    if not (isinstance(desc, str) and desc.strip()):\n        warnings.append(f\"⚠️  {spec.label_zh} '{name}' 缺少描述，跳过\")\n        continue\n    resolved.append(name)"
+        }
+      ]
+    },
+    {
+      "name": "partial failure isolation in batch tools",
+      "what_it_is": "Invalid items (missing or malformed video_prompt, missing storyboard image, failing TaskSpec validation) are skipped with a warning while the rest of the batch is enqueued; results come back as a per-item success and failure summary, and storyboard failures are persisted to storyboards/generation_failures.json.",
+      "function_in_system": "Inside the batch enqueue tools. Keeps one bad script item from aborting a whole episode batch and gives the agent the exact list of failed ids to fix. Otherwise a single malformed item stops all generation for the batch.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_videos.py",
+          "lines": "141-145",
+          "snippet": "try:\n    prompt = _get_video_prompt(item)\nexcept Exception as exc:  # noqa: BLE001\n    log.append(f\"⚠️  {item_type} {item_id} 的 video_prompt 无效，跳过: {exc}\")\n    continue"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_videos.py",
+          "lines": "200-202",
+          "snippet": "except ValueError as exc:\n    log.append(f\"⚠️  {unit_id} 入队校验未通过，跳过：{exc}\")\n    continue"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_storyboards.py",
+          "lines": "198-208",
+          "snippet": "recorder = _FailureRecorder(project_dir / \"storyboards\")\nsuccesses, failures = await batch_enqueue_and_wait(\n    project_name=ctx.project_name,\n    specs=specs,\n)\n# narration → segment_id / drama → scene_id：``id_field`` 是脚本里\n# 的规范字段名，``\"segment\"`` / ``\"scene\"`` 是对应的资源类型。\nresource_type = \"segment\" if id_field == \"segment_id\" else \"scene\"\nfor f in failures:\n    recorder.record(f.resource_id, resource_type, f.error or \"unknown\")\nrecorder.save()"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/enqueue_storyboards.py",
+          "lines": "222-226",
+          "snippet": "header = f\"generate_storyboards summary: {len(successes)} succeeded, {len(failures)} failed\"\nreturn {\n    \"content\": [{\"type\": \"text\", \"text\": \"\\n\".join([header, *details])}],\n    \"is_error\": bool(failures),\n}"
+        }
+      ]
+    },
+    {
+      "name": "schema-constrained script generation",
+      "what_it_is": "Text model calls that produce script content pass a Pydantic model as response_schema whose duration field is an enum of the video model's supported durations: build_drama_normalized_script_model for drama step 1 (normalize_drama_script) and build_episode_script_model for ad scripts. normalize_drama_script validates the response locally against the same model and raises on JSON or validation errors; empty scenes are rejected and the result is written atomically.",
+      "function_in_system": "Sits at the text generation calls behind the agent's normalize and script generation MCP tools. Constrains durations at the generation layer and catches malformed or out-of-range output at the point of generation; errors return to the agent as tool errors. Otherwise the model picks durations the video model rejects, which fail late in the worker or at the provider API, and invalid step 1 content surfaces only at final script save.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/sdk_tools/text_generation.py",
+          "lines": "302-312",
+          "snippet": "schema = build_drama_normalized_script_model(supported_durations)\ngenerator = await TextGenerator.create(TextTaskType.SCRIPT, project_name=ctx.project_name)\nresult = await generator.generate(\n    TextGenerationRequest(\n        prompt=prompt,\n        response_schema=schema,\n        max_output_tokens=_NORMALIZE_MAX_OUTPUT_TOKENS,\n    ),\n    project_name=ctx.project_name,\n)\ncontent = _parse_normalized_content(result.text, schema)"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/text_generation.py",
+          "lines": "50-60",
+          "snippet": "text = strip_json_code_fences(response_text)\ntry:\n    data = json.loads(text)\nexcept json.JSONDecodeError as e:\n    raise ValueError(f\"step1 规范化内容 JSON 解析失败: {e}\")\nif not isinstance(data, dict):\n    raise ValueError(\"step1 规范化内容结构异常：顶层应为对象 {title, scenes}\")\ntry:\n    return model.model_validate(data).model_dump()\nexcept ValidationError as e:\n    raise ValueError(f\"step1 规范化内容结构校验失败: {e}\") from e"
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/text_generation.py",
+          "lines": "316-325",
+          "snippet": "raw_scenes = content.get(\"scenes\")\nif not isinstance(raw_scenes, list) or not raw_scenes:\n    raise ValueError(\"step1 规范化内容结构异常：scenes 必须是非空的场景对象数组\")\n\ndrafts_dir = project_path / \"drafts\" / f\"episode_{episode}\"\ndrafts_dir.mkdir(parents=True, exist_ok=True)\nstep1_path = drafts_dir / \"step1_normalized_script.json\"\n# step1 真相源须原子写入：复用 atomic_write_json（同目录 tempfile + os.replace），\n# 避免 normalize 中断 / 并发重跑留下半写 JSON 被下游当成损坏草稿。\natomic_write_json(step1_path, content)"
+        },
+        {
+          "file": "lib/script_models.py",
+          "lines": "856-857",
+          "snippet": "def build_episode_script_model(content_mode: str, supported_durations: list[int]) -> type[BaseModel]:\n    \"\"\"构造 ``duration_seconds`` 被 ``supported_durations`` 枚举硬约束的剧集脚本模型。"
+        },
+        {
+          "file": "lib/script_models.py",
+          "lines": "838",
+          "snippet": "多值在 ``model_json_schema()`` 里渲染为 JSON-schema ``enum``、单值渲染为 ``const``，两者都是硬约束。"
+        },
+        {
+          "file": "lib/script_generator.py",
+          "lines": "360",
+          "snippet": "schema = build_episode_script_model(\"ad\", supported)"
+        }
+      ]
+    },
+    {
+      "name": "locked and validated script edits",
+      "what_it_is": "All agent edits of episode scripts go through MCP tools (patch_episode_script, insert/remove/split_segment, patch_episode_meta) that run in ProjectManager.locked_script: a file lock around load, mutate and save, a deep-copied before snapshot, and a no-worse structural validation that rejects a write turning a valid script invalid; exceptions inside the edit skip the write. The edit core rejects patches of id fields and generated_assets, derives stable suffixed ids for inserted and split items and resets their generated_assets.",
+      "function_in_system": "Single write path for scripts, complemented by the access fence that blocks direct Write/Edit on scripts/*.json. Protects against lost updates from concurrent worker write-backs and against structurally broken edits from the agent. Otherwise concurrent writes overwrite each other and malformed scripts reach the generation worker. The id and asset guards keep worker write-backs bound to the correct shot.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/sdk_tools/patch_script.py",
+          "lines": "63-64",
+          "snippet": "with ctx.pm.locked_script(ctx.project_name, script_filename) as script:\n    patch_field(script, item_id, field, value)"
+        },
+        {
+          "file": "lib/project_manager.py",
+          "lines": "653-658",
+          "snippet": "norm = script_filename[len(\"scripts/\") :] if script_filename.startswith(\"scripts/\") else script_filename\nwith self._script_lock(project_name, norm):\n    script = self.load_script(project_name, norm)\n    before = copy.deepcopy(script) if validate else None\n    yield script\n    self._write_script_unlocked(project_name, script, norm, validate=validate, before=before)"
+        },
+        {
+          "file": "lib/project_manager.py",
+          "lines": "565-568",
+          "snippet": "# 结构校验守卫（「不更坏」语义），置于落盘前，避免脏数据潜伏到 worker 执行层才暴露。\nif validate:\n    before_script = self._load_script_or_none(output_path) if isinstance(before, _Unset) else before\n    self._guard_no_worse(before_script, script)"
+        },
+        {
+          "file": "lib/script_editor.py",
+          "lines": "121-124",
+          "snippet": "if parts[0] == \"generated_assets\":\n    # patch 是纯字段 setter，资产生命周期与剧本编辑解耦（见 ADR-0003）。\n    raise ScriptEditError(\"patch_episode_script 不可改 generated_assets；资产的生成/重生是独立的显式动作\")\nif parts[0] in {\"segment_id\", \"scene_id\", \"unit_id\", \"shot_id\"}:"
+        },
+        {
+          "file": "lib/script_editor.py",
+          "lines": "169-172",
+          "snippet": "item = deepcopy(new_item)\nitem[id_field] = _next_suffixed_id(str(after_id), _existing_ids(items, id_field))\nitem[\"generated_assets\"] = {}\nitems.insert(idx + 1, item)"
+        }
+      ]
+    },
+    {
+      "name": "confirmation gate for replanning consumed episodes",
+      "what_it_is": "replan_episodes first checks whether the replan affects episodes that already have step 1 drafts, scripts or media; in that case it executes nothing and returns the affected episodes with the instruction to ask the user, and only a repeated call with confirm_consumed=true applies the replan and marks those episodes stale.",
+      "function_in_system": "Inside the episode planning tool, between agent intent and a destructive state change. Forces a human confirmation before already paid work is invalidated. Otherwise the agent can silently invalidate generated episodes on its own interpretation of user feedback.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "server/agent_runtime/sdk_tools/episode_planning.py",
+          "lines": "73-74",
+          "snippet": "\"波及已消费集（已有 step1/剧本/媒体）时不执行并返回受影响清单，须告知用户、确认后带 \"\n\"confirm_consumed=true 重新调用，这些集会标 stale（产物不删除）。全局性意见（每集体量等）\""
+        },
+        {
+          "file": "server/agent_runtime/sdk_tools/episode_planning.py",
+          "lines": "106-117",
+          "snippet": "planner = await EpisodePlanner.create(ctx.project_path)\nresult = await planner.replan(from_episode, instructions, confirm_consumed=confirm_consumed)\nif isinstance(result, ReplanConfirmationRequired):\n    episodes = \"、\".join(str(num) for num in result.consumed_episodes)\n    return {\n        \"content\": [\n            {\n                \"type\": \"text\",\n                \"text\": (\n                    f\"⚠️ 本次重排会波及已消费集（已有 step1/剧本/媒体产物）：第 {episodes} 集。\"\n                    \"尚未执行任何改动。请把影响范围告知用户；用户确认后带 confirm_consumed=true \"\n                    \"重新调用（这些集将标 stale，产物不删除、重做时沿版本机制替换）。\""
+        }
+      ]
+    },
+    {
+      "name": "context isolation via subagent dispatch",
+      "what_it_is": "The orchestrator prompt keeps the novel source text out of the main agent context: dispatch prompts carry only file paths and key parameters, subagents read the source themselves and return a condensed structured summary.",
+      "function_in_system": "Division of labor between the orchestrator and the Task-dispatched subagents. The orchestrator conversation spans all workflow stages and many user turns, while the source text of one project can be tens of thousands of characters. Keeping bulk content inside short-lived subagent contexts saves main agent context and tokens. Otherwise the long orchestrator session fills its context window with novel text and loses workflow state or triggers compaction.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent_runtime_profile/CLAUDE.narration.md",
+          "lines": "95",
+          "snippet": "| **Subagent（聚焦任务）** | 需要大量上下文或推理分析 → 保护主 agent context | analyze-assets、split-narration-segments |"
+        },
+        {
+          "file": "agent_runtime_profile/CLAUDE.narration.md",
+          "lines": "102",
+          "snippet": "- **小说原文不进入主 agent**：由 subagent 自行读取，主 agent 只传文件路径"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/skills/manga-workflow/SKILL.narration.md",
+          "lines": "12-15",
+          "snippet": "**核心约束**：\n- 小说原文**永远不加载到主 agent context**，由 subagent 自行读取\n- 每次 dispatch 只传**文件路径和关键参数**，不传大块内容\n- 每个 subagent 完成一个聚焦任务就返回，主 agent 负责阶段间衔接"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/agents/analyze-assets.md",
+          "lines": "15",
+          "snippet": "**输出**：完成角色/场景/道具写入后，返回精炼的结构化摘要（不包含原始小说文本）"
+        }
+      ]
+    },
+    {
+      "name": "stage-gate confirmation protocol",
+      "what_it_is": "After every subagent returns, the orchestrator shows the summary to the user and asks via AskUserQuestion whether to continue to the next stage, redo the stage with added change requests or skip it. The batch review of the episode plan may be skipped only when the user explicitly grants full autonomy.",
+      "function_in_system": "Sits at each stage boundary of the orchestrated pipeline (assets, episode plan, step 1, script, sheets, storyboards, videos). Surfaces intermediate results before the next, usually more expensive, stage consumes them and gives the user a structured redo path. Otherwise errors of an early stage (wrong assets, bad segmentation) propagate into paid image and video generation.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent_runtime_profile/.claude/skills/manga-workflow/SKILL.narration.md",
+          "lines": "69-78",
+          "snippet": "## 阶段间确认协议\n\n**每个 subagent 返回后**，主 agent 执行：\n\n1. **展示摘要**：将 subagent 返回的摘要展示给用户\n2. **获取确认**：使用 AskUserQuestion 提供选项：\n   - **继续下一阶段**（推荐）\n   - **重做此阶段**（附加修改要求后重新 dispatch）\n   - **跳过此阶段**\n3. **根据用户选择行动**"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/skills/manga-workflow/SKILL.narration.md",
+          "lines": "113",
+          "snippet": "6. 用户对本批规划满意后进入阶段 3。**用户显式授权全自主时**（如\"直接跑完整个流程不用逐步确认\"），可跳过批级审阅直接继续"
+        }
+      ]
+    },
+    {
+      "name": "state detection for resumable workflow",
+      "what_it_is": "On entry the orchestrator reads project.json and globs the project files, then walks a fixed ordered checklist (asset definitions, episode ledger entry, step 1 file for the current mode combination, script JSON, sheets, storyboards, videos, narration audio) and starts at the first missing item. Episode progress is read from the ledger fields ledger_status and planning_cursor; leftover step1 files of other modes are ignored.",
+      "function_in_system": "Entry point of every orchestrator turn that concerns the workflow (\"continue\", \"next step\"). Derives the current stage from persisted state, so a workflow interrupted by a session end, server restart or failure resumes at the right stage in a fresh session. Otherwise the agent relies on conversation memory, repeats finished and paid stages or skips unfinished ones based on stale or misleading files.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent_runtime_profile/.claude/skills/manga-workflow/SKILL.narration.md",
+          "lines": "45-47",
+          "snippet": "进入工作流后，使用 Read 读取 `project.json`，使用 Glob 检查文件系统。按顺序检查，遇到第一个缺失项即确定当前阶段：\n\n1. characters / scenes / props 中**任一**为空（定义缺失）？ → **阶段 1**"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/skills/manga-workflow/SKILL.narration.md",
+          "lines": "48",
+          "snippet": "分集接续状态**只读账本**：条目的 `ledger_status` 标记每集状态（planned 已规划 / consumed 已消费 / stale 重排后失效需重做 / unanchored 失锚锁定），顶层 `planning_cursor` 标记下一批规划起点；**不要用 Glob 文件名推断集数**（`source/episode_{N}.txt` 只是账本的派生物）"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/skills/manga-workflow/SKILL.narration.md",
+          "lines": "54",
+          "snippet": "只认当前组合对应的那一个文件：目录中出现**其他模式的 `step1_*` 文件**属残留，不作为阶段 3 已完成的依据。"
+        },
+        {
+          "file": "agent_runtime_profile/CLAUDE.narration.md",
+          "lines": "145",
+          "snippet": "工作流支持**灵活入口**：状态检测自动定位到第一个未完成的阶段，支持中断后恢复。"
+        }
+      ]
+    },
+    {
+      "name": "mandatory regeneration of stale artifacts",
+      "what_it_is": "Prompt rules that force regeneration of downstream artifacts whose inputs changed: a modified or re-split step 1 file requires re-running script generation even when the script JSON exists; a patched image_prompt or video_prompt requires regenerating that shot's image or video; an episode with ledger_status stale is redone from step 1.",
+      "function_in_system": "Keeps the chain step 1 file, script JSON and media consistent, since the tools leave derived artifacts untouched when their inputs change. Complements the replan confirmation gate, which marks affected episodes stale. Otherwise the project silently ends up with new prompts next to old images or a new step 1 next to an old script, and the final video contradicts the edited content.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent_runtime_profile/CLAUDE.narration.md",
+          "lines": "28",
+          "snippet": "**改 prompt 必重生**：用 `patch_episode_script` 改了某分镜的 `image_prompt` / `video_prompt` 后，工具不会自动作废旧图/视频，必须紧接着调对应生成工具重新生成该分镜，否则会留下「新 prompt + 旧画面」的陈旧。"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/skills/manga-workflow/SKILL.narration.md",
+          "lines": "133",
+          "snippet": "**中间文件变更必重生剧本 JSON**：阶段 3 的中间文件被修改或重拆后（无论哪种生成模式、无论首次还是重做），即使 `scripts/episode_{N}.json` 已存在，也必须重新执行阶段 4——剧本 JSON 不会自动跟随中间文件更新，跳过会留下「新中间文件 + 旧 JSON」的陈旧组合。"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/skills/manga-workflow/SKILL.narration.md",
+          "lines": "49",
+          "snippet": "3. 目标集 `ledger_status` 为 `stale`（重排后失效——旧 step1/剧本/媒体一律视为失效，即使文件还在也从本阶段起重做，产物沿版本机制替换）"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/agents/normalize-drama-script.md",
+          "lines": "101",
+          "snippet": "**修改必重生 JSON 剧本**：内容修改完成后，若 `scripts/episode_{N}.json` 已存在，旧剧本 **不会自动跟随更新**——主 agent 必须紧接着重新 dispatch `create-episode-script` 重生剧本 JSON，否则留下「新内容 + 旧剧本」的陈旧组合。在返回摘要中明确提示这一点。"
+        }
+      ]
+    },
+    {
+      "name": "structured subagent status reporting",
+      "what_it_is": "Subagents report failures back to the orchestrator in a fixed form: the preprocessing subagents stop and forward the error text when a tool returns is_error: true; generate-assets records a failed command, continues with the remaining commands and ends with one of the statuses DONE, DONE_WITH_CONCERNS, PARTIAL or BLOCKED plus a per-item result table.",
+      "function_in_system": "Error return channel from worker to orchestrator across the Task boundary. The orchestrator only sees the subagent's final message, so the status tells it whether to continue, retry specific items or stop and ask the user. Otherwise failures are hidden in a prose summary, the orchestrator advances on a partial result or one failing item aborts a whole batch.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent_runtime_profile/.claude/agents/generate-assets.md",
+          "lines": "28-32",
+          "snippet": "按主 agent 提供的命令逐条执行：\n- MCP 工具调用（`mcp__arcreel__*`）直接以 tool 形式调用；脚本命令用 Bash 工具运行\n- 如果某条命令失败，**记录错误信息，继续执行后续命令**\n- 不跳过、不自行决定跳过任何命令\n- 不执行主 agent 未列出的额外命令"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/agents/generate-assets.md",
+          "lines": "40-45",
+          "snippet": "返回以下状态之一：\n\n- **DONE**：全部命令执行成功，验证通过\n- **DONE_WITH_CONCERNS**：全部完成但有异常（如生成结果可能存在质量问题）\n- **PARTIAL**：部分成功，部分失败\n- **BLOCKED**：无法执行（前置条件不满足，如缺少 project.json 或依赖文件）"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/agents/split-narration-segments.md",
+          "lines": "50",
+          "snippet": "工具返回 `is_error: true` 时，停止并把错误文本报告给主 agent。"
+        }
+      ]
+    },
+    {
+      "name": "subagent self-verification of outputs",
+      "what_it_is": "After producing an artifact, subagents re-read the written file and check it: create-episode-script verifies valid JSON, the episode and content_mode fields and a non-empty segments, scenes or video_units array; normalize-drama-script checks every scene for its required fields and repairs structural problems with Edit; generate-assets re-reads project.json or the script to confirm the sheet or media fields were updated.",
+      "function_in_system": "Last step inside each subagent before it returns to the orchestrator. Catches silently empty or malformed tool output at the producing stage. Otherwise the orchestrator reports success and the next stage fails on a missing or broken file.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent_runtime_profile/.claude/agents/create-episode-script.md",
+          "lines": "52-58",
+          "snippet": "使用 Read 工具读取生成的 `scripts/episode_{N}.json`，\n确认：\n- 文件存在且为有效 JSON\n- 包含 episode、content_mode 字段\n- reference_video 模式：video_units 数组不为空\n- storyboard / grid + narration：segments 数组不为空\n- storyboard / grid + drama：scenes 数组不为空"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/agents/normalize-drama-script.md",
+          "lines": "78-81",
+          "snippet": "使用 Read 工具读取生成的 `drafts/episode_{N}/step1_normalized_script.json`，\n确认为合法 JSON 且每个场景含 scene_id / duration_seconds / segment_break / characters_in_scene / scenes / props / scene_description / utterances / source_text。\n\n如果结构有问题，直接用 Edit 工具修复。"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/agents/generate-assets.md",
+          "lines": "34-36",
+          "snippet": "### Step 3: 验证结果\n\n按主 agent 指定的验证方式检查生成结果（通常是重新读取 project.json 或剧本 JSON 检查字段更新）。"
+        }
+      ]
+    },
+    {
+      "name": "closed asset vocabulary for subagents",
+      "what_it_is": "Preprocessing subagents may reference only characters, scenes and props already registered in project.json; the three reference arrays are mandatory per segment, and a subagent that needs a new asset reports it to the orchestrator, which triggers asset generation.",
+      "function_in_system": "Constrains the step 1 output that later drives reference image lookup for storyboards and reference videos. Otherwise hallucinated or misspelled asset names reach the generation tools, where they resolve to missing sheets and break consistency or fail the reference_video task.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent_runtime_profile/.claude/agents/split-narration-segments.md",
+          "lines": "79-82",
+          "snippet": "**资产登记**（`characters_in_segment` / `scenes` / `props`）：\n- 列出该片段 `novel_text` 中实际出现（被叙述或对话提及）的已登记角色 / 场景 / 道具\n- 只能引用 project.json 中已登记的名称\n- 三个数组**均必填**：每段都必须给出这三个键，无对应资产时显式写空数组 `[]`（step1 校验拒绝缺字段，不静默补默认值）"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/agents/split-reference-video-units.md",
+          "lines": "138",
+          "snippet": "- `@[名称]` 中的「名称」需出现在 project.json 的 characters / scenes / props 三张表之一；若确实需要新资产，报告给主 agent 要求补资产生成，不要在本 unit 中先发明。"
+        }
+      ]
+    },
+    {
+      "name": "incremental-only asset extraction",
+      "what_it_is": "analyze-assets filters out every asset name that already exists before calling patch_project and lists them as skipped; revising an existing description requires an explicit instruction. patch_project reports added and merged counts separately, and a merge count above zero is to be reported as a filter miss.",
+      "function_in_system": "Guards the asset definitions in project.json when extraction is rerun on new chapters or repeated. Protects descriptions that the user edited by hand, which drive all later sheet generation. Otherwise a rerun silently overwrites curated descriptions with fresh model output.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent_runtime_profile/.claude/agents/analyze-assets.md",
+          "lines": "20",
+          "snippet": "2. **严格增量追加**：已存在的角色/场景/道具**不发给 patch_project 工具**（在调用前过滤掉），在摘要中标注\"已存在，跳过\"。若需要修订已有资产描述，由主 agent 显式指示后再做，不能自行覆盖人工编辑过的字段"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/agents/analyze-assets.md",
+          "lines": "98",
+          "snippet": "- 工具返回值会区分**新增 N 个 / 合并改字段 N 个**——若按 Step 4 过滤策略，合并数应为 0；出现合并数说明过滤遗漏，需在摘要里如实反映"
+        },
+        {
+          "file": "agent_runtime_profile/.claude/skills/manage-project/SKILL.md",
+          "lines": "22-24",
+          "snippet": "经 `mcp__arcreel__patch_project` 工具写入（项目名由 session 绑定，无需传参）。按 table 分别调用，\n每个 entry 以 name 为键 upsert：name 不存在则新增、存在则合并改字段。**修订已有资产描述需用户显式\n意图驱动**（避免静默覆盖人工编辑过的字段）;新增提取由 analyze-assets subagent 负责并默认 skip 已存在的。"
+        }
+      ]
+    },
+    {
+      "name": "face-moderation rejection handling",
+      "what_it_is": "Ad-mode prompt rules for provider rejections of reference images with real faces: plan shots that avoid close-up faces, warn the user in advance, stop retrying on the same provider after a face moderation error and offer two paths (switch provider in settings or recompose the shot); when the face is in the product image itself, ask the user to replace or crop that image.",
+      "function_in_system": "Error handling for a known deterministic provider failure in image and video generation of ad projects. Recognizes that the same request will fail again and redirects to a provider switch or input change. Otherwise the agent retries the rejected request repeatedly, spending time and quota on a request that keeps failing.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent_runtime_profile/CLAUDE.ad.md",
+          "lines": "110, 113-115",
+          "snippet": "部分图像/视频供应商**暂停了含真人面孔的参考图上传**（人脸审核拒绝）。具体哪家受限随政策变动，以实际报错为准：\n...\n- 规划镜头时优先用不依赖真人特写的表达承载氛围：手部/局部与产品互动、背影、剪影、产品特写、空镜\n- 用户确需真人出镜时照常生成；遇到人脸审核类报错不要在同一供应商上反复重试，向用户说明原因并给两条路：在设置页切换到不受限的供应商后重试，或把该镜头改为规避真人特写的构图\n- 人脸在**产品原图或 sheet 里**时改构图无效——产品镜头会自动注入这些参考图，人脸随参考一起送达供应商；此时引导用户更换或裁剪产品原图（去掉人脸部分）后重新上传"
+        }
+      ]
+    },
+    {
+      "name": "billing-safe orphan task recovery on restart",
+      "what_it_is": "When the worker first holds the lease it scans all tasks left in running or cancelling and triages them: cancelling becomes cancelled; running image and audio tasks are failed as [restart_lost]; running video tasks of providers lacking resume support (Grok, Vidu) are failed as [resume_unsupported]; video tasks lacking a stored provider job id are failed as [restart_lost]; only video tasks with a stored job id are handed to a background dispatcher that resumes polling within the video capacity. No orphan is ever resubmitted.",
+      "function_in_system": "Runs at worker start and after a lease takeover, below the agent's generation tools. Handles tasks cut off by a server crash or restart. The explicit rule is to avoid extra provider charges: a request the provider may already have accepted is never sent again. Otherwise orphans either stay in running forever and block the agent's enqueue_and_wait calls, or an automatic requeue pays for the same image or video twice.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/generation_worker.py",
+          "lines": "769-773",
+          "snippet": "async def _handle_orphan_tasks_on_start(self) -> None:\n    \"\"\"重启自愈：扫 running + cancelling 孤儿，按\"是否可安全 resume\"分流。\n\n    原则——**不主动产生额外扣费**：只要 worker 不能确认能接续供应商已收单的 job，\n    就把孤儿标记为失败丢弃，绝不重新提交。"
+        },
+        {
+          "file": "lib/generation_worker.py",
+          "lines": "831-841",
+          "snippet": "# image 任务不持久化 job_id 也无 resume 入口——已提交给供应商的请求无法回收，\n# 主动 requeue 会双重扣费。直接丢弃，等用户决定是否手动重试。\nif media_type == \"image\":\n    logger.warning(\"孤儿 image running → [restart_lost]: %s\", task_id)\n    rows = await self.queue.mark_task_failed(\n        task_id,\n        encode_failure(\"restart_lost_image\"),\n    )\n    if rows == 0:\n        await self.queue.mark_task_cancelled(task_id, cancelled_by=\"user\")\n    continue"
+        },
+        {
+          "file": "lib/generation_worker.py",
+          "lines": "859-860, 868-871",
+          "snippet": "provider_id = task.get(\"provider_id\") or await _extract_provider(task)\nif provider_id in NON_RESUMABLE_VIDEO_PROVIDERS:\n...\n    rows = await self.queue.mark_task_failed(\n        task_id,\n        encode_failure(\"resume_unsupported_provider\", provider_id=provider_id),\n    )"
+        },
+        {
+          "file": "lib/generation_worker.py",
+          "lines": "876-887",
+          "snippet": "job_id = task.get(\"provider_job_id\")\nif not job_id:\n    logger.warning(\"孤儿 running 无 job_id → [restart_lost]: %s\", task_id)\n    rows = await self.queue.mark_task_failed(task_id, encode_failure(\"restart_lost_no_job_id\"))\n    if rows == 0:\n        await self.queue.mark_task_cancelled(task_id, cancelled_by=\"user\")\n    continue\n\n# 收集到 provider 桶，交给后台 dispatcher 受 pool 容量约束分批处理。\n# 顺便把 resolve 出的 provider_id 写回 task dict，dispatcher 路由用。\ntask[\"provider_id\"] = provider_id\nresumable_by_provider.setdefault(provider_id, []).append(task)"
+        }
+      ]
+    },
+    {
+      "name": "provider job id persistence and provider-locked resume",
+      "what_it_is": "Submit-and-poll video backends persist the provider job id to the task row right after submission and before polling (DB write retried 3 times, fail-fast afterwards). The resume path pins the task to its persisted provider by injecting it into the payload, calls backend.resume_video with the stored job id and skips local preconditions (storyboard image, duration check, image backend) that could block an already running provider job; expired jobs are failed as [resume_expired].",
+      "function_in_system": "Makes long-running video generations survive a restart of the worker between submission and completion. Recovers the already paid provider result into the project's assets. Otherwise a restart loses every in-flight video, or a provider change in the project config sends the stored job id to the wrong provider and fails a recoverable task.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/video_backends/base.py",
+          "lines": "82-90",
+          "snippet": "async def _persist_provider_job_id(self, request: VideoGenerationRequest, job_id: str, *, provider: str) -> None:\n    \"\"\"submit 成功后立即调：worker 路径写回 job_id，非 worker 路径（task_id=None）跳过。\n\n    持久化失败抛出（DB 瞬态错误已在 ``persist_provider_job_id`` 内重试 3 次），由 worker\n    finally 兜底 mark_failed —— 保持现有 fail-fast 语义（ADR 0007）。\n    \"\"\"\n    if request.task_id is None:\n        return\n    await persist_provider_job_id(request.task_id, job_id, provider=provider)"
+        },
+        {
+          "file": "lib/generation_worker.py",
+          "lines": "686-697",
+          "snippet": "# 锁定持久化 provider 到 payload（resolver 优先级：payload > project > 默认）。\npersisted_provider_id = task.get(\"provider_id\")\nif persisted_provider_id:\n    payload = task.get(\"payload\")\n    if payload is None:\n        payload = {}\n        task[\"payload\"] = payload\n    is_video = task.get(\"media_type\") == \"video\" or task_type in (\"video\", \"reference_video\")\n    if is_video:\n        payload[\"video_provider\"] = persisted_provider_id\n    else:\n        payload[\"image_provider\"] = persisted_provider_id"
+        },
+        {
+          "file": "lib/generation_worker.py",
+          "lines": "724-728",
+          "snippet": "except ResumeExpiredError as exc:\n    logger.warning(\"resume 已过期 task %s: %s\", task_id, exc)\n    rows = await asyncio.shield(\n        self.queue.mark_task_failed(task_id, encode_failure(\"resume_expired_detail\", detail=str(exc)))\n    )"
+        },
+        {
+          "file": "server/services/resume_executor.py",
+          "lines": "36-37, 105-107",
+          "snippet": "不读 storyboard / reference 本地图片，不调 assert_duration_supported——这些前置\n校验若失败会让本地资产缺失\"卡死\"已经提交给 provider 的 job（变幽灵任务）。\n...\noutput_path, version, _, video_uri = await generator.resume_video_async(\n    job_id=job_id,\n    resource_type=resource_type,"
+        }
+      ]
+    },
+    {
+      "name": "single active worker via DB lease",
+      "what_it_is": "Only the worker that holds the named DB lease claims tasks. The lease has a 10 s TTL and is renewed every 3 s; another process can take it over only after it expires. After losing the lease for more than 3x TTL the worker rescans orphans on reacquisition and skips tasks it still runs itself.",
+      "function_in_system": "Coordinates task execution across server processes and restarts. Guarantees that each queued generation runs in exactly one worker and that orphan recovery never preempts live work. Otherwise two workers claim or resume the same task and the provider bills the same generation twice.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/generation_queue.py",
+          "lines": "60-61",
+          "snippet": "TASK_WORKER_LEASE_TTL_SEC = 10.0\nTASK_WORKER_HEARTBEAT_SEC = 3.0"
+        },
+        {
+          "file": "lib/db/repositories/task_repo.py",
+          "lines": "971-983",
+          "snippet": "# Fast path: renew existing lease only when we own it or it's expired.\nupdate_result = await self.session.execute(\n    update(WorkerLease)\n    .where(\n        WorkerLease.name == name,\n        (WorkerLease.owner_id == owner_id) | (WorkerLease.lease_until <= now_epoch),\n    )\n    .values(\n        owner_id=owner_id,\n        lease_until=lease_until,\n        updated_at=updated_at,\n    )\n)"
+        },
+        {
+          "file": "lib/generation_worker.py",
+          "lines": "441-443",
+          "snippet": "if not self._owns_lease:\n    await asyncio.sleep(self.heartbeat_interval)\n    continue"
+        },
+        {
+          "file": "lib/generation_worker.py",
+          "lines": "805, 809-813",
+          "snippet": "self_active_task_ids = self._slots.active_task_ids()\n...\nfor task in orphans:\n    task_id = task[\"task_id\"]\n    if task_id in self_active_task_ids:\n        logger.info(\"孤儿扫到本进程仍 active 的 task %s，跳过避免 self-preemption\", task_id)\n        continue"
+        }
+      ]
+    },
+    {
+      "name": "per-provider concurrency limits",
+      "what_it_is": "The worker keeps a CapacityTable of limits per provider and media type (defaults image 5, video 3, audio 10; configurable per provider, invalid values fall back to the default) and a SlotTable of running tasks. Providers whose pool is full are excluded in the claim SQL, so their tasks stay queued; a task whose provider does not support its media type fails immediately with a failure code.",
+      "function_in_system": "Throttles the generation calls that the agent's batch tools fan out to third-party media providers. Keeps request rates within provider rate limits and quotas and avoids claim-requeue churn for saturated pools. Otherwise a large episode batch fires all image and video requests at once and runs into rate-limit errors and failed tasks.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "lib/generation_worker.py",
+          "lines": "148-160",
+          "snippet": "default_image = _read_int_env(\"IMAGE_MAX_WORKERS\", 5, minimum=1)\ndefault_video = _read_int_env(\"VIDEO_MAX_WORKERS\", 3, minimum=1)\ndefault_audio = _read_int_env(\"AUDIO_MAX_WORKERS\", 10, minimum=1)\n\nlimits: dict[str, dict[str, int]] = {}\nasync with safe_session_factory() as session:\n    svc = ConfigService(session)\n    all_configs = await svc.get_all_provider_configs()\n    for provider_id, meta in PROVIDER_REGISTRY.items():\n        config = all_configs.get(provider_id, {})\n        image_max = _parse_lane_max(config, \"image_max_workers\", default_image, provider_id)\n        video_max = _parse_lane_max(config, \"video_max_workers\", default_video, provider_id)\n        audio_max = _parse_lane_max(config, \"audio_max_workers\", default_audio, provider_id)"
+        },
+        {
+          "file": "lib/generation_worker.py",
+          "lines": "470-474",
+          "snippet": "return frozenset(\n    pid\n    for pid in self._slots.occupied_providers(media_type)\n    if (cap := self._capacity.get(pid, media_type)) > 0 and not self._slots.has_room(pid, media_type, cap)\n)"
+        },
+        {
+          "file": "lib/db/repositories/task_repo.py",
+          "lines": "207-209",
+          "snippet": "if pool_full_providers:\n    # SQLite/PG 都支持 expanding bindparam：list 形式 + NOT IN (:providers)\n    provider_filter = \"AND (tasks.provider_id IS NULL OR tasks.provider_id NOT IN :providers)\""
+        },
+        {
+          "file": "lib/generation_worker.py",
+          "lines": "500-515",
+          "snippet": "if cap <= 0:\n    # 供应商不支持此媒体类型（容量 ≤ 0），直接失败（与 has_room 守卫一致）\n    logger.warning(\n        \"供应商 %s 不支持 %s 生成，任务 %s 标记失败\",\n        provider_id,\n        media_type,\n        task[\"task_id\"],\n    )\n    await self.queue.mark_task_failed(\n        task[\"task_id\"],\n        encode_failure(\n            \"provider_unsupported_media\",\n            provider_id=provider_id,\n            media_type=media_type,\n        ),\n    )"
+        }
+      ]
+    },
+    {
+      "name": "bounded task wait with worker liveness check",
+      "what_it_is": "enqueue_task_only refuses to enqueue while the worker lease is expired. wait_for_task polls the task status and raises TaskWaitTimeoutError after 3600 s or WorkerOfflineError once the worker lease has been missing for the grace period (at least 20 s, twice the lease TTL).",
+      "function_in_system": "Sits inside the MCP generation tools, which block the agent's tool call until the queued generations finish. Turns a dead or stuck worker into a bounded error that returns to the agent as a tool result. Otherwise an agent turn hangs indefinitely on a task that no worker will ever process.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/generation_queue_client.py",
+          "lines": "41-42",
+          "snippet": "DEFAULT_TASK_WAIT_TIMEOUT_SEC: float | None = 3600.0\nDEFAULT_WORKER_OFFLINE_GRACE_SEC: float = max(20.0, float(TASK_WORKER_LEASE_TTL_SEC) * 2.0)"
+        },
+        {
+          "file": "lib/generation_queue_client.py",
+          "lines": "94-104",
+          "snippet": "now = time.monotonic()\nif timeout is not None and now - start >= timeout:\n    raise TaskWaitTimeoutError(f\"timed out waiting for task '{task_id}' after {timeout:.1f}s\")\n\nif await queue.is_worker_online(name=lease_name):\n    offline_since = None\nelse:\n    if offline_since is None:\n        offline_since = now\n    elif now - offline_since >= offline_grace:\n        raise WorkerOfflineError(f\"queue worker offline while waiting for task '{task_id}'\")"
+        },
+        {
+          "file": "lib/generation_queue_client.py",
+          "lines": "177-178",
+          "snippet": "if not await queue.is_worker_online(name=lease_name):\n    raise WorkerOfflineError(\"queue worker is offline\")"
+        }
+      ]
+    },
+    {
+      "name": "active task deduplication",
+      "what_it_is": "A unique partial index over project, task type, resource id and script file for active statuses (queued, running, cancelling) rejects a second insert; enqueue then returns the existing task id with deduped: True.",
+      "function_in_system": "At the queue entry used by the agent's MCP tools and the WebUI. Makes repeated enqueue requests for the same resource idempotent while a generation is still active, e.g. when the agent retries a tool call or the user clicks twice. Otherwise duplicate tasks generate and pay for the same image or video several times and race on the asset write-back.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/db/repositories/task_repo.py",
+          "lines": "140-163",
+          "snippet": "except IntegrityError:\n    await self.session.rollback()\n    # Unique partial index violation: an active task already exists\n    sf = script_file or \"\"\n    result = await self.session.execute(\n        select(Task)\n        .where(\n            Task.project_name == project_name,\n            Task.task_type == task_type,\n            Task.resource_id == resource_id,\n            func.coalesce(Task.script_file, \"\") == sf,\n            Task.status.in_(ACTIVE_TASK_STATUSES),\n        )\n        .order_by(Task.queued_at.desc())\n        .limit(1)\n    )\n    existing = result.scalar_one_or_none()\n    if existing:\n        return {\n            \"task_id\": existing.task_id,\n            \"status\": existing.status,\n            \"deduped\": True,\n            \"existing_task_id\": existing.task_id,\n        }"
+        },
+        {
+          "file": "lib/generation_queue.py",
+          "lines": "131-134",
+          "snippet": "if not result.get(\"deduped\"):\n    logger.info(\"任务入队 task_id=%s type=%s\", result[\"task_id\"], task_type)\nelse:\n    logger.debug(\"任务去重 task_id=%s\", result[\"task_id\"])"
+        }
+      ]
+    },
+    {
+      "name": "dependency-gated claiming with failure cascade",
+      "what_it_is": "A queued task with a dependency_task_id is claimable only after its dependency has succeeded. When a running task fails, all queued tasks depending on it are recursively marked failed with the message \"blocked by failed dependency <id>: <error>\".",
+      "function_in_system": "Governs chained batches such as storyboards that use the previous frame as reference, enqueued by the agent's batch tools. A failure upstream terminates the downstream chain quickly and reports the root cause per item to the waiting tool. Otherwise dependent tasks wait forever for a dependency that never succeeds, or run with a missing reference and break visual continuity.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/db/repositories/task_repo.py",
+          "lines": "216-224",
+          "snippet": "LEFT JOIN tasks AS dependency\n  ON dependency.task_id = tasks.dependency_task_id\nWHERE tasks.status = 'queued'\n  AND tasks.media_type = :media_type\n  {provider_filter}\n  AND (\n    tasks.dependency_task_id IS NULL\n    OR dependency.status = 'succeeded'\n  )"
+        },
+        {
+          "file": "lib/db/repositories/task_repo.py",
+          "lines": "313-317",
+          "snippet": "affected = await self._mark_failed_running(task_id=task_id, error_message=error_message)\nif affected == 0:\n    return 0\n\nawait self._cascade_failed_queued(task_id=task_id, error_message=error_message)"
+        },
+        {
+          "file": "lib/db/repositories/task_repo.py",
+          "lines": "392-399",
+          "snippet": "cascaded = 0\nfor dep_id in dependent_ids:\n    blocked_message = f\"blocked by failed dependency {task_id}: {error_message}\"\n    affected = await self._mark_failed_queued_dep(task_id=dep_id, error_message=blocked_message)\n    if affected == 0:\n        continue\n    cascaded += affected\n    cascaded += await self._cascade_failed_queued(task_id=dep_id, error_message=blocked_message)"
+        }
+      ]
+    },
+    {
+      "name": "shared retry with exponential backoff and jitter",
+      "what_it_is": "with_retry_async wraps provider calls with up to 3 attempts, backoff 2/4/8 s plus 0-2 s random jitter; it retries ConnectionError, TimeoutError and messages matching transient patterns (429, resource_exhausted, 5xx, timeout). Backends plug in their own predicates (gRPC status codes for Grok, OpenAI error classes, 4 attempts for OpenAI text). Result downloads use a more lenient profile of 5 attempts with 5-40 s backoff, since a failed download wastes no generation quota.",
+      "function_in_system": "Wraps every image, video, audio and text provider call made by the generation worker and the agent's text generation tools. Absorbs transient provider and network failures inside a single task. Otherwise a rate-limit or gateway hiccup fails the task, and the agent sees an avoidable tool error or re-triggers a paid generation.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/retry.py",
+          "lines": "25-31",
+          "snippet": "RETRYABLE_STATUS_PATTERNS = (\n    \"429\",\n    \"resource_exhausted\",\n    \"500\",\n    \"502\",\n    \"503\",\n    \"504\","
+        },
+        {
+          "file": "lib/retry.py",
+          "lines": "43-48",
+          "snippet": "DEFAULT_MAX_ATTEMPTS = 3\nDEFAULT_BACKOFF_SECONDS: tuple[int, ...] = (2, 4, 8)\n\n# 下载阶段重试配置（比生成阶段更宽容，因为下载失败不会浪费生成额度）\nDOWNLOAD_MAX_ATTEMPTS = 5\nDOWNLOAD_BACKOFF_SECONDS: tuple[int, ...] = (5, 10, 20, 40)"
+        },
+        {
+          "file": "lib/retry.py",
+          "lines": "76-83, 95-98",
+          "snippet": "for attempt in range(max_attempts):\n    try:\n        return await func(*args, **kwargs)\n    except Exception as e:\n        is_last = attempt >= max_attempts - 1\n        if is_last or not predicate(e):\n            raise\n        wait_time = _compute_wait(attempt, backoff_seconds)\n...\ndef _compute_wait(attempt: int, backoff_seconds: tuple[int, ...]) -> float:\n    \"\"\"计算第 attempt 次重试的等待时间（含随机抖动）。\"\"\"\n    backoff_idx = min(attempt, len(backoff_seconds) - 1)\n    return backoff_seconds[backoff_idx] + random.uniform(0, 2)"
+        },
+        {
+          "file": "lib/text_backends/openai.py",
+          "lines": "70",
+          "snippet": "@with_retry_async(max_attempts=4, backoff_seconds=(2, 4, 8), retryable_errors=OPENAI_RETRYABLE_ERRORS)"
+        },
+        {
+          "file": "lib/grok_shared.py",
+          "lines": "31-32",
+          "snippet": "def grok_should_retry(exc: Exception) -> bool:\n    \"\"\"Grok 专用重试谓词：精确匹配 gRPC 瞬态状态码，其余回退默认模式匹配。\"\"\""
+        }
+      ]
+    },
+    {
+      "name": "billing-safe submit retry policy",
+      "what_it_is": "Separate retry predicates per request phase. Non-idempotent create/submit POSTs are retried only when the request provably never left the client (connect, pool or proxy errors) or the server returned 408, 425, 429 or 5xx; transport errors after sending (read timeout, broken connection) are converted by submit_post into AmbiguousSubmitError [create_ambiguous], which ends the task. Idempotent polling retries all transport errors and 404; deterministic 4xx and local protocol errors fail fast in every phase.",
+      "function_in_system": "Sits inside the submit, poll and download steps of the HTTP media backends run by the worker. Distinguishes safe retries from retries that could create a second provider job. Otherwise an automatic retry after a lost response creates and bills the same generation twice, and retries on deterministic 4xx errors occupy a worker slot until max_wait.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/video_backends/base.py",
+          "lines": "159-165",
+          "snippet": "if status_code in (408, 425, 429):\n    return True\nif 500 <= status_code <= 599:\n    return True\nif status_code == 404:\n    return retry_not_found\nreturn False"
+        },
+        {
+          "file": "lib/video_backends/base.py",
+          "lines": "188-193",
+          "snippet": "class AmbiguousSubmitError(RuntimeError):\n    \"\"\"create/submit（非幂等的「创建 + 计费」）阶段的歧义态失败。\n\n    请求可能已抵达服务端并已落库 + 已计费，但响应在途丢失（ReadTimeout、写超时、\n    连接中途断开、RemoteProtocolError 等）。此时自动重试会重复建任务 + 重复计费，故\n    不重试、直接终态失败；error_message 带 ``[create_ambiguous]`` 前缀提示运维到供应商侧"
+        },
+        {
+          "file": "lib/video_backends/base.py",
+          "lines": "218-220",
+          "snippet": "if isinstance(exc, httpx.HTTPStatusError):\n    return is_retryable_http_status(exc.response.status_code, retry_not_found=False)\nreturn isinstance(exc, _NOT_SENT_TRANSPORT_ERRORS)"
+        },
+        {
+          "file": "lib/video_backends/base.py",
+          "lines": "275-282",
+          "snippet": "try:\n    resp = await post_fn()\nexcept httpx.RequestError as exc:\n    # 请求确定未送达——连接建立失败（瞬态、可重试）或本地/协议错误（确定性、快速失败）——\n    # 均无重复建任务 / 重复计费风险，原样抛出交 should_retry_submit 分流；不套歧义态。\n    if isinstance(exc, (*_NOT_SENT_TRANSPORT_ERRORS, *_NON_RETRYABLE_LOCAL_ERRORS)):\n        raise\n    raise AmbiguousSubmitError(provider=provider) from exc"
+        }
+      ]
+    },
+    {
+      "name": "bounded polling of provider jobs",
+      "what_it_is": "poll_with_retry queries asynchronous provider jobs at a fixed interval, retries transient poll errors and raises TimeoutError after max_wait. Limits are set per provider: Ark 600 s (3600 s for the flex tier), Gemini 600 s, DashScope and MiniMax max(900 s, 60 s per video second).",
+      "function_in_system": "Runs inside the video (and some image) generation tasks after submission, while the worker holds a provider slot. Turns a provider job that never finishes into a task failure. Otherwise a stuck job blocks its concurrency slot indefinitely and the agent's waiting tool call only ends at the one-hour wait timeout.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/video_backends/base.py",
+          "lines": "336-338",
+          "snippet": "if time.monotonic() - start >= max_wait:\n    raise TimeoutError(f\"{prefix}任务超时（{max_wait:.0f}秒）\")\nawait asyncio.sleep(poll_interval)"
+        },
+        {
+          "file": "lib/video_backends/ark.py",
+          "lines": "215-216",
+          "snippet": "poll_interval = 10 if request.service_tier == \"default\" else 60\nmax_wait_time = 600 if request.service_tier == \"default\" else 3600"
+        },
+        {
+          "file": "lib/video_backends/gemini.py",
+          "lines": "226-227",
+          "snippet": "poll_interval=20,  # 与 Google 官方推荐一致\nmax_wait=600,"
+        },
+        {
+          "file": "lib/video_backends/dashscope.py",
+          "lines": "365-366",
+          "snippet": "def _max_wait(duration_seconds: int) -> float:\n    return max(_MIN_POLL_TIMEOUT_SECONDS, duration_seconds * _POLL_TIMEOUT_PER_SECOND)"
+        }
+      ]
+    },
+    {
+      "name": "structured-output fallback cascade",
+      "what_it_is": "Text backends first request native strict json_schema output. On a schema incompatibility error, or when the returned text fails strict validation against the Pydantic response model (proxies that ignore or loosely apply response_format), the call falls back to Instructor, which parses, validates and re-asks up to 2 times; dict schemas fall back to json_object mode. Token usage of the discarded native call is added to the fallback result. Ark sends models lacking registered structured-output support straight to the fallback path.",
+      "function_in_system": "Sits inside the text generation calls behind the agent's normalize, script generation and episode planning tools. Keeps structured output reliable across many providers and OpenAI-compatible proxies. Otherwise schema-violating JSON reaches downstream Pydantic parsing as a raw ValidationError, or the step fails entirely on providers with partial structured-output support.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/text_backends/openai.py",
+          "lines": "98-101",
+          "snippet": "try:\n    response = await self._client.chat.completions.create(**kwargs)\nexcept Exception as exc:\n    if request.response_schema and _is_schema_error(exc):"
+        },
+        {
+          "file": "lib/text_backends/openai.py",
+          "lines": "121-123, 136-141",
+          "snippet": "if request.response_schema:\n    fallback_reason = _structured_fallback_reason(text, request.response_schema)\n    if fallback_reason:\n...\n        # 这次原生 200 调用已被代理计费，把它的 token 并入降级结果，\n        # 否则 UsageTracker 会系统性漏记这部分真实消耗。\n        if usage:\n            result.input_tokens = (result.input_tokens or 0) + (usage.prompt_tokens or 0)\n            result.output_tokens = (result.output_tokens or 0) + (usage.completion_tokens or 0)\n        return result"
+        },
+        {
+          "file": "lib/text_backends/openai.py",
+          "lines": "221, 225-231",
+          "snippet": "if isinstance(response_schema, type) and issubclass(response_schema, BaseModel):\n...\n    try:\n        response_schema.model_validate_json(text, strict=True)\n    except ValidationError as exc:\n        return f\"返回内容不满足 response_schema（代理可能未强制 schema）：{_summarize_validation_error(exc)}\"\n    return None\nif not _is_valid_json(text):\n    return \"返回非 JSON 内容（代理可能未支持 response_format）\""
+        },
+        {
+          "file": "lib/text_backends/instructor_support.py",
+          "lines": "38-42",
+          "snippet": "result, completion = patched.chat.completions.create_with_completion(\n    model=model,\n    messages=messages,  # type: ignore[arg-type]\n    response_model=response_model,\n    max_retries=max_retries,"
+        },
+        {
+          "file": "lib/text_backends/ark.py",
+          "lines": "59",
+          "snippet": "# 未注册模型不加 STRUCTURED_OUTPUT：宁可走 Instructor 降级也不调用会报错的原生 API"
+        }
+      ]
+    },
+    {
+      "name": "reference payload compression with 413 downgrade",
+      "what_it_is": "Before an image or video request with reference images, MediaGenerator compresses the upload copies to the provider's payload limits (total and per-image bytes). If the provider still answers HTTP 413, the request is rebuilt one step further down a compression ladder, and at the lowest step a ReferencePayloadFloorError is raised.",
+      "function_in_system": "Wraps backend calls for storyboards, assets and reference videos, which attach several character, scene, prop and product sheets. Keeps requests within provider size limits automatically. Otherwise multi-reference generations fail with request-too-large errors that the agent cannot fix through its tools.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/media_generator.py",
+          "lines": "166-173",
+          "snippet": "async def _run_with_reference_compression(\n    self,\n    *,\n    specs: \"list[ReferenceSpec]\",\n    provider_id: str | None,\n    build_and_call: \"Callable[[list[CompressedRef]], Awaitable[Any]]\",\n) -> Any:\n    \"\"\"对参考上传副本做主动压缩 + 预检降档 + 被动 413 兜底，再调用 backend。"
+        },
+        {
+          "file": "lib/media_generator.py",
+          "lines": "195-208",
+          "snippet": "cm = compressed_reference_payload(specs, limits=limits, start_step=step)\nlanded, compressed = await asyncio.to_thread(cm.__enter__)\ntry:\n    return await build_and_call(compressed)\nexcept Exception as e:\n    if not _is_413(e):\n        raise\n    # 从「实际落定档位 landed」续档，而非请求值 step——主动预检可能已因字节超限\n    # 降到 landed>step，必须 landed+1 才严格更小、保证降档单调。\n    if landed < LADDER_STEPS:\n        step = landed + 1\n        continue\n    # 已在地板仍 413 → 耗尽 → 用户可见硬错误（保 413 cause）\n    raise ReferencePayloadFloorError() from e"
+        }
+      ]
+    },
+    {
+      "name": "no-worse guard for project.json asset upserts",
+      "what_it_is": "patch_project upserts characters, scenes and props inside the project file lock. The mutation validates the project payload before and after the change and raises before the atomic write when the change adds any new validation error; pre-existing errors pass. Only description and agent-editable fields are accepted, sheet paths and reference_image are dropped, and the result reports added, merged and dropped fields to the tool.",
+      "function_in_system": "Single agent write path for project.json, complemented by the access fence that blocks direct Write/Edit on it. Protects the asset definitions that drive every sheet, storyboard and video generation, and the diagnostic return tells the agent which fields were ignored. Otherwise the agent can write structurally broken assets or overwrite pipeline-managed sheet paths, and repeatedly retries fields that are silently dropped.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/project_manager.py",
+          "lines": "1747-1748",
+          "snippet": "返回**诊断 dict**（不是 project 元数据）：``added``（新建条目名列表）、``merged``\n（合并已有条目名列表）、``dropped_fields``（被白名单丢弃的非允许字段，{name: [字段名]}）、"
+        },
+        {
+          "file": "lib/project_manager.py",
+          "lines": "1794",
+          "snippet": "allowed_fields = {\"description\", *spec.agent_editable_extra_fields}"
+        },
+        {
+          "file": "lib/project_manager.py",
+          "lines": "1827-1829",
+          "snippet": "def _mutate(project: dict) -> None:\n    validator = DataValidator(str(self.projects_root))\n    before_errors = set(validator.validate_project_payload(project).errors)  # 改前快照"
+        },
+        {
+          "file": "lib/project_manager.py",
+          "lines": "1851, 1858-1860",
+          "snippet": "after_errors = set(validator.validate_project_payload(project).errors)\n...\nnew_errors = after_errors - before_errors\nif new_errors:\n    raise ValueError(\"project.json 结构校验失败: \" + \"; \".join(sorted(new_errors)))"
+        }
+      ]
+    },
+    {
+      "name": "media version history",
+      "what_it_is": "Before a resource is regenerated, the current file is registered as a version if untracked (ensure_current_tracked); every successful generation adds a new version with a copy under versions/, its prompt and metadata (add_version), also after a resumed video. restore_version switches a resource back to an earlier version.",
+      "function_in_system": "Around every image, video and audio write-back in MediaGenerator. Regenerations triggered by the agent keep earlier paid outputs recoverable. Otherwise a regeneration with a worse result overwrites the better, already paid version for good.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/version_manager.py",
+          "lines": "215-219",
+          "snippet": "def ensure_current_tracked(\n    self, resource_type: str, resource_id: str, current_file: Path, prompt: str, **metadata\n) -> int | None:\n    \"\"\"\n    确保“当前文件”至少有一个版本记录"
+        },
+        {
+          "file": "lib/version_manager.py",
+          "lines": "170-172",
+          "snippet": "# 如果有源文件，复制到版本目录\nif source_file and Path(source_file).exists():\n    shutil.copy2(source_file, version_abs_path)"
+        },
+        {
+          "file": "lib/media_generator.py",
+          "lines": "385-386",
+          "snippet": "# 5. 记录新版本\nnew_version = self.versions.add_version("
+        },
+        {
+          "file": "lib/version_manager.py",
+          "lines": "252",
+          "snippet": "def restore_version(self, resource_type: str, resource_id: str, version: int, current_file: Path) -> dict:"
+        }
+      ]
+    },
+    {
+      "name": "manifest-driven agent profile sync",
+      "what_it_is": "The agent profile (.claude/ and the mode-specific CLAUDE.md) is copied into each project under a manifest with sha256 per file, which separates untouched built-in files, user-modified files and user deletions (tombstones). A missing, corrupt, symlinked or mismatched manifest, or a changed content_mode, triggers a full reset from the profile; real I/O errors propagate.",
+      "function_in_system": "Runs when a project is created or synced, before agent sessions load the project settings. Keeps the prompts, subagents and skills each session runs with consistent with the declared profile and the project's content_mode, while preserving deliberate user edits. Otherwise stale or locally corrupted prompt files steer the agent with wrong workflow rules.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lib/profile_manifest.py",
+          "lines": "3-4",
+          "snippet": "把 agent_runtime_profile/.claude/ 和 CLAUDE.md 同步到各项目 {project}/.claude/ +\nCLAUDE.md。manifest + sha256 区分三种状态：未改的内置 skill / 用户修改 / 用户主动删除。"
+        },
+        {
+          "file": "lib/profile_manifest.py",
+          "lines": "317-321",
+          "snippet": "# symlink 形态的 manifest 拒绝信任：``read_bytes`` 会跟 symlink 读外部文件\n# （信息泄露 + 让 sync 基于错误的 manifest 决策）。视同损坏 → 走 reset。\nif path.is_symlink():\n    logger.warning(\"manifest %s is a symlink, refusing to follow; will reset\", path)\n    return None"
+        },
+        {
+          "file": "lib/profile_manifest.py",
+          "lines": "326-327",
+          "snippet": "# 故意不吞 PermissionError / OSError —— 那些是真实 I/O 故障，\n# 静默 reset 会把暂时性问题升级成破坏性覆盖项目内 .claude/CLAUDE.md。"
+        },
+        {
+          "file": "lib/profile_manifest.py",
+          "lines": "424",
+          "snippet": "return {\"source\": \"tombstone\", \"deleted_at\": _now_iso()}"
+        }
+      ]
+    }
+  ]
+}

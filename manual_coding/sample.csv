@@ -1,0 +1,21 @@
+repo,commit,status
+langchain-ai/langgraph,bdb323efbb,included
+HKUDS/DeepTutor,30b92dfe86,included
+AgentEra/Agently,1db342ad6a,included
+pikpikcu/airecon,9a21453459,included
+SWE-agent/mini-swe-agent,d0e3c19fb5,included
+Lynpoint/CyberVerse,c30c4ef8d9,included
+LvcidPsyche/auto-browser,0a1c9484ef,included
+HKUDS/Vibe-Trading,73add97c06,included
+strands-agents/samples,c54e630492,included
+HKUDS/AnyTool,506430fec1,included
+lsdefine/GenericAgent,c25ea7c15c,included
+gptme/gptme,f3bdf806f2,included
+GetStream/Vision-Agents,d93f0b4b4d,included
+jmerelnyc/Photo-agents,6c9d6d6331,excluded: fork of lsdefine/GenericAgent
+bubbuild/bub,a2b638865a,included
+ArcReel/ArcReel,18dada2b94,included
+volcengine/OpenViking,2846bb6e76,included
+ltjed/freephdlabor,b8a9ab1a54,included
+LazyAGI/LazyLLM,2f7eac1513,included
+promptise-com/Foundry,1880faf064,included

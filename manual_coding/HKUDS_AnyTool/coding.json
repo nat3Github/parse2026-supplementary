@@ -1,0 +1,934 @@
+{
+  "repo": "HKUDS/AnyTool",
+  "commit": "506430fec1",
+  "system_type": "framework",
+  "system_type_reason": "Library that plugs a tool-use layer into other agents (AnyTool.execute); not a standalone end-user agent.",
+  "repo_overview": {
+    "summary": "Universal tool-use layer that can be plugged into any agent. AnyTool.execute(task) hands the task to a single GroundingAgent, which first retrieves relevant tools across MCP, shell, GUI and web backends (embedding/keyword ranking plus an LLM filter) and then runs an iterative OpenAI-style function-calling loop until the model emits <COMPLETE> or the iteration cap is reached. A persistent tool-quality manager feeds execution statistics back into tool ranking across runs.",
+    "components": [
+      {
+        "path": "anytool/tool_layer.py",
+        "purpose": "public AnyTool facade: wires LLM client, GroundingClient and agent, execute() entry point, periodic quality evolution"
+      },
+      {
+        "path": "anytool/agents/",
+        "purpose": "GroundingAgent: the iteration loop, message truncation, visual analysis of screenshots, workspace artifact check, final summary"
+      },
+      {
+        "path": "anytool/llm/",
+        "purpose": "LLMClient over litellm: rate limiting, call retry, in-call tool execution, tool-result summarization"
+      },
+      {
+        "path": "anytool/grounding/core/",
+        "purpose": "GroundingClient (providers, sessions, invoke_tool), tool search/ranking, tool quality tracking, security policies and E2B sandbox, tool/session/transport base classes"
+      },
+      {
+        "path": "anytool/grounding/backends/",
+        "purpose": "tool backends: mcp (client, installer, tool cache, transport connectors), shell, gui (Anthropic computer-use client), web"
+      },
+      {
+        "path": "anytool/local_server/",
+        "purpose": "Flask server for server mode, executing shell/GUI actions on a VM or remote machine; health and feature checkers, platform adapters"
+      },
+      {
+        "path": "anytool/platform/",
+        "purpose": "client side for screenshots, recording and system info"
+      },
+      {
+        "path": "anytool/recording/",
+        "purpose": "trajectory, action and video recording plus viewer"
+      },
+      {
+        "path": "anytool/config/",
+        "purpose": "JSON configs (agents, grounding, security, mcp) and loader"
+      },
+      {
+        "path": "anytool/prompts/",
+        "purpose": "system and helper prompts of the GroundingAgent"
+      },
+      {
+        "path": "anytool/utils/",
+        "purpose": "logging, CLI/UI display, telemetry"
+      },
+      {
+        "path": "anytool/__main__.py",
+        "purpose": "CLI entry point with live UI"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "anytool/agents/grounding_agent.py",
+        "lines": "186-187",
+        "snippet": "while current_iteration < max_iterations:\n    current_iteration += 1"
+      },
+      {
+        "file": "anytool/agents/grounding_agent.py",
+        "lines": "213-222",
+        "snippet": "llm_response = await self._llm_client.complete(\n    messages=messages,\n    tools=tools if context.get(\"auto_execute\", True) else None,\n    execute_tools=context.get(\"auto_execute\", True),\n    summary_prompt=None,  # Disabled\n    tool_result_callback=self._visual_analysis_callback\n)\n\n# Update messages with LLM response\nmessages = llm_response[\"messages\"]"
+      },
+      {
+        "file": "anytool/agents/grounding_agent.py",
+        "lines": "290-295",
+        "snippet": "is_complete = GroundingAgentPrompts.TASK_COMPLETE in assistant_content\n\nif is_complete:\n    # Task is complete - LLM generated completion token\n    logger.info(f\"Task completed at iteration {current_iteration} (found {GroundingAgentPrompts.TASK_COMPLETE})\")\n    break"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "self._llm_client.complete(..., tools=tools, execute_tools=True) (grounding_agent.py:213-219) executes the tool calls the model chose in this round.",
+      "consumes_feedback": "messages = llm_response[\"messages\"] (grounding_agent.py:222) carries the tool results into the next iteration's LLM call.",
+      "multi_turn_until_termination": "while current_iteration < max_iterations (grounding_agent.py:186, default 20) runs until the model emits <COMPLETE> (grounding_agent.py:290-295)."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent",
+    "evidence": [
+      {
+        "file": "anytool/tool_layer.py",
+        "lines": "166-172",
+        "snippet": "self._grounding_agent = GroundingAgent(\n    name=\"AnyTool-GroundingAgent\",\n    backend_scope=backend_scope,\n    llm_client=self._llm_client,\n    grounding_client=self._grounding_client,\n    recording_manager=self._recording_manager,\n    system_prompt=self.config.grounding_system_prompt,"
+      },
+      {
+        "file": "anytool/grounding/backends/shell/session.py",
+        "lines": "123, 263, 269-270, 276",
+        "snippet": "self._llm = LLMClient()\n...\nwhile iteration < self.max_steps:\n...\nmessages_text = LLMClient.format_messages_to_text(conversation_history)\nresponse = await self._llm.complete(messages_text)\n...\ncode_info, execution_result = await self._execute_code_from_response(assistant_content)"
+      },
+      {
+        "file": "anytool/grounding/backends/shell/session.py",
+        "lines": "329-334",
+        "snippet": "feedback = self._generate_feedback(execution_result, iteration, last_error)\n\nconversation_history.extend([\n    {\"role\": \"assistant\", \"content\": assistant_content},\n    {\"role\": \"user\", \"content\": feedback}\n])"
+      },
+      {
+        "file": "anytool/grounding/backends/gui/tool.py",
+        "lines": "150, 154, 166-170, 231",
+        "snippet": "for step in range(max_steps):\n...\nscreenshot = await self.connector.get_screenshot()\n...\nplanned_action = await self._plan_next_action(\n    task_description=task_description,\n    screenshot=screenshot,\n    action_history=self.action_history,\n)\n...\nexecution_result = await self._execute_planned_action(planned_action)"
+      }
+    ],
+    "justification": "Hierarchical boss and helper structure. The GroundingAgent (tool_layer.py:166) is the orchestrator: its LLM loop selects tools and delegates sub-tasks as a task description to the shell_agent and gui_agent tools. Each of these helpers is a separate LLM agent with its own system prompt, its own LLM client and its own multi-turn loop: shell_agent writes and runs code for up to 5 steps with execution feedback until TASK_COMPLETED or TASK_FAILED (shell/session.py:123, 263-334), gui_agent observes screenshots, plans and executes actions with its own Anthropic computer-use model for up to max_steps until DONE or FAIL (gui/tool.py:150-231). The helpers report back to the orchestrator as a ToolResult. The remaining LLM calls (LLM tool filter in search, tool-result summarization, visual analysis, deep research distillation) are single-shot helper calls and count as tools.",
+    "verdict_raw": "multi-agent",
+    "subtype": "hierarchical"
+  },
+  "resilience": [
+    {
+      "name": "iteration cap with incomplete status",
+      "what_it_is": "The GroundingAgent loop runs at most max_iterations rounds (15 in config_agents.json, fallback default 20 in AnyToolConfig, overridable per execute() call). Reaching the cap without <COMPLETE> returns status 'incomplete' with a warning and the last assistant message.",
+      "function_in_system": "Outer bound of the agent loop in GroundingAgent.process(). Stops runs where the model never declares completion and caps LLM and tool cost per task, while still returning the partial result to the caller. Otherwise a model that keeps calling tools loops indefinitely.",
+      "activation": "always",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "anytool/config/config_agents.json",
+          "lines": "7",
+          "snippet": "\"max_iterations\": 15,"
+        },
+        {
+          "file": "anytool/tool_layer.py",
+          "lines": "36",
+          "snippet": "grounding_max_iterations: int = 20"
+        },
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "175, 186",
+          "snippet": "max_iterations = context.get(\"max_iterations\", self._max_iterations)\n...\nwhile current_iteration < max_iterations:"
+        },
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "935-941",
+          "snippet": "else:\n    result[\"response\"] = self._extract_last_assistant_message(messages)\n    result[\"status\"] = \"incomplete\"\n    result[\"warning\"] = (\n        f\"Task reached max iterations ({max_iterations}) without completion. \"\n        f\"This may indicate the task needs more steps or clarification.\"\n    )"
+        }
+      ]
+    },
+    {
+      "name": "abort after consecutive empty LLM responses",
+      "what_it_is": "Counter of LLM responses with neither content nor tool calls; the loop breaks after 5 consecutive empty responses, and any response with content or tool calls resets the counter.",
+      "function_in_system": "Inside each iteration of GroundingAgent.process(), right after the LLM call. Detects a stalled model or backend (the log names API issues, rate limiting or overlong context) and ends the run early. Otherwise the agent burns the remaining iterations on empty turns.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "179-180",
+          "snippet": "consecutive_empty_responses = 0  # Track consecutive empty LLM responses\nMAX_CONSECUTIVE_EMPTY = 5  # Exit after this many empty responses"
+        },
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "242-256",
+          "snippet": "if len(assistant_content) > 0:\n    logger.info(f\"Iteration {current_iteration} - Assistant content preview: {repr(assistant_content[:300])}\")\n    consecutive_empty_responses = 0  # Reset counter on valid response\nelse:\n    if not has_tool_calls:\n        consecutive_empty_responses += 1\n        logger.warning(f\"Iteration {current_iteration} - NO tool calls and NO content \"\n                     f\"(empty response {consecutive_empty_responses}/{MAX_CONSECUTIVE_EMPTY})\")\n        \n        if consecutive_empty_responses >= MAX_CONSECUTIVE_EMPTY:\n            logger.error(f\"Exiting due to {MAX_CONSECUTIVE_EMPTY} consecutive empty LLM responses. \"\n                       \"This may indicate API issues, rate limiting, or context too long.\")\n            break\n    else:\n        consecutive_empty_responses = 0  # Reset if we have tool calls"
+        }
+      ]
+    },
+    {
+      "name": "sliding-window message history truncation",
+      "what_it_is": "From iteration 5 on, the token count is estimated as len(json)/4; above 120k estimated tokens the history is cut to all system messages, the first user instruction and the most recent 16 messages (keep_recent=8 rounds).",
+      "function_in_system": "Runs at the start of each iteration before the LLM call in GroundingAgent.process(). Keeps the prompt below the model context limit (the comment names the 200K limit of Claude Sonnet 4.5) and limits per-call token cost on long runs. Otherwise long tool-heavy runs hit a context-length error or become increasingly expensive.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "192-197",
+          "snippet": "if current_iteration >= 5:\n    messages = self._truncate_messages(\n        messages, \n        keep_recent=8,  # 保留最近8轮对话\n        max_tokens_estimate=120000  # Claude Sonnet 4.5 上下文限制是200K，保守使用120K\n    )"
+        },
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "82-86, 104-109",
+          "snippet": "total_text = json.dumps(messages, ensure_ascii=False)\nestimated_tokens = len(total_text) // 4\n\nif estimated_tokens < max_tokens_estimate:\n    return messages\n...\nrecent_messages = conversation_messages[-(keep_recent * 2):] if conversation_messages else []\n\ntruncated = system_messages.copy()\nif user_instruction:\n    truncated.append(user_instruction)\ntruncated.extend(recent_messages)"
+        }
+      ]
+    },
+    {
+      "name": "visual analysis of GUI tool results",
+      "what_it_is": "After each GUI tool call a callback captures a screenshot if the result has none, selects at most 3 key screenshots (first, last, evenly spaced middle), and sends them to a separate vision model call (60s timeout in config) whose text description is appended to the tool result as 'Visual content'. On timeout or error the original result passes through; the LLM can skip the analysis per call via the meta-parameter skip_visual_analysis.",
+      "function_in_system": "Hooked into tool execution as tool_result_callback of LLMClient.complete(), between tool execution and the next agent turn. Makes the effect of GUI actions observable to the agent as compact text and keeps raw images out of the main context. Otherwise the agent acts blind on GUI state and cannot detect failed clicks or wrong screens.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "213-219",
+          "snippet": "llm_response = await self._llm_client.complete(\n    messages=messages,\n    tools=tools if context.get(\"auto_execute\", True) else None,\n    execute_tools=context.get(\"auto_execute\", True),\n    summary_prompt=None,  # Disabled\n    tool_result_callback=self._visual_analysis_callback\n)"
+        },
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "483-488, 495-499",
+          "snippet": "if skip_visual_analysis:\n    return result\n\n# 3. Check if this backend needs visual analysis\nif backend != \"gui\":\n    return result\n...\nif not has_screenshots:\n    try:\n        logger.info(f\"No visual data from {tool_name}, capturing screenshot...\")\n        screenshot_client = ScreenshotClient()\n        screenshot_bytes = await screenshot_client.capture()"
+        },
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "555, 586-602",
+          "snippet": "selected_screenshots = self._select_key_screenshots(screenshots_bytes, max_count=3)\n...\nresponse = await asyncio.wait_for(\n    litellm.acompletion(\n        model=visual_model,\n        messages=[{\n            \"role\": \"user\",\n            \"content\": content\n        }],\n        timeout=self._visual_analysis_timeout\n    ),\n    timeout=self._visual_analysis_timeout + 5\n)\n\nanalysis = response.choices[0].message.content.strip()\n\n# Inject visual analysis into content\noriginal_content = result.content or \"(no text output)\"\nenhanced_content = f\"{original_content}\\n\\n**Visual content**: {analysis}\""
+        },
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "616-618",
+          "snippet": "except asyncio.TimeoutError:\n    logger.warning(f\"Visual analysis timed out for {tool_name}, returning original result\")\n    return result"
+        },
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "295",
+          "snippet": "if param_name == \"skip_visual_analysis\":"
+        }
+      ]
+    },
+    {
+      "name": "workspace artifact check before execution",
+      "what_it_is": "Before the loop the workspace directory is scanned; files whose names appear in the instruction trigger a system-prompt alert telling the model to verify them and mark the task completed if they already satisfy it, otherwise recently modified files or the full file list are injected.",
+      "function_in_system": "Pre-loop step of GroundingAgent.process() that shapes the initial messages. Lets a re-run or resumed task recognize existing outputs and avoid redoing or overwriting finished work. Otherwise the agent regenerates artifacts that already exist, wasting iterations.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "131-133",
+          "snippet": "workspace_info = await self._check_workspace_artifacts(context)\nif workspace_info[\"has_files\"]:\n    context[\"workspace_artifacts\"] = workspace_info"
+        },
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "767-773",
+          "snippet": "file_patterns = re.findall(r'[\"\\']?([a-zA-Z0-9_\\-]+\\.[a-zA-Z0-9]+)[\"\\']?', instruction)\nfor pattern in file_patterns:\n    if pattern in scan_result[\"files\"]:\n        potential_outputs.append(pattern)\n\nif potential_outputs:\n    workspace_info[\"matching_files\"] = potential_outputs"
+        },
+        {
+          "file": "anytool/prompts/grounding_agent_prompts.py",
+          "lines": "204-208",
+          "snippet": "files_str = ', '.join([f\"`{f}`\" for f in matching_files])\nreturn f\"\"\"**Workspace Alert**: Files matching task requirements found: {files_str}\n- Read these files to verify if they satisfy the task\n- If satisfied, mark task as completed\n- If not satisfied, modify or recreate as needed\"\"\""
+        },
+        {
+          "file": "anytool/grounding/backends/shell/session.py",
+          "lines": "246-249",
+          "snippet": "# Before executing, check if task output already exists:\n- Use 'ls -la <directory>' to check for existing files\n- If files exist, read and verify them first before recreating\n- Avoid redundant work - reuse existing valid outputs"
+        }
+      ]
+    },
+    {
+      "name": "per-iteration completion check nudge",
+      "what_it_is": "After every iteration without <COMPLETE>, a system message 'Iteration N complete. Check if task is finished, if yes output <COMPLETE>' is appended; the nudge from the previous iteration is removed first so only one exists.",
+      "function_in_system": "End of each iteration in GroundingAgent.process(), feeding into the next LLM call. Pushes the model to evaluate completion and emit the termination token as soon as the task is done. Otherwise the model keeps acting after the goal is reached and runs into the iteration cap.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "305-316",
+          "snippet": "messages = [\n    msg for msg in messages \n    if not (msg.get(\"role\") == \"system\" and \"Iteration\" in msg.get(\"content\", \"\") and \"complete\" in msg.get(\"content\", \"\"))\n]\n\nguidance_msg = {\n    \"role\": \"system\",\n    \"content\": f\"Iteration {current_iteration} complete. \"\n               f\"Check if task is finished - if yes, output {GroundingAgentPrompts.TASK_COMPLETE}. \"\n               f\"If not, continue with next action.\"\n}\nmessages.append(guidance_msg)"
+        }
+      ]
+    },
+    {
+      "name": "LLM call retry with error-classified backoff and timeout",
+      "what_it_is": "Every LLM call is wrapped in asyncio.wait_for with a 120s timeout and up to 3 attempts (llm_max_retries). Timeouts retry after 1s; rate-limit errors (429, 'rate limit') wait 60s + 30s per attempt to cross the rate-limit window; server overload errors (overloaded, 500-504) use exponential backoff 5s, 10s, 20s capped at 60s; all other errors are re-raised immediately.",
+      "function_in_system": "Wraps litellm.acompletion inside LLMClient.complete(), so it covers every agent turn and the tool-retrieval LLM. Absorbs transient provider failures and hung requests within a single iteration. Otherwise one rate-limit spike or stalled request aborts the whole task run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/tool_layer.py",
+          "lines": "25-26",
+          "snippet": "llm_timeout: float = 120.0\nllm_max_retries: int = 3"
+        },
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "380-399",
+          "snippet": "for attempt in range(self.max_retries):\n    try:\n        # Add timeout to the completion call\n        response = await asyncio.wait_for(\n            litellm.acompletion(**completion_kwargs),\n            timeout=self.timeout\n        )\n        return response\n    except asyncio.TimeoutError:\n        self._logger.error(\n            f\"LLM call timed out after {self.timeout}s (attempt {attempt + 1}/{self.max_retries})\"\n        )\n        last_exception = TimeoutError(f\"LLM call timed out after {self.timeout}s\")\n        if attempt < self.max_retries - 1:\n            # Retry on timeout with shorter delay\n            self._logger.info(f\"Retrying after {self.retry_delay}s delay...\")\n            await asyncio.sleep(self.retry_delay)\n            continue\n        else:\n            raise last_exception"
+        },
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "405-423",
+          "snippet": "is_rate_limit = any(\n    keyword in error_str \n    for keyword in ['rate limit', 'rate_limit', 'too many requests', '429']\n)\n\nis_overloaded = any(\n    keyword in error_str\n    for keyword in ['overloaded', '500', '502', '503', '504', 'internal server error', 'service unavailable']\n)\n\nif attempt < self.max_retries - 1 and (is_rate_limit or is_overloaded):\n    # Determine backoff delay based on error type\n    if is_rate_limit:\n        # Use longer backoff for rate limits to cross rate limit windows\n        backoff_delay = 60 + (attempt * 30)  # 60s, 90s, 120s\n        error_type = \"Rate limit\"\n    else:  # is_overloaded\n        # Use exponential backoff for server errors\n        backoff_delay = min(5 * (2 ** attempt), 60)  # 5s, 10s, 20s, max 60s"
+        }
+      ]
+    },
+    {
+      "name": "client-side rate limiting between LLM calls",
+      "what_it_is": "Enforces a minimum interval (rate_limit_delay) between consecutive LLM API calls by sleeping for the remaining time; default 0.0 disables it.",
+      "function_in_system": "Runs right before each LLM call in LLMClient.complete(). Proactively spaces requests to stay under provider rate limits. Otherwise fast iterations trigger 429 errors and the long rate-limit backoff.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "anytool/tool_layer.py",
+          "lines": "27",
+          "snippet": "llm_rate_limit_delay: float = 0.0"
+        },
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "359-368",
+          "snippet": "if self.rate_limit_delay > 0:\n    current_time = time.time()\n    time_since_last_call = current_time - self._last_call_time\n    \n    if time_since_last_call < self.rate_limit_delay:\n        sleep_time = self.rate_limit_delay - time_since_last_call\n        self._logger.debug(f\"Rate limiting: waiting {sleep_time:.2f}s before next API call\")\n        await asyncio.sleep(sleep_time)\n    \n    self._last_call_time = time.time()"
+        },
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "505-506",
+          "snippet": "# 4. Apply rate limiting\nawait self._rate_limit()"
+        }
+      ]
+    },
+    {
+      "name": "summarization of oversized tool results with truncation fallback",
+      "what_it_is": "Tool results above 200k chars (~50K tokens) are summarized by a separate task-aware LLM call (60s timeout, input pre-truncated to 400k chars, prompt demands preserving numbers, URLs, file paths, IDs); if summarization fails, the result is hard-truncated to 200k chars with a [TRUNCATED] marker.",
+      "function_in_system": "Applied to each tool result when converting it to a tool message in LLMClient.complete(), before it enters the conversation history. Keeps single huge observations (web pages, API dumps) from overflowing the context window, the comment names 'prevent context overflow'. Otherwise one large tool output causes a context-length error or crowds out the task history.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "150-151",
+          "snippet": "DEFAULT_SUMMARIZE_THRESHOLD_CHARS = 200000  # ~50K tokens, lowered from 400K to prevent context overflow\nMAX_TOOL_RESULT_CHARS = 200000  # Fallback truncation limit when summarization fails (~50K tokens)"
+        },
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "167-170",
+          "snippet": "max_input_chars = 400000\nif len(content) > max_input_chars:\n    logger.warning(f\"Pre-truncating content for summarization: {len(content):,} -> {max_input_chars:,} chars\")\n    content = content[:max_input_chars] + f\"\\n\\n[TRUNCATED for summarization: original was {len(content):,} chars]\""
+        },
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "244-252",
+          "snippet": "if original_len > summarize_threshold and enable_summarization:\n    summary = await _summarize_tool_result(text_content, tool_name, task, summarize_model)\n    if summary:\n        text_content = summary\n    elif original_len > MAX_TOOL_RESULT_CHARS:\n        # Fallback: truncate if summarization failed and content is too large\n        truncate_msg = f\"\\n\\n[TRUNCATED: Original content was {original_len:,} chars, showing first {MAX_TOOL_RESULT_CHARS:,}]\"\n        text_content = text_content[:MAX_TOOL_RESULT_CHARS - len(truncate_msg)] + truncate_msg\n        logger.warning(f\"Tool result truncated for '{tool_name}': {original_len:,} -> {len(text_content):,} chars (summarization failed)\")"
+        },
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "327-328",
+          "snippet": "summarize_threshold_chars: int = DEFAULT_SUMMARIZE_THRESHOLD_CHARS,\nenable_tool_result_summarization: bool = True,"
+        }
+      ]
+    },
+    {
+      "name": "tool failures returned to the model as error observations",
+      "what_it_is": "Calls to unknown (hallucinated) tool names and exceptions during tool execution are converted into ToolResult(status=ERROR), rendered as an '[ERROR] ...' tool message and appended to the conversation; the loop continues. The conversion also happens at the provider layer (missing session or exception in the session call) and in BaseTool.arun (handle_errors, on by default).",
+      "function_in_system": "Tool-execution step inside LLMClient.complete(), between the model's tool call and the next agent turn. Contains tool failures to the single call and lets the model see the error and choose another action. Otherwise a failing or nonexistent tool crashes the whole run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "577-581",
+          "snippet": "if tool_name not in tool_map:\n    result = ToolResult(\n        status=ToolStatus.ERROR,\n        error=f\"Tool '{tool_name}' not found\"\n    )"
+        },
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "607-611",
+          "snippet": "except Exception as e:\n    result = ToolResult(\n        status=ToolStatus.ERROR,\n        error=str(e)\n    )"
+        },
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "232-233",
+          "snippet": "if result.is_error:\n    text_content = f\"[ERROR] {result.error or 'unknown error'}\""
+        },
+        {
+          "file": "anytool/grounding/core/provider.py",
+          "lines": "119-128",
+          "snippet": "try:\n    return await session.call_tool(tool_name, parameters)\nexcept Exception as e:\n    logger.error(\"Execute tool error: %s @%s - %s\", tool_name, session_name, e)\n    return ToolResult(\n        status=ToolStatus.ERROR,\n        content=\"\",\n        error=str(e),\n        metadata={\"session_name\": session_name, \"tool_name\": tool_name},\n    )"
+        },
+        {
+          "file": "anytool/grounding/core/tool/base.py",
+          "lines": "151-157",
+          "snippet": "except Exception as e:                    \n    if self.handle_errors:\n        return ToolResult(\n            status=ToolStatus.ERROR,\n            error=str(e),\n            metadata={\"tool\": self.schema.name},\n        )"
+        }
+      ]
+    },
+    {
+      "name": "stripping of hallucinated tool arguments",
+      "what_it_is": "Before invoking a tool, every argument whose name is absent from the tool's JSON schema properties is removed, including the meta-parameter skip_visual_analysis.",
+      "function_in_system": "Last step before tool.invoke() in _execute_tool_call, called from LLMClient.complete(). Tolerates invented or extra parameters in model tool calls so strict tools (e.g. MCP servers validating input) still execute. Otherwise such calls fail on schema validation and cost an extra iteration.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/llm/client.py",
+          "lines": "289-305",
+          "snippet": "if isinstance(schema_params, dict) and \"properties\" in schema_params:\n    valid_params = set(schema_params[\"properties\"].keys())\n\n# Check for invalid parameters\ninvalid_params = []\nfor param_name in list(arguments.keys()):\n    if param_name == \"skip_visual_analysis\":\n        invalid_params.append(param_name)\n        continue\n    \n    # Check if parameter is in the tool's schema\n    if valid_params and param_name not in valid_params:\n        invalid_params.append(param_name)\n\n# Remove invalid parameters\nfor param in invalid_params:\n    arguments.pop(param)"
+        }
+      ]
+    },
+    {
+      "name": "task-driven tool retrieval with layered fallback to the full tool list",
+      "what_it_is": "When more tools are available than max_tools (40 in config_grounding.json), SearchCoordinator selects a task-relevant subset. Non-MCP tools (shell, gui, web) are always kept; only MCP tools are ranked. Above llm_filter_threshold (50) MCP tools an LLM drafts a brief plan and classifies servers into utility tools and domain servers, with the prompt instruction to include a server when in doubt; if the result still exceeds the limit, utility tools are kept and domain tools are ranked into a quota of max(max_tools - utility_count, 5). Below the threshold an LLM appends capability keywords to the query. Ranking is hybrid: BM25 preselects top_k*3, then cosine similarity of bge-small-en-v1.5 embeddings re-ranks. A six-level fallback chain degrades step by step: LLM filter exception to direct ranking, unparsable or empty LLM filter result to all tools as domain, semantic search unavailable to keyword results, keyword search without matches to all tools, search exception to the first max_tools candidates, auto-search exception in GroundingAgent to the full tool list of all backends.",
+      "function_in_system": "Runs before the first LLM call in GroundingAgent.process() and decides which tool schemas enter the prompt. Keeps prompt size and tool-choice noise bounded when many MCP servers are connected. The fallback chain guarantees a non-empty toolset whenever any retrieval step fails. Otherwise an embedding or LLM failure starts the agent without tools, or hundreds of tool schemas fill the context window.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/config/config_grounding.json",
+          "lines": "36-39",
+          "snippet": "\"max_tools\": 40,\n\"search_mode\": \"hybrid\",\n\"enable_llm_filter\": true,\n\"llm_filter_threshold\": 50,"
+        },
+        {
+          "file": "anytool/grounding/core/grounding_client.py",
+          "lines": "705-706",
+          "snippet": "tools_count = len(all_tools)\nneed_search = tools_count > max_tools and task_description is not None"
+        },
+        {
+          "file": "anytool/grounding/core/search_tools.py",
+          "lines": "693-698",
+          "snippet": "# If MCP tools within limit, return all\nif len(mcp_tools) <= max_tools:\n    result = mcp_tools + non_mcp_tools\n    self._query_cache[cache_key] = result\n    self._populate_selected_tools(debug_info, result)\n    return result"
+        },
+        {
+          "file": "anytool/grounding/core/search_tools.py",
+          "lines": "700-705",
+          "snippet": "mcp_count = len(mcp_tools)\nshould_use_llm_filter = (\n    self._llm and \n    self._enable_llm_filter and \n    mcp_count > self._llm_filter_threshold\n)"
+        },
+        {
+          "file": "anytool/grounding/core/search_tools.py",
+          "lines": "407-425",
+          "snippet": "# keyword filter\nkw_top = self._keyword_search(query, tools, top_k * 3)\nif not kw_top:\n    # No keyword matches, try semantic search\n    semantic_results = self._semantic_search(query, tools, top_k)\n    if semantic_results:\n        return semantic_results\n    # Both failed, return top N tools\n    logger.warning(\"Both keyword and semantic search failed, returning top N tools\")\n    return [(t, 0.0) for t in list(tools)[:top_k]]\n\n# semantic ranking on keyword results\nsemantic_results = self._semantic_search(query, [t for t, _ in kw_top], top_k)\nif semantic_results:\n    return semantic_results\n\n# Semantic unavailable, return keyword results\nlogger.debug(\"Semantic search unavailable, using keyword results only\")\nreturn kw_top[:top_k]"
+        },
+        {
+          "file": "anytool/grounding/core/search_tools.py",
+          "lines": "769-773",
+          "snippet": "except Exception as exc:\n    logger.warning(f\"LLM filter failed ({exc}), fallback to direct ranking\")\n    ranked = self._ranker.rank(task_prompt, mcp_tools, top_k=max_tools, mode=SearchMode(mode))\n    self._record_tool_scores(debug_info, ranked, is_selected=True)\n    mcp_result = [t for t, _ in ranked]"
+        },
+        {
+          "file": "anytool/grounding/core/search_tools.py",
+          "lines": "994-997",
+          "snippet": "# Fallback if no match\nif not utility_tools and not domain_tools:\n    logger.warning(f\"LLM filter matched 0 tools, returning all as domain\")\n    return [], tools, llm_filter_info"
+        },
+        {
+          "file": "anytool/grounding/core/grounding_client.py",
+          "lines": "609-613",
+          "snippet": "except Exception as exc:\n    self._logger.error(f\"Tool search failed: {exc}\")\n    # fallback: return top N tools\n    fallback_max = max_tools or self._config.tool_search.max_tools\n    return candidate_tools[:fallback_max]"
+        },
+        {
+          "file": "anytool/agents/grounding_agent.py",
+          "lines": "438-447",
+          "snippet": "except Exception as e:\n    logger.warning(f\"Auto-search tools failed, falling back to full list: {e}\")\n\n# Fallback: fetch all tools (previous behaviour)\nall_tools = []\nfor backend_name in self._backend_scope:\n    try:\n        backend_type = BackendType(backend_name)\n        tools = await grounding_client.list_tools(backend=backend_type)\n        all_tools.extend(tools)"
+        }
+      ]
+    },
+    {
+      "name": "persistent on-disk embedding cache for tool descriptions",
+      "what_it_is": "ToolRanker keeps tool embeddings in a cache keyed by backend, server and tool name and pickles it to embeddings_<model>_v1.pkl. Only tools missing from the cache are embedded, and the file is rewritten after new embeddings are computed. On load the cache version is checked; a version mismatch or load error starts with an empty cache. Persistence is off in the code default and switched on in config_grounding.json.",
+      "function_in_system": "Sits inside the semantic ranking step of tool retrieval. Saves re-embedding the whole tool catalog on every process start, which costs remote embedding API calls and latency or local model inference. Otherwise every run re-embeds all tool descriptions before the agent can start.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/config/config_grounding.json",
+          "lines": "40",
+          "snippet": "\"enable_cache_persistence\": true,"
+        },
+        {
+          "file": "anytool/grounding/core/search_tools.py",
+          "lines": "355-356, 373-375",
+          "snippet": "missing_tools = [t for t in tools_list if self._get_embedding(t) is None]\ncache_updated = False\n...\n# Save to persistent cache if updated\nif cache_updated:\n    self._save_persistent_cache()"
+        },
+        {
+          "file": "anytool/grounding/core/search_tools.py",
+          "lines": "132-149",
+          "snippet": "    # Validate cache version\n    if isinstance(data, dict) and data.get(\"version\") == self.CACHE_VERSION:\n        self._structured_cache = data.get(\"embeddings\", {})\n        self._rebuild_text_index()\n        \n        # Count total embeddings\n        total = sum(\n            len(tools) \n            for backend in self._structured_cache.values() \n            for tools in backend.values()\n        )\n        logger.info(f\"Loaded {total} embeddings from cache: {cache_file}\")\n    else:\n        logger.warning(f\"Cache version mismatch or invalid format, starting fresh\")\n        self._structured_cache = {}\nexcept Exception as exc:\n    logger.warning(f\"Failed to load persistent cache: {exc}\")\n    self._structured_cache = {}"
+        }
+      ]
+    },
+    {
+      "name": "failure-rate penalty in tool ranking from persisted execution history",
+      "what_it_is": "Every tool call through BaseTool.arun records success and latency in a ToolQualityManager, which persists all records to .anytool/tool_quality/records.json after each execution (backup copy, version check on load), so the history carries over across sessions. A tool with at least 3 calls whose success rate over its last 100 executions falls below 0.4 gets a penalty factor 0.3 + (rate/0.4)*0.7, reduced by a further 0.1 per consecutive failure from the third one on (at most 0.3), clamped to [0.2, 1.0]. SearchCoordinator multiplies each selected MCP tool's score by this factor and re-sorts. The re-sort runs on the already truncated result list, so it reorders the tools shown to the model and removes tools only when the LLM filter quota exceeds max_tools. It runs only when tool retrieval is triggered (more than 40 tools). Exceptions caught by handle_errors in arun bypass the recording; failures returned as error ToolResults are counted.",
+      "function_in_system": "Sits at the end of the tool retrieval step before the first LLM call and feeds on outcomes of earlier tool calls, including those of previous runs. Pushes repeatedly failing MCP tools to the back of the tool list the model sees. Otherwise a broken MCP server keeps the same prominence as a working one and the agent spends iterations on it.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/config/config_grounding.json",
+          "lines": "44, 48",
+          "snippet": "\"enabled\": true,\n...\n\"enable_quality_ranking\": true,"
+        },
+        {
+          "file": "anytool/grounding/core/tool/base.py",
+          "lines": "297-299",
+          "snippet": "manager = get_quality_manager()\nif manager:\n    await manager.record_execution(self, result, execution_time_ms)"
+        },
+        {
+          "file": "anytool/grounding/core/quality/store.py",
+          "lines": "80-95",
+          "snippet": "# Backup existing file\nif self._records_file.exists():\n    import shutil\n    shutil.copy(self._records_file, self._backup_file)\n\ndata = {\n    \"version\": self.VERSION,\n    \"global_execution_count\": global_execution_count,\n    \"records\": {\n        key: record.to_dict()\n        for key, record in records.items()\n    }\n}\n\nwith open(self._records_file, \"w\", encoding=\"utf-8\") as f:\n    json.dump(data, f, indent=2, ensure_ascii=False)"
+        },
+        {
+          "file": "anytool/grounding/core/quality/types.py",
+          "lines": "114-134",
+          "snippet": "if self.total_calls < 3:\n    return 1.0\n\nsuccess_rate = self.recent_success_rate\nthreshold = self.PENALTY_THRESHOLD\n\nif success_rate >= threshold:\n    return 1.0\n\n# Linear mapping: penalty = 0.3 + (success_rate / threshold) * 0.7\nbase_penalty = 0.3 + (success_rate / threshold) * 0.7\n\n# Extra penalty for consecutive failures (indicates systematic issues)\nconsec = self.consecutive_failures\nif consec >= 3:\n    # 3 consecutive → extra 0.1, 5 consecutive → extra 0.3\n    extra_penalty = min(0.3, (consec - 2) * 0.1)\n    base_penalty -= extra_penalty\n\n# Clamp to [0.2, 1.0]\nreturn max(0.2, min(1.0, base_penalty))"
+        },
+        {
+          "file": "anytool/grounding/core/quality/manager.py",
+          "lines": "337-346",
+          "snippet": "adjusted = []\nfor tool, semantic_score in tools_with_scores:\n    penalty = self.get_penalty(tool)\n    \n    adjusted_score = semantic_score * penalty\n    \n    adjusted.append((tool, adjusted_score))\n\n# Sort by adjusted score (descending)\nadjusted.sort(key=lambda x: x[1], reverse=True)"
+        },
+        {
+          "file": "anytool/grounding/core/search_tools.py",
+          "lines": "804-810",
+          "snippet": "if self._enable_quality_ranking and self._quality_manager and mcp_result:\n    try:\n        ranked_with_scores = [(t, 1.0) for t in mcp_result]\n        ranked_with_scores = self._quality_manager.adjust_ranking(ranked_with_scores)\n        mcp_result = [t for t, _ in ranked_with_scores]\n    except Exception:\n        pass"
+        }
+      ]
+    },
+    {
+      "name": "command blocklist with interactive user confirmation for shell and Python execution",
+      "what_it_is": "Before every bash script or Python code execution, both shell connectors (local subprocess mode and local_server mode) call SecurityPolicyManager.check_command_allowed. The policy merges the global and the shell backend policy from config_security.json and combines the common blocklist with the entries for the current OS (17 tokens on darwin, e.g. rm, -rf, dd, chmod, 777, passwd, killall). The command is split with shlex.split and blocked on any exact token match. On a match the CLI shows the detected tokens and affected lines and asks the user; only y/yes allows execution, and a prompt exception or EOF on stdin denies it. A denial raises PermissionError, which reaches the model as a tool error. Token matching misses nested commands (bash -c \"rm -rf x\" yields the single token 'rm -rf x') and Python file operations such as shutil.rmtree, matches harmless uses of tokens like root or 777, and code with an unbalanced quote (e.g. a comment containing don't) makes shlex.split raise ValueError inside check().",
+      "function_in_system": "Sits between the model's shell tool call and execution on the host, which is the default setup (shell mode local, no sandbox). Holds destructive system commands for human approval and falls back to denial in headless runs. Otherwise a model-generated rm -rf or dd runs directly on the user's machine.",
+      "activation": "always",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "anytool/config/config_security.json",
+          "lines": "19-20, 34-45",
+          "snippet": "\"blocked_commands\": {\n  \"common\": [\"rm\", \"-rf\", \"shutdown\", \"reboot\", \"poweroff\", \"halt\"],\n...\n  \"darwin\": [\n    \"diskutil\",\n    \"dd\",\n    \"pfctl\",\n    \"launchctl\",\n    \"dscl\",\n    \"chmod\", \"777\",\n    \"chown\", \"root\",\n    \"passwd\",\n    \"killall\",\n    \"pmset\"\n  ],"
+        },
+        {
+          "file": "anytool/config/grounding.py",
+          "lines": "268-272",
+          "snippet": "def get_security_policy(self, backend_type: str) -> SecurityPolicy:\n    global_policy = self.security_policies.get(\"global\", {})\n    backend_policy = self.security_policies.get(\"backend\", {}).get(backend_type.lower(), {})\n    merged_policy = {**global_policy, **backend_policy}\n    return SecurityPolicy.from_dict(merged_policy)"
+        },
+        {
+          "file": "anytool/grounding/core/types.py",
+          "lines": "163-170",
+          "snippet": "if command:\n    if not self.allow_shell_commands:\n        return False\n\n    tokens = [t.lower() for t in shlex.split(command, posix=True)]\n    blocked_set = {b.lower() for b in self.blocked_commands}\n    if any(tok in blocked_set for tok in tokens):\n        return False"
+        },
+        {
+          "file": "anytool/grounding/core/security/policies.py",
+          "lines": "67-74",
+          "snippet": "async def _ask_user(self, message: str) -> bool:\n    \"\"\"If prompt is provided, ask user for confirmation, otherwise default to deny\"\"\"\n    if self._prompt:\n        try:\n            return await self._prompt(message)\n        except Exception:\n            return False\n    return False"
+        },
+        {
+          "file": "anytool/grounding/core/security/policies.py",
+          "lines": "76-80",
+          "snippet": "async def check_command_allowed(self, backend_type: BackendType, command: str) -> bool:\n    policy = self.get_policy(backend_type)\n\n    if policy.check(command=command):\n        return True"
+        },
+        {
+          "file": "anytool/grounding/backends/shell/transport/local_connector.py",
+          "lines": "335-342",
+          "snippet": "if self._security_manager:\n    from anytool.grounding.core.types import BackendType\n    allowed = await self._security_manager.check_command_allowed(\n        BackendType.SHELL, script\n    )\n    if not allowed:\n        logger.error(\"SecurityPolicy blocked bash script execution\")\n        raise PermissionError(\"SecurityPolicy: bash script execution blocked\")"
+        },
+        {
+          "file": "anytool/grounding/backends/shell/transport/connector.py",
+          "lines": "122-127",
+          "snippet": "if self._security_manager:\n    from anytool.grounding.core.types import BackendType\n    allowed = await self._security_manager.check_command_allowed(BackendType.SHELL, code)\n    if not allowed:\n        logger.error(\"SecurityPolicy blocked python code execution\")\n        raise PermissionError(\"SecurityPolicy: python code execution blocked\")"
+        }
+      ]
+    },
+    {
+      "name": "optional E2B cloud sandbox for stdio MCP servers",
+      "what_it_is": "With mcp.sandbox set to true (default false), each stdio MCP server is started inside an E2B cloud VM and exposed via supergateway as SSE on port 3000. Sandbox commands run with a timeout (default 600 s). Connector creation requires the e2b-code-interpreter package and E2B_API_KEY and raises an error when they are missing. Applies only to stdio MCP servers; shell, GUI and web backends run on the host.",
+      "function_in_system": "Sits in the tool execution layer where MCP server connections are created. Isolates third-party MCP server code, which the installer may fetch automatically, from the host. Otherwise every configured MCP server runs with the user's privileges on the user's machine.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "anytool/config/config_grounding.json",
+          "lines": "17",
+          "snippet": "\"sandbox\": false,"
+        },
+        {
+          "file": "anytool/grounding/backends/mcp/provider.py",
+          "lines": "42, 55-59",
+          "snippet": "sandbox = get_config_value(config, \"sandbox\", False)\n...\nif sandbox:\n    sandbox_options = {\n        \"timeout\": timeout,\n        \"sse_read_timeout\": sse_read_timeout,\n    }"
+        },
+        {
+          "file": "anytool/grounding/backends/mcp/config.py",
+          "lines": "84-110",
+          "snippet": "# Sandboxed connector\nelif is_stdio_server(server_config) and sandbox:\n    if not E2B_AVAILABLE:\n        raise ImportError(\n            \"E2B sandbox support not available. Please install e2b-code-interpreter: \"\n            \"'pip install e2b-code-interpreter'\"\n        )\n    \n    # Create E2B sandbox instance\n    _sandbox_options = sandbox_options or {}\n    e2b_sandbox = E2BSandbox(_sandbox_options)\n    \n    # Extract timeout values from sandbox_options or use defaults\n    connector_timeout = _sandbox_options.get(\"timeout\", timeout)\n    connector_sse_timeout = _sandbox_options.get(\"sse_read_timeout\", sse_read_timeout)\n    \n    # Create and return sandbox connector\n    return SandboxConnector(\n        sandbox=e2b_sandbox,\n        command=get_config_value(server_config, \"command\"),\n        args=get_config_value(server_config, \"args\"),\n        env=get_config_value(server_config, \"env\", None),\n        supergateway_command=_sandbox_options.get(\"supergateway_command\", \"npx -y supergateway\"),\n        port=_sandbox_options.get(\"port\", 3000),\n        timeout=connector_timeout,\n        sse_read_timeout=connector_sse_timeout,\n    )"
+        },
+        {
+          "file": "anytool/grounding/core/security/e2b_sandbox.py",
+          "lines": "164-171",
+          "snippet": "self._process = self._sandbox.commands.run(\n    command,\n    envs=envs,\n    timeout=timeout,\n    background=background,\n    on_stdout=on_stdout,\n    on_stderr=on_stderr,\n)"
+        },
+        {
+          "file": "anytool/grounding/backends/mcp/transport/connectors/sandbox.py",
+          "lines": "178-189",
+          "snippet": "# Execute the command in the sandbox\nself.process = await self._sandbox.execute_safe(\n    full_command,\n    envs=self.user_env,\n    timeout=1000 * 60 * 10,  # 10 minutes timeout\n    background=True,\n    on_stdout=self._handle_stdout,\n    on_stderr=self._handle_stderr,\n)\n\n# Wait for the server to be ready\nawait self.wait_for_server_response(self.base_url, timeout=30)"
+        }
+      ]
+    },
+    {
+      "name": "JSON-schema validation of tool arguments with error feedback",
+      "what_it_is": "Before every tool execution BaseTool.arun validates the model-supplied arguments against the tool's JSON schema with jsonschema.validate. A schema violation raises GroundingError('Invalid parameters: <message>'), and arguments passed to a tool that declares no parameters raise ValueError. handle_errors (on by default) turns both into an error ToolResult carrying the concrete violation.",
+      "function_in_system": "Sits between the model's tool call and backend execution. Catches missing required fields and wrong types before any shell, MCP or GUI side effect happens and gives the model a specific, correctable error message. Otherwise malformed arguments reach the backend and fail there with unspecific errors or partial effects.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/grounding/core/tool/base.py",
+          "lines": "140-144",
+          "snippet": "async def arun(self, **kwargs) -> ToolResult:\n    start = time.time()\n    try:\n        self.validate_parameters(kwargs)\n        raw = await self._arun(**kwargs)"
+        },
+        {
+          "file": "anytool/grounding/core/tool/base.py",
+          "lines": "117-125",
+          "snippet": "def validate_parameters(self, params: Dict[str, Any]) -> None:\n    try:\n        self.schema.validate_parameters(params, raise_exc=True)\n    except jsonschema.ValidationError as ve:\n        raise GroundingError(\n            f\"Invalid parameters: {ve.message}\",\n            code=ErrorCode.TOOL_EXECUTION_FAIL,\n            tool_name=self.schema.name,\n        ) from ve"
+        },
+        {
+          "file": "anytool/grounding/core/types.py",
+          "lines": "219-235",
+          "snippet": "# If tool has no parameters defined and no parameters are provided, validation passes\nif not self.parameters and not params:\n    return True\n\n# If tool has no parameters defined but parameters are provided, validation fails\nif not self.parameters and params:\n    if raise_exc:\n        raise ValueError(f\"Tool '{self.name}' does not accept any parameters, but got: {list(params.keys())}\")\n    return False\n\ntry:\n    jsonschema.validate(params, self.parameters)\n    return True\nexcept jsonschema.ValidationError:\n    if raise_exc:\n        raise\n    return False"
+        },
+        {
+          "file": "anytool/grounding/core/tool/base.py",
+          "lines": "50",
+          "snippet": "handle_errors: bool = True) -> None:"
+        }
+      ]
+    },
+    {
+      "name": "MCP session creation retry",
+      "what_it_is": "Creating a connector and initializing an MCP session is attempted up to max_retries=3 times with a fixed retry_interval of 2.0 s (config_grounding.json). MCPDependencyError is re-raised at once and ends the loop.",
+      "function_in_system": "Sits in MCPClient.create_session(), which runs when an MCP server is started for tool discovery or on demand before a tool call. Absorbs transient server start failures, for example a slow first start after a fresh package install. Otherwise one failed start leaves the server and all its tools unavailable for the run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/config/config_grounding.json",
+          "lines": "15-16",
+          "snippet": "\"max_retries\": 3,\n\"retry_interval\": 2.0,"
+        },
+        {
+          "file": "anytool/grounding/backends/mcp/client.py",
+          "lines": "230, 269-285",
+          "snippet": "for attempt in range(1, self.max_retries + 1):\n...\nexcept MCPDependencyError as e:\n    # Don't retry dependency errors - they won't succeed on retry\n    # Error already shown to user by installer, just re-raise\n    logger.debug(f\"Dependency error for server '{server_name}': {type(e).__name__}\")\n    raise\nexcept Exception as e:\n    last_exc = e\n    if attempt == self.max_retries:\n        break\n\n    # Use info level for first attempt (common after fresh install), warning for subsequent\n    log_level = logger.info if attempt == 1 else logger.warning\n    log_level(\n        f\"Failed to create session for server '{server_name}' (attempt {attempt}/{self.max_retries}): {e}, \"\n        f\"retrying in {self.retry_interval} seconds...\"\n    )\n    await asyncio.sleep(self.retry_interval)"
+        }
+      ]
+    },
+    {
+      "name": "MCP tool-call retry with exponential backoff and auto-reconnect",
+      "what_it_is": "MCP tool calls are attempted up to 3 times (DEFAULT_TOOL_CALL_MAX_RETRIES). Errors whose message contains 400, 500, 502, 503 or 504 are retried after tool_call_retry_delay * 2**attempt seconds (1.0 s base). A lost connection triggers a reconnect before the next attempt.",
+      "function_in_system": "Wraps client_session.call_tool() in MCPBaseConnector, below the agent's tool execution step. Absorbs transient server errors and dropped connections of MCP servers. Otherwise each such hiccup surfaces as a failed tool call and costs the agent an iteration.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/grounding/backends/mcp/transport/connectors/base.py",
+          "lines": "21-22",
+          "snippet": "# Default retry settings for tool calls\nDEFAULT_TOOL_CALL_MAX_RETRIES = 3"
+        },
+        {
+          "file": "anytool/grounding/backends/mcp/transport/connectors/base.py",
+          "lines": "228-232",
+          "snippet": "if self.auto_reconnect:\n    logger.debug(\"Connection lost, attempting to reconnect...\")\n    try:\n        await self.connect()\n        logger.debug(\"Reconnection successful\")"
+        },
+        {
+          "file": "anytool/grounding/backends/mcp/transport/connectors/base.py",
+          "lines": "256, 268-285",
+          "snippet": "for attempt in range(self.tool_call_max_retries):\n...\n# Check if the error might be due to connection loss\nif not self.is_connected:\n    logger.warning(f\"Tool call '{name}' failed due to connection loss: {e}\")\n    # Try to reconnect on next iteration\n    continue\n\n# Check for retryable HTTP errors (400, 500, 502, 503, 504)\nis_retryable = any(code in error_str for code in ['400', '500', '502', '503', '504', 'bad request', 'internal server error', 'service unavailable', 'gateway timeout'])\n\nif is_retryable and attempt < self.tool_call_max_retries - 1:\n    delay = self.tool_call_retry_delay * (2 ** attempt)  # Exponential backoff\n    logger.warning(\n        f\"Tool call '{name}' failed with retryable error: {e}, \"\n        f\"retrying in {delay:.1f}s (attempt {attempt + 1}/{self.tool_call_max_retries})\"\n    )\n    await asyncio.sleep(delay)\n    continue"
+        }
+      ]
+    },
+    {
+      "name": "cached MCP tool list with on-demand server start",
+      "what_it_is": "With eager_sessions=false no MCP server is started at initialization. Tool listing reads tool metadata from mcp_tool_cache.json when it exists. A server is started only when one of its tools is actually called (ensure_session / ensure_server_session).",
+      "function_in_system": "Spans provider initialization, tool discovery and tool execution. Saves startup time and processes for the many configured MCP servers the task never uses. Otherwise every run starts all servers before the first step and pays their startup cost and failure risk.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "anytool/config/config_grounding.json",
+          "lines": "19",
+          "snippet": "\"eager_sessions\": false,"
+        },
+        {
+          "file": "anytool/grounding/backends/mcp/provider.py",
+          "lines": "93-94",
+          "snippet": "eager = get_config_value(self.config, \"eager_sessions\", False)\nif eager:"
+        },
+        {
+          "file": "anytool/grounding/backends/mcp/provider.py",
+          "lines": "237-246",
+          "snippet": "if use_cache:\n    cache = get_tool_cache()\n    if cache.has_cache():\n        tools = self._load_tools_from_cache()\n        if tools:\n            logger.info(f\"Loaded {len(tools)} tools from cache (no server startup)\")\n            return tools\n\n# No cache or cache disabled, start servers\nreturn await self._list_tools_live()"
+        },
+        {
+          "file": "anytool/grounding/core/grounding_client.py",
+          "lines": "869-871",
+          "snippet": "if runtime_backend != BackendType.SYSTEM:\n    if not runtime_session or runtime_session not in self._sessions:\n        runtime_session = await self.ensure_session(runtime_backend, runtime_server)"
+        },
+        {
+          "file": "anytool/grounding/backends/mcp/provider.py",
+          "lines": "424-436",
+          "snippet": "if server_name in self._server_sessions:\n    return self._server_sessions[server_name]\n\n# Server not running, start it\nlogger.info(f\"Starting MCP server on-demand: {server_name}\")\ncfg = SessionConfig(\n    session_name=f\"mcp-{server_name}\",\n    backend_type=BackendType.MCP,\n    connection_params={\"server\": server_name},\n)\n\ntry:\n    session = await self.create_session(cfg)"
+        }
+      ]
+    },
+    {
+      "name": "iteration cap in the shell sub-agent",
+      "what_it_is": "The inner LLM loop of the shell_agent tool runs at most max_steps=5 iterations and then returns a ToolResult with status ERROR.",
+      "function_in_system": "Bounds the nested code-writing loop that runs inside a single shell_agent tool call of the GroundingAgent. Limits LLM calls and time spent on one shell task. Otherwise a sub-task that never converges blocks the outer agent indefinitely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/grounding/backends/shell/session.py",
+          "lines": "116",
+          "snippet": "max_steps: int = 5,"
+        },
+        {
+          "file": "anytool/grounding/backends/shell/session.py",
+          "lines": "263",
+          "snippet": "while iteration < self.max_steps:"
+        },
+        {
+          "file": "anytool/grounding/backends/shell/session.py",
+          "lines": "346-351",
+          "snippet": "final_message = f\"Reached maximum steps ({self.max_steps}). Task may be too complex or impossible.\"\nreturn ToolResult(\n    status=ToolStatus.ERROR,\n    content=final_message,\n    metadata={\"tool\": self._name, \"code_history\": code_history}\n)"
+        }
+      ]
+    },
+    {
+      "name": "execution error feedback with repeated-error abort in the shell sub-agent",
+      "what_it_is": "Each execution result is fed back to the sub-agent model as a user message. An error identical to the previous step's error adds the hint 'Same error as previous step. Try a different approach.'; when the identical error occurs again the status check marks the task failed with 'Same error repeated'.",
+      "function_in_system": "Sits between code execution and the next LLM call in the shell_agent loop. Lets the model repair failing code and stops the loop once it is stuck on the same error. Otherwise the sub-agent repeats the failing code until the step cap and returns a less informative failure.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/grounding/backends/shell/session.py",
+          "lines": "329-336",
+          "snippet": "feedback = self._generate_feedback(execution_result, iteration, last_error)\n\nconversation_history.extend([\n    {\"role\": \"assistant\", \"content\": assistant_content},\n    {\"role\": \"user\", \"content\": feedback}\n])\n\nlast_error = execution_result if \"ERROR\" in execution_result else None"
+        },
+        {
+          "file": "anytool/grounding/backends/shell/session.py",
+          "lines": "399-406",
+          "snippet": "def _generate_feedback(self, result: str, iteration: int, last_error: str) -> str:\n    feedback = f\"Step {iteration} result:\\n{result}\\n\\n\"\n\n    if \"ERROR\" in result:\n        if last_error and last_error == result:\n            feedback += \"Same error as previous step. Try a different approach.\\n\"\n        else:\n            feedback += \"Error occurred. Analyze the error and fix it.\\n\""
+        },
+        {
+          "file": "anytool/grounding/backends/shell/session.py",
+          "lines": "459-461",
+          "snippet": "if has_error:\n    if last_error and last_error == execution_result:\n        return {\"completed\": False, \"failed\": True, \"reason\": \"Same error repeated - unable to resolve\"}"
+        }
+      ]
+    },
+    {
+      "name": "abort after three responses without a code block in the shell sub-agent",
+      "what_it_is": "A regex extracts the first python or bash code block from the response. Each response without one increments no_code_counter; at 3 consecutive misses the tool returns ERROR, a response with code resets the counter.",
+      "function_in_system": "Sits after the LLM call in the shell_agent loop. Catches a model that keeps answering in prose. Otherwise those turns silently consume the step budget.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/grounding/backends/shell/session.py",
+          "lines": "362-364",
+          "snippet": "matches = list(self._CODE_RGX.finditer(response))\nif not matches:\n    return None, \"ERROR: No valid code block found\""
+        },
+        {
+          "file": "anytool/grounding/backends/shell/session.py",
+          "lines": "281-291",
+          "snippet": "if execution_result == \"ERROR: No valid code block found\":\n    no_code_counter += 1\n    if no_code_counter >= 3:\n        final_message = f\"Task failed after {iteration} steps: LLM failed to provide code blocks repeatedly\"\n        return ToolResult(\n            status=ToolStatus.ERROR,\n            content=final_message,\n            metadata={\"tool\": self._name, \"code_history\": code_history}\n        )\nelse:\n    no_code_counter = 0"
+        }
+      ]
+    },
+    {
+      "name": "script execution timeout for shell commands",
+      "what_it_is": "Local bash and Python scripts run as subprocesses under asyncio.wait_for with a timeout of 30 s for bash and 90 s for Python (hard-coded tool defaults). A timeout returns an error result with returncode -1.",
+      "function_in_system": "Sits in LocalShellConnector below every code execution of the shell sub-agent. Contains hanging or long-running scripts and hands the timeout to the model as an observation. Otherwise one blocking command stalls the whole run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/grounding/backends/shell/session.py",
+          "lines": "56",
+          "snippet": "async def _arun(self, code: str, timeout: int = 90, working_dir: str | None = None, env: dict | None = None, conda_env: str | None = None):"
+        },
+        {
+          "file": "anytool/grounding/backends/shell/session.py",
+          "lines": "80",
+          "snippet": "async def _arun(self, script: str, timeout: int = 30, working_dir: str | None = None, env: dict | None = None, conda_env: str | None = None):"
+        },
+        {
+          "file": "anytool/grounding/backends/shell/transport/local_connector.py",
+          "lines": "160-162, 174-181",
+          "snippet": "stdout_b, stderr_b = await asyncio.wait_for(\n    proc.communicate(), timeout=timeout\n)\n...\nexcept asyncio.TimeoutError:\n    return {\n        \"status\": \"error\",\n        \"output\": f\"Execution timed out after {timeout} seconds\",\n        \"content\": f\"Execution timed out after {timeout} seconds\",\n        \"error\": \"\",\n        \"returncode\": -1,\n    }"
+        }
+      ]
+    },
+    {
+      "name": "iteration cap in the GUI sub-agent",
+      "what_it_is": "The screenshot-plan-act loop of the gui_agent tool runs at most max_steps iterations (default 50) and then returns ERROR 'Task incomplete after N steps'. The tool description tells the model to choose 15 to 50 steps by task complexity.",
+      "function_in_system": "Bounds the nested vision loop that runs inside a single gui_agent tool call. Limits costly vision LLM calls per GUI task. Otherwise a GUI task that never reaches DONE or FAIL keeps calling the vision model indefinitely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/grounding/backends/gui/tool.py",
+          "lines": "36-41",
+          "snippet": "IMPORTANT - max_steps Parameter Guidelines:\n- Simple tasks (1-2 actions): 15-20 steps\n- Medium tasks (3-5 actions): 25-35 steps  \n- Complex tasks (6+ actions, like web navigation): 35-50 steps\n- When uncertain, prefer larger values (35+) to avoid premature termination\n- Default is 25, but increase for multi-step workflows"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/tool.py",
+          "lines": "71",
+          "snippet": "max_steps: int = 50,"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/tool.py",
+          "lines": "150",
+          "snippet": "for step in range(max_steps):"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/tool.py",
+          "lines": "252-256",
+          "snippet": "# Max steps reached\nreturn ToolResult(\n    status=ToolStatus.ERROR,\n    error=f\"Task incomplete after {max_steps} steps\",\n    metadata={"
+        }
+      ]
+    },
+    {
+      "name": "fixed-interval retry of GUI operations",
+      "what_it_is": "Screenshot capture, pyautogui command execution, accessibility tree and cursor queries are retried up to max_retries=3 times with retry_interval=5.0 s (config_grounding.json). A timeout is raised at once as a RuntimeError and ends the loop.",
+      "function_in_system": "Wraps every desktop operation in LocalGUIConnector and GUIConnector below the GUI sub-agent loop. Absorbs transient capture or execution failures. Otherwise a single failed screenshot ends the GUI task with 'Failed to get screenshot for planning'.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/config/config_grounding.json",
+          "lines": "27-28",
+          "snippet": "\"max_retries\": 3,\n\"retry_interval\": 5.0,"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/transport/local_connector.py",
+          "lines": "95, 103-116",
+          "snippet": "for attempt in range(1, self.retry_times + 1):\n...\nexcept asyncio.TimeoutError as exc:\n    logger.error(\"%s timed out\", operation_name)\n    raise RuntimeError(\n        f\"{operation_name} timed out after {self.timeout} seconds\"\n    ) from exc\nexcept Exception as exc:\n    last_exc = exc\n    if attempt == self.retry_times:\n        break\n    logger.warning(\n        \"%s failed (attempt %d/%d): %s, retrying in %.1f seconds...\",\n        operation_name, attempt, self.retry_times, exc, self.retry_interval,\n    )\n    await asyncio.sleep(self.retry_interval)"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/transport/local_connector.py",
+          "lines": "222",
+          "snippet": "return await self._retry_invoke(\"get_screenshot\", _get)"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/transport/local_connector.py",
+          "lines": "253",
+          "snippet": "return await self._retry_invoke(\"execute_python_command\", _execute)"
+        }
+      ]
+    },
+    {
+      "name": "screenshot history pruning with adaptive reduction on payload errors",
+      "what_it_is": "Before each planner call only the most recent only_n_most_recent_images=3 screenshots are kept in the message history. When the API reports the 25 MB or 413 request limit, the limit is halved (minimum 1) and the history is filtered again before the retry.",
+      "function_in_system": "Sits in AnthropicGUIClient.plan_action() before every vision LLM call of the GUI sub-agent. Keeps request size and token cost bounded as screenshots accumulate. Otherwise long GUI tasks hit the payload limit and every further call fails.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/grounding/backends/gui/config.py",
+          "lines": "64",
+          "snippet": "\"only_n_most_recent_images\": user_config.get(\"only_n_most_recent_images\", 3),"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/anthropic_client.py",
+          "lines": "218-227",
+          "snippet": "# Filter images BEFORE adding new screenshot to control message size\n# This is critical to avoid exceeding the 25MB API limit\nimage_truncation_threshold = 10\nif self.only_n_most_recent_images and len(self.messages) > 1:\n    # Reserve 1 slot for the screenshot we're about to add\n    maybe_filter_to_n_most_recent_images(\n        self.messages,\n        max(1, self.only_n_most_recent_images - 1),\n        min_removal_threshold=1,  # More aggressive filtering\n    )"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/anthropic_client.py",
+          "lines": "318-333",
+          "snippet": "# Handle 25MB payload limit error (including HTTP 413)\nif (\"25000000\" in error_msg or \n    \"Member must have length less than or equal to\" in error_msg or \n    \"request_too_large\" in error_msg or \n    \"413\" in str(e)):\n    logger.warning(\"Detected 25MB limit error, reducing image count\")\n    current_count = self.only_n_most_recent_images\n    new_count = max(1, current_count // 2)\n    self.only_n_most_recent_images = new_count\n\n    maybe_filter_to_n_most_recent_images(\n        self.messages,\n        new_count,\n        min_removal_threshold=1,  # Aggressive filtering when hitting limit\n    )\n    logger.info(f\"Image count reduced from {current_count} to {new_count}\")"
+        }
+      ]
+    },
+    {
+      "name": "prompt caching in the GUI planner",
+      "what_it_is": "With enable_prompt_caching=True (constructor default) the prompt-caching beta flag is set, the system prompt gets an ephemeral cache_control and cache breakpoints are placed on the 3 most recent user turns.",
+      "function_in_system": "Applied to every request of the GUI sub-agent, whose history grows by one screenshot turn per step. Reuses the cached prefix across steps and lowers cost and latency. Otherwise the full history is billed again on every step.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/grounding/backends/gui/anthropic_client.py",
+          "lines": "68",
+          "snippet": "enable_prompt_caching: bool = True,"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/anthropic_client.py",
+          "lines": "257-261",
+          "snippet": "# Enable prompt caching if supported and enabled\nif self.enable_prompt_caching:\n    betas.append(PROMPT_CACHING_BETA_FLAG)\n    inject_prompt_caching(self.messages)\n    system[\"cache_control\"] = {\"type\": \"ephemeral\"}  # type: ignore"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/anthropic_utils.py",
+          "lines": "117-126",
+          "snippet": "breakpoints_remaining = 3\nfor message in reversed(messages):\n    if message[\"role\"] == \"user\" and isinstance(\n        content := message[\"content\"], list\n    ):\n        if breakpoints_remaining:\n            breakpoints_remaining -= 1\n            # Use type ignore to bypass TypedDict check until SDK types are updated\n            content[-1][\"cache_control\"] = BetaCacheControlEphemeralParam(  # type: ignore\n                {\"type\": \"ephemeral\"}"
+        }
+      ]
+    },
+    {
+      "name": "GUI planner API retry with backup key failover",
+      "what_it_is": "Planner calls are retried up to 10 times with a 5 s pause (API_RETRY_TIMES, API_RETRY_INTERVAL), on top of the SDK's own max_retries=4. When all attempts fail, one call is made with ANTHROPIC_API_KEY_BACKUP if it is set; otherwise the planner returns FAIL.",
+      "function_in_system": "Wraps the vision LLM call inside each GUI sub-agent step. Absorbs API outages and key-level failures such as exhausted quota. Otherwise an API error ends the GUI task at the current step.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/grounding/backends/gui/anthropic_client.py",
+          "lines": "41-43",
+          "snippet": "# API retry configuration\nAPI_RETRY_TIMES = 10\nAPI_RETRY_INTERVAL = 5  # seconds"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/anthropic_client.py",
+          "lines": "144",
+          "snippet": "return Anthropic(api_key=key, max_retries=4)"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/anthropic_client.py",
+          "lines": "300-302, 335-338",
+          "snippet": "for attempt in range(API_RETRY_TIMES):\n    try:\n        response = client.beta.messages.create(\n...\nif attempt < API_RETRY_TIMES - 1:\n    time.sleep(API_RETRY_INTERVAL)\nelse:\n    raise"
+        },
+        {
+          "file": "anytool/grounding/backends/gui/anthropic_client.py",
+          "lines": "343-362",
+          "snippet": "# Try backup API key if available\nif self.backup_api_key:\n    logger.warning(\"Retrying with backup API key...\")\n    try:\n        backup_client = self._create_client(self.backup_api_key)\n        response = backup_client.beta.messages.create(\n            max_tokens=self.max_tokens,\n            messages=self.messages,\n            model=model_name,\n            system=[system],\n            tools=tools,\n            betas=betas,\n            extra_body=extra_body\n        )\n        logger.info(\"Successfully used backup API key\")\n    except Exception as backup_e:\n        logger.error(f\"Backup API key also failed: {backup_e}\")\n        return None, [\"FAIL\"]\nelse:\n    return None, [\"FAIL\"]"
+        }
+      ]
+    },
+    {
+      "name": "LLM distillation of deep research results",
+      "what_it_is": "The full answer of perplexity/sonar-deep-research is passed to a second LLM call that condenses it into a 400 to 600 word knowledge-dense summary, which is returned as the tool result.",
+      "function_in_system": "Sits inside the deep_research_agent tool between the web research call and the observation returned to the GroundingAgent. Keeps long research reports out of the agent context. Otherwise the raw report fills the message history of later iterations.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "anytool/grounding/backends/web/session.py",
+          "lines": "201-206",
+          "snippet": "completion = await self._session.web_connector.client.chat.completions.create(\n    model=\"perplexity/sonar-deep-research\",\n    messages=[{\"role\": \"user\", \"content\": query}]\n)\n\nfull_answer = completion.choices[0].message.content"
+        },
+        {
+          "file": "anytool/grounding/backends/web/session.py",
+          "lines": "212-215",
+          "snippet": "            SUMMARY_AGENT_PROMPT = f\"\"\"Please distill the following deep research results into a knowledge-dense summary. Requirements:\n\nProvide a comprehensive yet concise summary (400-600 words):\n- Focus on SUBSTANTIVE knowledge and key information"
+        },
+        {
+          "file": "anytool/grounding/backends/web/session.py",
+          "lines": "229-234",
+          "snippet": "summary_response = await self._llm.complete(SUMMARY_AGENT_PROMPT)\nsummary = summary_response[\"message\"][\"content\"].strip()\n\nlogger.info(f\"Summary generation completed\")\n\nreturn summary"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,583 @@
+{
+  "repo": "GetStream/Vision-Agents",
+  "commit": "d93f0b4b4d",
+  "system_type": "framework",
+  "system_type_reason": "Monorepo of agents-core plus ~40 provider plugins for building real-time voice/video agents.",
+  "repo_overview": {
+    "summary": "Python framework for real-time multimodal voice and video agents. An Agent joins a WebRTC call via an edge transport (Stream by default), processes incoming audio/video through a pipeline (VAD, STT, turn detection, LLM, TTS) or a speech-to-speech realtime LLM, and responds in the call. Tool calling runs inside the LLM plugins as a bounded multi-round loop; the repo is a monorepo of agents-core plus about 40 provider plugins.",
+    "components": [
+      {
+        "path": "agents-core/vision_agents/core/agents/",
+        "purpose": "Agent class: call lifecycle, event wiring, conversation, agent_launcher (warmup, sessions), inference flows (transcribing vs. realtime), session registry (in-memory/redis), transcript buffer"
+      },
+      {
+        "path": "agents-core/vision_agents/core/llm/",
+        "purpose": "LLM base class, realtime (speech-to-speech) base, function registry for tool registration and execution"
+      },
+      {
+        "path": "agents-core/vision_agents/core/mcp/",
+        "purpose": "MCP client for local and remote servers, tool conversion"
+      },
+      {
+        "path": "agents-core/vision_agents/core/stt/, tts/, vad/, turn_detection/",
+        "purpose": "base classes of the speech pipeline"
+      },
+      {
+        "path": "agents-core/vision_agents/core/edge/",
+        "purpose": "transport abstraction for calls/WebRTC (EdgeTransport)"
+      },
+      {
+        "path": "agents-core/vision_agents/core/events/",
+        "purpose": "event bus connecting the components"
+      },
+      {
+        "path": "agents-core/vision_agents/core/processors/, avatars/",
+        "purpose": "video processors (e.g. YOLO) and avatar audio/video sync"
+      },
+      {
+        "path": "agents-core/vision_agents/core/runner/",
+        "purpose": "runner and HTTP server that launch agent sessions"
+      },
+      {
+        "path": "agents-core/vision_agents/core/observability/, profiling/",
+        "purpose": "metrics (Prometheus/OpenTelemetry) and profiling"
+      },
+      {
+        "path": "agents-core/vision_agents/core/utils/",
+        "purpose": "audio/video queues, input pacer, forwarders, tokenizer"
+      },
+      {
+        "path": "agents-core/vision_agents/core/rag/, instructions.py, warmup.py",
+        "purpose": "RAG base, instruction loading, model warmup"
+      },
+      {
+        "path": "agents-core/vision_agents/testing/",
+        "purpose": "test harness with LLM judge and mock tools"
+      },
+      {
+        "path": "agents-core/vision_agents/cli/",
+        "purpose": "CLI: project scaffolding and agent run command"
+      },
+      {
+        "path": "plugins/",
+        "purpose": "about 40 provider integrations (openai, gemini, anthropic, deepgram, elevenlabs, getstream, ...) holding the concrete LLM tool loops"
+      },
+      {
+        "path": "examples/",
+        "purpose": "11 example applications (golf coach, phone + RAG, k8s deployment, ...)"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "plugins/openai/vision_agents/plugins/openai/openai_llm.py",
+        "lines": "116, 170-171",
+        "snippet": "for round_num in range(self.max_tool_rounds + 1):\n...\n    if not new_tool_calls or round_num >= self.max_tool_rounds:\n        break"
+      },
+      {
+        "file": "plugins/openai/vision_agents/plugins/openai/openai_llm.py",
+        "lines": "173-182",
+        "snippet": "triples, exec_seen = await self._dedup_and_execute(\n    new_tool_calls,\n    max_concurrency=8,\n    timeout_s=30,\n    seen=exec_seen,\n)\ntool_messages = self._build_tool_messages(triples)\nif not tool_messages:\n    break\ncurrent_input = tool_messages"
+      },
+      {
+        "file": "agents-core/vision_agents/core/agents/inference/transcribing_flow.py",
+        "lines": "384, 397-399",
+        "snippet": "elif isinstance(event, TurnEnded):\n...\n    if not event.eager and self._llm_turn:\n        # Confirm the current LLM turn if it's not an eager event\n        self._llm_turn.confirm()"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "The tool calls extracted from the model response (new_tool_calls) are executed via _dedup_and_execute (openai_llm.py:173-178), so the LLM's output determines which tool runs next.",
+      "consumes_feedback": "Tool results are turned into function_call_output messages by _build_tool_messages and passed as current_input to the next round (openai_llm.py:179-182, 228-240).",
+      "multi_turn_until_termination": "The round loop (openai_llm.py:116) repeats until the model requests no further tools or max_tool_rounds is reached (openai_llm.py:170-171); at conversation level every TurnEnded event starts a new LLM turn over the same conversation (transcribing_flow.py:384, 397-399)."
+    }
+  },
+  "topology": {
+    "verdict": "single-agent",
+    "evidence": [
+      {
+        "file": "agents-core/vision_agents/core/agents/agents.py",
+        "lines": "218",
+        "snippet": "self.llm = llm"
+      },
+      {
+        "file": "agents-core/vision_agents/core/agents/agents.py",
+        "lines": "429-433, 442-447",
+        "snippet": "if _is_realtime_llm(self.llm):\n    return RealtimeInferenceFlow(\n        audio_input=self._audio_input_stream,\n        audio_output=self._audio_output_stream,\n        llm=self.llm,\n...\nelse:\n    return TranscribingInferenceFlow(\n        audio_input=self._audio_input_stream,\n        audio_output=self._audio_output_stream,\n        stt=self.stt,\n        llm=self.llm,"
+      }
+    ],
+    "justification": "One Agent holds one LLM (agents.py:218) and builds exactly one inference flow around it, either RealtimeInferenceFlow or TranscribingInferenceFlow (agents.py:429-447). STT, TTS, VAD and turn detection are fixed pipeline stages, and tools and MCP servers are callables invoked by that single LLM. Several agents in the same call run as independent sessions with no coordination between them.",
+    "verdict_raw": "single-agent"
+  },
+  "resilience": [
+    {
+      "name": "session lifetime enforcement (idle timeout and max duration)",
+      "what_it_is": "A background maintenance loop in AgentLauncher runs every 5 s (maintenance_interval) and closes sessions whose agent has been alone on the call longer than agent_idle_timeout (default 60 s, 0 disables) or whose call time exceeds max_session_duration_seconds (default None, unlimited).",
+      "function_in_system": "Sits outside the per-turn loop at the session-management level of the runner/launcher. Reclaims agents whose users have left and caps the runtime of a single session. Otherwise orphaned agents keep the call connection, STT/LLM/TTS streams and provider billing alive indefinitely.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/agents/agent_launcher.py",
+          "lines": "464-468",
+          "snippet": "async def _maintenance_loop(self) -> None:\n    while self._running:\n        await self._close_expired_sessions()\n        await self._flush_metrics_to_registry()\n        await asyncio.sleep(self._maintenance_interval)"
+        },
+        {
+          "file": "agents-core/vision_agents/core/agents/agent_launcher.py",
+          "lines": "472, 478-486",
+          "snippet": "max_session_duration = self._max_session_duration_seconds or float(\"inf\")\n...\non_call_for = agent.on_call_for()\nidle_for = agent.idle_for()\nif 0 < self._agent_idle_timeout <= idle_for:\n    ...\n    to_close.append(agent)\nelif on_call_for >= max_session_duration:"
+        }
+      ]
+    },
+    {
+      "name": "session admission limits",
+      "what_it_is": "start_session rejects new sessions with MaxConcurrentSessionsExceeded / MaxSessionsPerCallExceeded once max_concurrent_sessions (node-wide) or max_sessions_per_call (checked against the shared session registry) is reached. Both default to None (unlimited).",
+      "function_in_system": "Sits at the entry point where the runner spawns a new agent for a call. Bounds the number of simultaneously running agents per node and per call. Otherwise a burst of join requests overloads the node and multiplies provider costs, and several agents can end up talking in the same call.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/agents/agent_launcher.py",
+          "lines": "298-312",
+          "snippet": "async with self._start_lock:\n    if (\n        self._max_concurrent_sessions\n        and len(self._sessions) >= self._max_concurrent_sessions\n    ):\n        raise MaxConcurrentSessionsExceeded(\n            f\"Reached maximum concurrent sessions of {self._max_concurrent_sessions}\"\n        )\n\n    if self._max_sessions_per_call:\n        call_sessions = await self._registry.get_for_call(call_id)\n        if len(call_sessions) >= self._max_sessions_per_call:\n            raise MaxSessionsPerCallExceeded("
+        }
+      ]
+    },
+    {
+      "name": "session liveness via TTL heartbeat in the shared registry",
+      "what_it_is": "Every session record in the session registry store (in-memory by default, Redis for multi-node) expires after a TTL of 30 s. The launcher's maintenance loop rewrites each record of its own sessions every 5 s via update_metrics (only_if_exists). Close requests from any node are stored as TTL flags in the same registry; the owning node polls them in each maintenance cycle and closes the flagged sessions.",
+      "function_in_system": "Sits at the session-management level shared by all runner nodes, outside the per-turn loop. Records of a crashed or stalled node expire on their own, so the per-call session limit and cross-node lookups only count live sessions, and a client can stop an agent through any node (e.g. a beacon request when the browser tab closes). Otherwise ghost sessions of a dead node block new agents for that call permanently, and agents whose client went away keep running until the idle timeout.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/agents/session_registry/registry.py",
+          "lines": "21-22, 33",
+          "snippet": "tracking.  Session TTLs are kept alive by periodic ``update_metrics``\ncalls which re-write each key with a fresh TTL.\n...\nttl: float = 30.0,"
+        },
+        {
+          "file": "agents-core/vision_agents/core/agents/session_registry/registry.py",
+          "lines": "88-92",
+          "snippet": "info.metrics = metrics\ninfo.metrics_updated_at = time.time()\nawait self._store.set(\n    key, json.dumps(info.to_dict()).encode(), self._ttl, only_if_exists=True\n)"
+        },
+        {
+          "file": "agents-core/vision_agents/core/agents/agent_launcher.py",
+          "lines": "523-529",
+          "snippet": "async def _flush_metrics_to_registry(self) -> None:\n    \"\"\"Push current agent metrics for all active sessions to the registry.\"\"\"\n    for session_id, session in list(self._sessions.items()):\n        try:\n            await self._registry.update_metrics(\n                session.call_id, session_id, session.agent.metrics\n            )"
+        },
+        {
+          "file": "agents-core/vision_agents/core/agents/session_registry/registry.py",
+          "lines": "107-109",
+          "snippet": "async def request_close(self, call_id: str, session_id: str) -> None:\n    \"\"\"Set a close flag for a session (async close from any node).\"\"\"\n    await self._store.set(self._close_key(call_id, session_id), b\"\", self._ttl)"
+        },
+        {
+          "file": "agents-core/vision_agents/core/agents/agent_launcher.py",
+          "lines": "495-506",
+          "snippet": "sessions_map = {sid: s.call_id for sid, s in self._sessions.items()}\nflagged = [\n    session_\n    for session_id in await self._registry.get_close_requests(sessions_map)\n    if (session_ := self._sessions.get(session_id)) is not None\n    and session_.agent not in to_close\n]\nfor session in flagged:\n    logger.info(\n        \"Closing session %s due to registry close request\", session.id\n    )\n    to_close.append(session.agent)"
+        }
+      ]
+    },
+    {
+      "name": "barge-in interruption of the agent turn",
+      "what_it_is": "When turn detection signals that a participant started speaking (TurnStarted), or a realtime LLM reports interrupted audio output, interrupt() cancels the in-flight LLM turn, calls llm.interrupt(), flushes pending transcripts, clears LLM output and TTS input/output queues and stops TTS playback.",
+      "function_in_system": "Sits in the inference flow between user input and agent output (TranscribingInferenceFlow and RealtimeInferenceFlow). Aborts the current response as soon as the user takes the floor, so the next turn is based on the new utterance. Otherwise the agent keeps speaking an outdated answer over the user and spends LLM/TTS tokens on output nobody hears.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/agents/inference/transcribing_flow.py",
+          "lines": "332-338",
+          "snippet": "if isinstance(event, TurnStarted):\n    logger.info(\n        \"👉 Participant %s barged-in, interrupting the agent\",\n        event.participant.user_id,\n    )\n    self.events.send(UserTurnStartedEvent(participant=participant))\n    await self.interrupt()"
+        },
+        {
+          "file": "agents-core/vision_agents/core/agents/inference/transcribing_flow.py",
+          "lines": "176-189",
+          "snippet": "async def interrupt(self):\n    if self._llm_turn is not None:\n        await self._llm_turn.cancel()\n        self._llm_turn = None\n    else:\n        await self._llm.interrupt()\n    self._transcripts.flush_users_transcripts()\n    self._llm_output.clear()\n    self._tts_input.clear()\n    self._tts_tokenizer.flush()\n    if self._tts:\n        await self._tts.interrupt()\n    self._tts_output.clear()\n    self._tts_output.send_nowait(TTSOutputEnd(interrupted=True))"
+        },
+        {
+          "file": "agents-core/vision_agents/core/agents/inference/realtime_flow.py",
+          "lines": "149-152",
+          "snippet": "if item.interrupted:\n    # Audio is complete because it was interrupted.\n    logger.info(\"👉 Participant barged-in, interrupting the agent\")\n    await self.interrupt()"
+        },
+        {
+          "file": "agents-core/vision_agents/core/tts/tts.py",
+          "lines": "100-111, 228-229, 243-245",
+          "snippet": "# Monotonic epoch counter; incremented on interrupt so stale events\n# emitted before the interrupt can be identified and dropped.\nself._epoch: int = 0\n...\nasync def interrupt(self) -> None:\n    \"\"\"Increment epoch and stop audio. Stale events will be discarded.\"\"\"\n    self._epoch += 1\n    await self.stop_audio()\n...\n# Store epoch into a variable before yielding\nepoch = self._epoch\n...\n    response = await self.stream_audio(text, *args, **kwargs)\n    if epoch != self._epoch:\n        return"
+        }
+      ]
+    },
+    {
+      "name": "speculative (eager) LLM turns with cancel on transcript change",
+      "what_it_is": "On an eager end-of-turn signal the LLM call starts before the turn is confirmed; its output is buffered in the LLMTurn and only streamed to TTS after confirm()/finalize(). If the transcript changes in the meantime, the running turn is cancelled (task cancel plus llm.interrupt()) and a new turn starts with the updated transcript.",
+      "function_in_system": "Sits in TranscribingInferenceFlow between turn detection/STT and the LLM call. Hides LLM latency behind the confirmation window and discards responses to stale transcripts. Otherwise the agent either waits for full confirmation before querying the LLM (higher response latency) or speaks answers to an incomplete utterance.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/agents/inference/transcribing_flow.py",
+          "lines": "411-427",
+          "snippet": "elif event.eager and transcript:\n    # It's an eager turn, which me means we can send the transcript\n    # to the LLM and wait for it to be confirmed.\n    # Cancel the running turn if the transcript is different.\n    if self._llm_turn and self._llm_turn.transcript != transcript:\n        await self._llm_turn.cancel()\n\n    # Start a new LLM turn\n    self._llm_turn = LLMTurn(\n        transcript=transcript,\n        participant=event.participant,\n        events=self.events,\n    )\n    ...\n    self._llm_turn.start(llm=self._llm)"
+        },
+        {
+          "file": "agents-core/vision_agents/core/agents/inference/transcribing_flow.py",
+          "lines": "397-398, 441-444",
+          "snippet": "if not event.eager and self._llm_turn:\n    # Confirm the current LLM turn if it's not an eager event\n...\n# the transcript has changed, cancel it\nllm_turn = self._llm_turn\nif llm_turn is not None and llm_turn.transcript != transcript:\n    await llm_turn.cancel()"
+        },
+        {
+          "file": "agents-core/vision_agents/core/agents/inference/llm_turn.py",
+          "lines": "72-84",
+          "snippet": "async def cancel(self):\n    if self.finalized or self.cancelled or not self.started:\n        # The turn is done, nothing to cancel\n        return\n    ...\n    self._cancelled = True\n    if self._llm_response_task is not None:\n        await cancel_and_wait(self._llm_response_task)\n        self._llm_response_task = None\n    if self._finalize_task is not None:\n        await cancel_and_wait(self._finalize_task)"
+        }
+      ]
+    },
+    {
+      "name": "drop-when-busy for injected prompts",
+      "what_it_is": "simple_response(text, interrupt=False) checks under a lock whether an LLM turn is in flight (started, unfinalized, uncancelled) and silently drops the injected prompt in that case. The default interrupt=True preempts the running turn instead.",
+      "function_in_system": "Sits at the programmatic entry point used by code outside the conversation (e.g. periodic video-processor triggers) to make the agent speak. Per the docstring it avoids cascade cancellations from periodic callers. Otherwise every periodic trigger cancels the current answer, and the agent never completes a response while burning LLM calls.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/agents/inference/transcribing_flow.py",
+          "lines": "213-216, 218-231",
+          "snippet": "interrupt: If True (default), preempt any in-flight LLM turn before\n    starting the new one. If False, drop silently when a turn is\n    already in flight (best-effort; avoids cascade cancellations\n    from periodic callers).\n...\nasync with self._simple_response_lock:\n    llm_turn = self._llm_turn\n    busy = (\n        llm_turn is not None\n        and llm_turn.started\n        and not llm_turn.finalized\n        and not llm_turn.cancelled\n    )\n    if busy and not interrupt:\n        logger.debug(\n            \"simple_response dropped: LLM turn already in flight (text=%r)\",\n            text,\n        )\n        return"
+        }
+      ]
+    },
+    {
+      "name": "first-speaker-wins audio gate",
+      "what_it_is": "In multi-participant calls a VAD-based filter (Silero, speech_threshold 0.5) grants a speaker lock to the first participant with detected speech; audio from all other participants is dropped until the lock is released on TurnEndedEvent, after 1500 ms of continuous silence (fallback) or on participant disconnect.",
+      "function_in_system": "Sits in the agent's audio consumer before STT/turn detection. Keeps a single speaker per turn as input for the LLM. Otherwise overlapping speech from several participants gets merged into one transcript and triggers mixed-up or competing LLM turns.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/agents/agents.py",
+          "lines": "199-202",
+          "snippet": "# Built-in first-speaker-wins filter for multi-participant calls\nself._multi_speaker_filter: AudioFilter = (\n    multi_speaker_filter or FirstSpeakerWinsFilter()\n)"
+        },
+        {
+          "file": "agents-core/vision_agents/core/utils/audio_filter.py",
+          "lines": "82-104",
+          "snippet": "if self._active_speaker_id is None:\n    # No lock held — allow all audio through.\n    # Acquire the lock on the first participant with detected speech.\n    score = self._vad_session.predict_speech(pcm)\n    is_speech = score > self._speech_threshold\n    if is_speech:\n        self._acquire(speaker_id)\n    return pcm\nelif self._active_speaker_id != speaker_id:\n    # Somebody else is talking and the lock is still held, exit early without\n    # running an expensive VAD model\n    return None\nelse:\n    ...\n        self._active_speaker_silent_ms += pcm.duration_ms\n        if self._active_speaker_silent_ms >= self._silence_release_ms:\n            self.clear()"
+        }
+      ]
+    },
+    {
+      "name": "component warmup with shared resource cache",
+      "what_it_is": "Components with expensive resources (VAD models, YOLO processors, local STT/TTS, turn detection) implement Warmable. A launcher-wide WarmupCache keyed by component class loads each resource once via on_warmup() under a per-class lock and hands the cached resource to every new agent via on_warmed_up(). The launcher runs a dry-run warmup at startup.",
+      "function_in_system": "Sits in session setup, before an agent joins a call. Saves model loading time and memory per session, since parallel sessions share one loaded resource. Otherwise every new session reloads or redownloads its models, which raises join latency and memory use per session.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/warmup.py",
+          "lines": "26-42",
+          "snippet": "async def warmup(self, warmable: \"Warmable\"):\n    warmable_cls = type(warmable)\n    if (resource := self._cache.get(warmable_cls)) is not None:\n        # The resource is already loaded.\n        # Set it to the warmable instance and exit\n        warmable.on_warmed_up(resource)\n        return\n    ...\n    async with lock:\n        # Check if the resource was loaded while we were waiting for the lock\n        if (resource := self._cache.get(warmable_cls)) is None:\n            # Load the resource by triggering `warmable.on_warmup()`\n            resource = await warmable.on_warmup()\n            # Store the result\n            self._cache[warmable_cls] = resource"
+        },
+        {
+          "file": "agents-core/vision_agents/core/agents/agent_launcher.py",
+          "lines": "436-438, 461-462",
+          "snippet": "# Warmup LLM (including Realtime)\nif agent.llm and isinstance(agent.llm, Warmable):\n    warmup_tasks.append(agent.llm.warmup(self._warmup_cache))\n...\nif warmup_tasks:\n    await asyncio.gather(*warmup_tasks)"
+        },
+        {
+          "file": "agents-core/vision_agents/core/runner/http/api.py",
+          "lines": "231-239",
+          "snippet": "@router.get(\"/ready\")\nasync def ready(launcher: AgentLauncher = Depends(get_launcher)) -> Response:\n    \"\"\"Check if the server is ready to spawn new agents.\"\"\"\n    if launcher.ready:\n        return Response(status_code=200)\n    else:\n        raise HTTPException(\n            status_code=503, detail=\"Server is not ready to accept requests\"\n        )"
+        }
+      ]
+    },
+    {
+      "name": "bounded tool-calling rounds per turn",
+      "what_it_is": "The multi-hop loop (LLM response, tool execution, tool results back to the LLM) stops after max_tool_rounds / tools_max_rounds rounds, default 3, and the last response is emitted. The same default of 3 is set in all 12 tool-capable LLM plugins (openai, chat_completions, anthropic, gemini, aws, xai, openrouter, minimax, inworld, huggingface).",
+      "function_in_system": "Sits inside LLM.simple_response of each plugin, i.e. inside one agent turn. Caps the number of LLM calls and tool executions a single user utterance can trigger. Otherwise a model that keeps requesting tools runs an unbounded chain of calls, which stalls the spoken reply and multiplies token cost.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "plugins/openai/vision_agents/plugins/openai/openai_llm.py",
+          "lines": "116, 170-171",
+          "snippet": "for round_num in range(self.max_tool_rounds + 1):\n...\n    if not new_tool_calls or round_num >= self.max_tool_rounds:\n        break"
+        },
+        {
+          "file": "plugins/openai/vision_agents/plugins/openai/chat_completions/chat_completions_llm.py",
+          "lines": "434, 562-564",
+          "snippet": "for round_num in range(self._tools_max_rounds):\n...\n    if next_tool_calls and round_num < self._tools_max_rounds - 1:\n        current_tool_calls = next_tool_calls\n        continue"
+        },
+        {
+          "file": "plugins/anthropic/vision_agents/plugins/anthropic/anthropic_llm.py",
+          "lines": "53",
+          "snippet": "tools_max_rounds: int = 3,"
+        }
+      ]
+    },
+    {
+      "name": "tool-call deduplication within a turn",
+      "what_it_is": "Tool calls are keyed by id/name/serialized arguments; a seen-set carried across all rounds of a turn skips any call whose key was already executed. Implemented once in the LLM base class (_dedup_and_execute) and used by all tool-capable plugins; the OpenAI plugin additionally dedups calls extracted from the response stream by (name, arguments).",
+      "function_in_system": "Sits between tool-call extraction from the model output and tool execution, inside the multi-round tool loop. Prevents repeated execution of identical tool calls that the model re-emits in a later round or the stream delivers twice. Otherwise side-effecting tools run multiple times and each repeat adds latency and cost.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/llm/llm.py",
+          "lines": "429-444",
+          "snippet": "seen = seen or set()\nto_run: List[NormalizedToolCallItem] = []\nfor tc in calls:\n    key = self._tc_key(tc)\n    if key in seen:\n        continue\n    seen.add(key)\n    to_run.append(tc)\n\nif not to_run:\n    return [], seen  # nothing new\n\ntriples = await self._execute_tools(\n    to_run, max_concurrency=max_concurrency, timeout_s=timeout_s\n)\nreturn triples, seen"
+        },
+        {
+          "file": "plugins/openai/vision_agents/plugins/openai/openai_llm.py",
+          "lines": "158-162",
+          "snippet": "for c in self._extract_tool_calls_from_response(event.response):\n    key = tool_call_dedup_key(c)\n    if key not in seen_calls:\n        new_tool_calls.append(c)\n        seen_calls.add(key)"
+        }
+      ]
+    },
+    {
+      "name": "tool execution timeout and concurrency limit",
+      "what_it_is": "Each tool call runs under asyncio.wait_for with a 30 s timeout; concurrent tool calls of one round are limited to 8 via an asyncio.Semaphore. The plugins pass max_concurrency=8, timeout_s=30.",
+      "function_in_system": "Sits in the shared tool executor of the LLM base class, called from every plugin's tool loop and from realtime tool handling. Bounds how long a single tool can hold up the spoken turn and how many tools run at once. Otherwise a hanging tool (network call, MCP server) blocks the agent's reply indefinitely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/llm/llm.py",
+          "lines": "340",
+          "snippet": "res = await asyncio.wait_for(_invoke(), timeout=timeout_s)"
+        },
+        {
+          "file": "agents-core/vision_agents/core/llm/llm.py",
+          "lines": "402-408",
+          "snippet": "sem = asyncio.Semaphore(max_concurrency)\n\nasync def _guarded(tc):\n    async with sem:\n        return await self._run_one_tool(tc, timeout_s)\n\nreturn await asyncio.gather(*[_guarded(tc) for tc in calls])"
+        },
+        {
+          "file": "plugins/openai/vision_agents/plugins/openai/openai_llm.py",
+          "lines": "173-178",
+          "snippet": "triples, exec_seen = await self._dedup_and_execute(\n    new_tool_calls,\n    max_concurrency=8,\n    timeout_s=30,\n    seen=exec_seen,\n)"
+        }
+      ]
+    },
+    {
+      "name": "tool errors fed back to the model as tool results",
+      "what_it_is": "Any exception from a tool call, including the timeout, is caught in _run_one_tool, recorded as a failed ToolEndEvent and metric, and returned as the result {\"error\": str(e)}. The plugin then sends the error text as the tool output message (function_call_output) in the next LLM round.",
+      "function_in_system": "Sits between tool execution and the next LLM round of the tool loop. Lets the model see the failure and react (explain to the user, try a different tool or arguments). Otherwise a single failing tool aborts the whole turn and the user gets no spoken answer.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/llm/llm.py",
+          "lines": "362-383",
+          "snippet": "except Exception as e:\n    execution_time = (time.perf_counter() - start_time) * 1000\n\n    # Send tool end event (error)\n    self.events.send(\n        ToolEndEvent(\n            plugin_name=\"llm\",\n            tool_name=tc[\"name\"],\n            success=False,\n            error=str(e),\n    ...\n    return tc, {\"error\": str(e)}, e"
+        },
+        {
+          "file": "plugins/openai/vision_agents/plugins/openai/openai_llm.py",
+          "lines": "228-240",
+          "snippet": "for tc, res, err in triples:\n    call_id = tc.get(\"id\")\n    if not call_id:\n        continue\n\n    output = err if err is not None else res\n    output_str = self._sanitize_tool_output(output)\n    tool_messages.append(\n        {\n            \"type\": \"function_call_output\",\n            \"call_id\": call_id,\n            \"output\": output_str,"
+        }
+      ]
+    },
+    {
+      "name": "tool output truncation",
+      "what_it_is": "_sanitize_tool_output serializes tool results (string, exception or JSON) and truncates them to 60,000 characters with a trailing ellipsis. Used when building tool result messages in 10 plugin files (openai, anthropic, gemini, aws, xai, openrouter, inworld, huggingface).",
+      "function_in_system": "Sits between tool execution and the tool result message that enters the LLM context. Caps the context and token cost a single tool result can consume. Otherwise an oversized tool output overflows the context window or makes every following LLM call in the turn expensive and slow.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/llm/llm.py",
+          "lines": "446-462",
+          "snippet": "def _sanitize_tool_output(self, value: Any, max_chars: int = 60_000) -> str:\n    \"\"\"Sanitize tool output to prevent oversized responses.\n    ...\n    if isinstance(value, str):\n        s = value\n    elif isinstance(value, Exception):\n        s = f\"Error: {type(value).__name__}: {value}\"\n    else:\n        s = json.dumps(value)\n    return (s[:max_chars] + \"…\") if len(s) > max_chars else s"
+        },
+        {
+          "file": "plugins/anthropic/vision_agents/plugins/anthropic/anthropic_llm.py",
+          "lines": "186",
+          "snippet": "payload = self._sanitize_tool_output(res)"
+        }
+      ]
+    },
+    {
+      "name": "MCP call retry with auto-reconnect",
+      "what_it_is": "All MCP operations (list_tools, call_tool, list_resources, read_resource, list_prompts, get_prompt) go through _call_with_retry: up to 3 attempts, each attempt first ensures a connection (reconnecting if needed), and after a failure the client disconnects and waits 1 s before the next attempt. After the last attempt the error is re-raised.",
+      "function_in_system": "Sits in the MCP client base class under every MCP tool call the agent makes. Absorbs dropped connections and restarts of local or remote MCP servers. Otherwise a single transport hiccup makes the tool call fail and removes the MCP tools from the conversation until a manual reconnect.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/mcp/mcp_base.py",
+          "lines": "71-93",
+          "snippet": "async def _ensure_connected(self) -> None:\n    \"\"\"Ensure the server is connected, reconnecting if necessary.\"\"\"\n    if not self._is_connected:\n        self.logger.info(\"Reconnecting to MCP server...\")\n        await self.connect()\n\nasync def _call_with_retry(\n    self, operation_name: str, operation_func, *args, **kwargs\n):\n    \"\"\"Call an MCP operation with auto-reconnect on failure.\"\"\"\n    max_retries = 2\n    for attempt in range(max_retries + 1):\n        try:\n            await self._ensure_connected()\n            await self._update_activity()\n            return await operation_func(*args, **kwargs)\n        except Exception as e:\n            if attempt < max_retries:\n                ...\n                await self.disconnect()\n                await asyncio.sleep(1)  # Brief delay before retry"
+        },
+        {
+          "file": "agents-core/vision_agents/core/mcp/mcp_base.py",
+          "lines": "157-159",
+          "snippet": "async def list_tools(self) -> List[types.Tool]:\n    \"\"\"List available tools from the MCP server with auto-reconnect.\"\"\"\n    return await self._call_with_retry(\"list_tools\", self._list_tools_impl)"
+        }
+      ]
+    },
+    {
+      "name": "MCP idle session timeout",
+      "what_it_is": "A background monitor checks every 10 s the time since the last MCP activity and disconnects the session after session_timeout (default 300 s) without tool traffic. The next MCP call reconnects through _ensure_connected.",
+      "function_in_system": "Sits in the MCP client base class alongside the agent's session. Releases idle MCP connections and local server subprocesses during long calls that use no tools. Otherwise idle connections and subprocesses stay open for the whole session, and stale remote sessions fail on the next tool call.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/mcp/mcp_base.py",
+          "lines": "52-63",
+          "snippet": "async def _timeout_monitor(self) -> None:\n    \"\"\"Monitor for session timeout.\"\"\"\n    while self._is_connected:\n        await asyncio.sleep(10)  # Check every 10 seconds\n        if self._last_activity and self._is_connected:\n            idle_time = asyncio.get_event_loop().time() - self._last_activity\n            if idle_time > self.session_timeout:\n                self.logger.warning(\n                    f\"Session timeout after {idle_time:.1f}s of inactivity\"\n                )\n                await self.disconnect()\n                break"
+        }
+      ]
+    },
+    {
+      "name": "automatic reconnect of provider streaming connections with backoff",
+      "what_it_is": "STT, TTS and realtime plugins re-establish their websocket/stream to the provider after transient failures, each implemented per plugin: AWS Transcribe with unlimited attempts and backoff min(2^n, 30 s) driven by a reconnect event; AssemblyAI with 3 attempts and backoff 0.5 s doubling to 4 s; ElevenLabs STT with 3 attempts and 2^n s backoff; Qwen realtime reconnecting after a fixed backoff only for transient websocket close codes 1011-1014; Inworld TTS reconnecting on a dropped websocket.",
+      "function_in_system": "Sits in the provider plugins that feed the agent's speech pipeline (audio in via STT, audio out via TTS, speech-to-speech via realtime LLMs). Keeps the long-lived streaming connection of a live call alive across network drops and provider restarts. Otherwise a single connection loss leaves the agent deaf or mute for the rest of the call.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "plugins/aws/vision_agents/plugins/aws/stt.py",
+          "lines": "382-412",
+          "snippet": "attempt = 0\nwhile not self.closed:\n    await self._reconnect_event.wait()\n    self._reconnect_event.clear()\n    if self.closed:\n        return\n    backoff = min(2.0**attempt, self.max_reconnect_backoff_seconds)\n    attempt += 1\n    ...\n    await asyncio.sleep(backoff)\n    try:\n        ...\n        await self._close_streams()\n        await self._open_stream()\n        attempt = 0\n        logger.info(\"AWS Transcribe reconnected\")\n    ...\n    except Exception:\n        logger.exception(\"AWS Transcribe reconnect failed\")\n        self._reconnect_event.set()"
+        },
+        {
+          "file": "plugins/assemblyai/vision_agents/plugins/assemblyai/stt.py",
+          "lines": "181-198",
+          "snippet": "delay = self._reconnect_backoff_initial_s\nfor attempt in range(1, self._max_reconnect_attempts + 1):\n    ...\n    await asyncio.sleep(delay)\n    try:\n        await self._connect()\n        await asyncio.wait_for(self._connection_ready.wait(), timeout=10.0)\n        logger.info(\"AssemblyAI reconnected on attempt %d\", attempt)\n        return True\n    except (aiohttp.WSServerHandshakeError, asyncio.TimeoutError, OSError):\n        logger.exception(\"AssemblyAI reconnect attempt %d failed\", attempt)\n        await self._disconnect()\n    delay = min(delay * 2, self._reconnect_backoff_max_s)"
+        },
+        {
+          "file": "plugins/elevenlabs/vision_agents/plugins/elevenlabs/stt.py",
+          "lines": "385-397",
+          "snippet": "for attempt in range(3):\n    try:\n        await asyncio.sleep(2**attempt)  # Exponential backoff\n\n        # Clear the old connection\n        self.connection = None\n        self._connection_ready.clear()\n\n        # Attempt to reconnect\n        await self.start()\n\n        logger.info(f\"Reconnection successful on attempt {attempt + 1}\")\n        self._should_reconnect[\"value\"] = False"
+        },
+        {
+          "file": "plugins/qwen/vision_agents/plugins/qwen/client.py",
+          "lines": "61-71",
+          "snippet": "async def read(self) -> AsyncIterator[dict[str, Any]]:\n    while not self._closed:\n        try:\n            async for msg in self._ws:\n                event = json.loads(msg)\n                yield event\n        except websockets.ConnectionClosedError as e:\n            if not _should_reconnect(e):\n                raise\n            await asyncio.sleep(self._reconnect_backoff)\n            await self.connect()"
+        }
+      ]
+    },
+    {
+      "name": "error classification with session resumption in the Gemini Live loop",
+      "what_it_is": "Exceptions in the Gemini Live processing loop are classified into reconnect (websocket/API codes 1011-1014), stop (clean close or other codes) or retry (anything else). Reconnect re-establishes the session passing the last session_resumption handle stored from server updates; retries stop after 5 consecutive errors and the realtime session is marked disconnected.",
+      "function_in_system": "Sits in the receive loop of the Gemini realtime (speech-to-speech) LLM. Separates transient provider faults from terminal ones and resumes the same server-side conversation after a reconnect. Otherwise transient faults end the conversation or lose the dialogue state, and persistent faults spin in an endless error loop.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "plugins/gemini/vision_agents/plugins/gemini/gemini_realtime.py",
+          "lines": "96-119",
+          "snippet": "def _classify_loop_error(exc: Exception) -> tuple[str, str, bool]:\n    \"\"\"Classify a processing-loop exception into (action, reason, clean).\"\"\"\n    match exc:\n        case websockets.ConnectionClosedOK():\n            return STOP, \"WebSocket closed cleanly\", True\n\n        case websockets.ConnectionClosedError(rcvd=rcvd):\n            code = rcvd.code if rcvd else None\n            if code in RECONNECT_CLOSE_CODES:\n                return RECONNECT, f\"WebSocket code {code}\", False\n    ...\n    return RETRY, str(exc), False"
+        },
+        {
+          "file": "plugins/gemini/vision_agents/plugins/gemini/gemini_realtime.py",
+          "lines": "524-525, 532-538, 552-558",
+          "snippet": "consecutive_errors = 0\nmax_consecutive_errors = 5\n...\naction, reason, clean = _classify_loop_error(exc)\n\nif action == RECONNECT:\n    logger.info(\"Gemini connection lost (%s), reconnecting\", reason)\n    await self._establish_session()\n    consecutive_errors = 0\n...\nif consecutive_errors >= max_consecutive_errors:\n    logger.error(\n        \"Too many consecutive errors, stopping processing loop\"\n    )\n    self._on_disconnected(\n        reason=\"Too many consecutive errors\", clean=False\n    )"
+        },
+        {
+          "file": "plugins/gemini/vision_agents/plugins/gemini/gemini_realtime.py",
+          "lines": "396-398, 471-475",
+          "snippet": "# Resume the session if we have a session resumption id\nif self._session_resumption_id:\n    config[\"session_resumption\"] = {\"handle\": self._session_resumption_id}\n...\n# Store the resumption id so we can resume a broken connection\nif server_message.session_resumption_update:\n    update = server_message.session_resumption_update\n    if update.resumable and update.new_handle:\n        self._session_resumption_id = update.new_handle"
+        }
+      ]
+    },
+    {
+      "name": "proactive session rotation for AWS Nova Sonic",
+      "what_it_is": "A check loop runs every second and reconnects the Bedrock Nova Sonic session once it has run longer than reconnect_after_minutes (default 5) while the audio has been silent for more than 3 s, and unconditionally after 7 minutes (FORCE_RECONNECT_IN_MINUTES). After reconnecting, the system instructions are re-sent; conversation history is left for a TODO.",
+      "function_in_system": "Sits in the AWS realtime (speech-to-speech) LLM, beside the audio input path. Replaces the connection before the provider's 8-minute session limit, preferably in a speaking pause. Otherwise the provider cuts the session mid-conversation after 8 minutes and the agent stops responding.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "plugins/aws/vision_agents/plugins/aws/aws_realtime.py",
+          "lines": "37-38",
+          "snippet": "# Reconnect after 5 seconds if there is silence. If there is no break in speech reconnect after 7 seconds\nFORCE_RECONNECT_IN_MINUTES = 7.0"
+        },
+        {
+          "file": "plugins/aws/vision_agents/plugins/aws/aws_realtime.py",
+          "lines": "402-408",
+          "snippet": "has_silence = silence_duration > 3\n\nshould_reconnect = False\nif running_minutes > self.reconnect_after_minutes and has_silence:\n    should_reconnect = True\nelif running_minutes > FORCE_RECONNECT_IN_MINUTES:\n    should_reconnect = True"
+        },
+        {
+          "file": "plugins/aws/vision_agents/plugins/aws/aws_realtime.py",
+          "lines": "426-430",
+          "snippet": "while self.connected:\n    await asyncio.sleep(1)\n    if self._should_reconnect() and not self._reconnecting:\n        logger.info(\"Reconnection needed, initiating reconnect...\")\n        await self.reconnect()"
+        }
+      ]
+    },
+    {
+      "name": "sliding-window context compression for Gemini Live",
+      "what_it_is": "The default Gemini Live connect config enables context_window_compression with trigger_tokens=25600 and a sliding window with target_tokens=12800; the provider drops the oldest turns once the trigger is reached.",
+      "function_in_system": "Sits in the session config of the Gemini realtime LLM and acts on the server-side conversation context. Keeps long real-time conversations within the context limit and bounds per-turn input tokens. Otherwise long calls hit the context limit and the session fails, or every turn gets slower and more expensive.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "plugins/gemini/vision_agents/plugins/gemini/gemini_realtime.py",
+          "lines": "56, 76-79",
+          "snippet": "DEFAULT_CONFIG = LiveConnectConfigDict(\n...\n    context_window_compression=ContextWindowCompressionConfigDict(\n        trigger_tokens=25600,\n        sliding_window=SlidingWindowDict(target_tokens=12800),\n    ),"
+        },
+        {
+          "file": "plugins/gemini/vision_agents/plugins/gemini/gemini_realtime.py",
+          "lines": "196",
+          "snippet": "self._base_config = copy.deepcopy(DEFAULT_CONFIG)"
+        }
+      ]
+    },
+    {
+      "name": "gateway-level model fallback",
+      "what_it_is": "LLM plugins for model routers pass fallback model lists to the gateway. Inworld accepts an ordered fallback_models list and a ttft_timeout (minimum 500 ms) that switches to the next model if the first token is late (opt-in). OpenRouter with model openrouter/auto and tools adds a fixed list of tool-capable models (gemini-2.5-flash, claude-sonnet-4.5, gpt-4o) as fallbacks (default on).",
+      "function_in_system": "Sits in request construction of the router-based LLM plugins; the switch itself runs at the gateway. Covers failure or slowness of the primary model and auto-routing to a model without tool support. Otherwise a failing or slow primary model stalls the spoken reply, and auto-routed requests silently lose tool calling.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "plugins/inworld/vision_agents/plugins/inworld/llm.py",
+          "lines": "62-69",
+          "snippet": "if fallback_models:\n    body[\"models\"] = list(fallback_models)\nif ignore_models:\n    body[\"ignore\"] = list(ignore_models)\nif sort_by:\n    body[\"sort\"] = list(sort_by)\nif ttft_timeout:\n    body.setdefault(\"fallback\", {})[\"ttft_timeout\"] = ttft_timeout"
+        },
+        {
+          "file": "plugins/openrouter/vision_agents/plugins/openrouter/openrouter_llm.py",
+          "lines": "28-33, 209-216",
+          "snippet": "# Models that reliably support tool calling via Chat Completions API.\n# Used as fallbacks when openrouter/auto routes to a model without tool support.\nTOOL_SUPPORTING_MODELS = [\n    \"google/gemini-2.5-flash\",\n    \"anthropic/claude-sonnet-4.5\",\n    \"openai/gpt-4o\",\n...\n# openrouter/auto may route to models that don't support tools.\n# Add fallbacks to ensure tool calls work.\nif self._is_auto_model(effective_model):\n    ...\n    request_kwargs[\"extra_body\"] = {\"models\": TOOL_SUPPORTING_MODELS}"
+        }
+      ]
+    },
+    {
+      "name": "HTTP retry with exponential backoff for xAI TTS",
+      "what_it_is": "The xAI TTS request is retried up to 3 times on HTTP 429/500/503 and on aiohttp client errors, waiting 2^n s between attempts, with a 60 s total timeout per request; other status codes raise immediately.",
+      "function_in_system": "Sits in the TTS plugin at the end of the pipeline, where the agent's text reply is turned into speech. Absorbs rate limits and transient server errors of the TTS provider. Otherwise a rate-limit spike drops the spoken answer of that turn.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "plugins/xai/vision_agents/plugins/xai/tts.py",
+          "lines": "141-164, 170-178",
+          "snippet": "max_retries = 3\nfor attempt in range(max_retries):\n    try:\n        async with session.post(\n            self._base_url,\n            json=payload,\n            headers=headers,\n            timeout=aiohttp.ClientTimeout(total=60),\n        ) as resp:\n            ...\n            if resp.status in (429, 500, 503):\n                wait = 2**attempt\n                ...\n                await asyncio.sleep(wait)\n                continue\n    ...\n    except aiohttp.ClientError as e:\n        if attempt < max_retries - 1:\n            wait = 2**attempt\n            logger.warning(\"Network error: %s, retrying in %ds\", e, wait)\n            await asyncio.sleep(wait)\n            continue\n        raise\n\nraise RuntimeError(\"xAI TTS: max retries exceeded\")"
+        }
+      ]
+    },
+    {
+      "name": "frame-rate throttling and rolling frame buffer for vision LLMs",
+      "what_it_is": "Video frames reach the model at a reduced rate: VideoForwarder calls each frame handler at most at its configured fps; the VLM plugins (Gemini, OpenAI chat completions) default to fps=1 into a deque with maxlen fps * frame_buffer_seconds (default 10 s, i.e. 10 frames) and send only these buffered frames per request; the OpenAI realtime video track also defaults to 1 fps.",
+      "function_in_system": "Sits between the incoming WebRTC video track (up to 30 fps) and the multimodal LLM input. Bounds the number of images per LLM request and per second of call. Otherwise every turn pushes a full-rate video stream into the model, which multiplies image tokens, cost and latency and overflows the context window.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agents-core/vision_agents/core/utils/video_forwarder.py",
+          "lines": "160-170",
+          "snippet": "# Call each handler if enough time has passed per its fps setting\nfor handler in self._frame_handlers:\n    min_interval = (\n        (1.0 / handler.fps)\n        if (handler.fps and handler.fps > 0)\n        else 0.0\n    )\n\n    # Check if enough time has passed for this handler\n    if min_interval == 0.0 or (now - handler.last_ts) >= min_interval:\n        handler.last_ts = now"
+        },
+        {
+          "file": "plugins/gemini/vision_agents/plugins/gemini/gemini_vlm.py",
+          "lines": "58-59, 104-106, 270-271",
+          "snippet": "fps: int = 1,\nframe_buffer_seconds: int = 10,\n...\nself._frame_buffer: deque[av.VideoFrame] = deque(\n    maxlen=fps * frame_buffer_seconds\n)\n...\n\"\"\"Convert buffered video frames to JPEG bytes.\"\"\"\nframes = list(self._frame_buffer)"
+        },
+        {
+          "file": "plugins/openai/vision_agents/plugins/openai/rtc_manager.py",
+          "lines": "120",
+          "snippet": "self, stream_video_track: MediaStreamTrack, fps: int = 1, shared_forwarder=None"
+        }
+      ]
+    }
+  ]
+}

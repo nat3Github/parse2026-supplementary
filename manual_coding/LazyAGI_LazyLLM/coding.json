@@ -1,0 +1,886 @@
+{
+  "repo": "LazyAGI/LazyLLM",
+  "commit": "2f7eac1513",
+  "system_type": "framework",
+  "system_type_reason": "Low-code framework for assembling LLM applications from flows and modules.",
+  "repo_overview": {
+    "summary": "Low-code framework for assembling multi-agent LLM applications from flows (Pipeline, Parallel, Loop, Switch, Graph) and modules (online models, locally deployed or fine-tunable models). Agents are one component type: ReactAgent wraps a single FunctionCall step (LLM reasoning plus tool execution) in a bounded loop; PlanAndSolve and ReWOO variants add planner/solver stages. Large surrounding tool areas cover RAG, data synthesis pipelines, file systems, services and a multi-round LLM code-review runner.",
+    "components": [
+      {
+        "path": "lazyllm/common/",
+        "purpose": "foundation layer: registry, Bind, session/globals management, logging, threading and queue utilities"
+      },
+      {
+        "path": "lazyllm/configs.py",
+        "purpose": "global config singleton lazyllm.config"
+      },
+      {
+        "path": "lazyllm/flow/",
+        "purpose": "orchestration primitives: Pipeline, Parallel, Loop, Switch, Graph"
+      },
+      {
+        "path": "lazyllm/launcher/",
+        "purpose": "task launchers for local, Slurm, SCO and Kubernetes execution"
+      },
+      {
+        "path": "lazyllm/components/",
+        "purpose": "prompters, output formatters, deploy backends (vllm, lightllm, ...) and finetune backends"
+      },
+      {
+        "path": "lazyllm/module/",
+        "purpose": "module abstraction: ModuleBase, ServerModule, TrainableModule, online model adapters per provider and dynamic router (llms/onlinemodule/)"
+      },
+      {
+        "path": "lazyllm/tools/agent/",
+        "purpose": "agent core: base class, FunctionCall step, ReactAgent, PlanAndSolveAgent, ReWOOAgent, ToolManager, skills, shell/file/todo tools, code interpreter"
+      },
+      {
+        "path": "lazyllm/tools/sandbox/",
+        "purpose": "code execution sandboxes (dummy, SandboxFusion)"
+      },
+      {
+        "path": "lazyllm/tools/mcp/",
+        "purpose": "MCP client integration for external tools"
+      },
+      {
+        "path": "lazyllm/tools/memory/",
+        "purpose": "agent memory backends"
+      },
+      {
+        "path": "lazyllm/tools/git/",
+        "purpose": "git platform clients and a multi-round LLM code-review runner with checkpoints, lint and coverage checks"
+      },
+      {
+        "path": "lazyllm/tools/rag/",
+        "purpose": "RAG stack: document loading, parsing, stores, retrievers, rerankers; doc_service and parsing_service run ingestion as a service with a SQL-backed task queue and worker processes"
+      },
+      {
+        "path": "lazyllm/tools/data/",
+        "purpose": "LLM-driven data synthesis and cleaning operators and pipelines"
+      },
+      {
+        "path": "lazyllm/tools/fs/, servers/, services/, webpages/, eval/, ...",
+        "purpose": "file system abstractions, server wrappers, train/infer services, web UI, evaluation"
+      },
+      {
+        "path": "lazyllm/engine/",
+        "purpose": "LightEngine building executable graphs from JSON descriptions"
+      },
+      {
+        "path": "lazyllm/tracing/",
+        "purpose": "tracing subsystem with backends, collection and consumption"
+      },
+      {
+        "path": "csrc/",
+        "purpose": "C++ core with Python bindings"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "lazyllm/tools/agent/reactAgent.py",
+        "lines": "109",
+        "snippet": "agent = loop(fc, stop_condition=lambda x: isinstance(x, str), count=self._max_retries + 1)"
+      },
+      {
+        "file": "lazyllm/tools/agent/functionCall.py",
+        "lines": "157-161, 174-176",
+        "snippet": "if tool_calls := llm_output.get('tool_calls'):\n    if isinstance(tool_calls, list): [item.pop('index', None) for item in tool_calls]\n    if self._stream:\n        _write_agent_data('tool_calls', tool_calls=tool_calls)\n    tool_calls_results = self._tools_manager(tool_calls)\n...\nelse:\n    llm_output = llm_output['content']\nreturn llm_output"
+      },
+      {
+        "file": "lazyllm/tools/agent/functionCall.py",
+        "lines": "126-143",
+        "snippet": "elif isinstance(input, dict):\n    tool_call_results = [\n        {\n            'role': 'tool',\n            'content': str(tool_call['tool_call_result']),\n            'tool_call_id': tool_call['id'],\n            'name': tool_call['function']['name'],\n        } for tool_call in workspace['tool_call_trace']\n    ]\n    ...\n    workspace['history'].extend(tool_call_results)"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "FunctionCall._post_action executes the tool_calls the LLM emitted via ToolManager (functionCall.py:157-161); the model output determines which tool runs next.",
+      "consumes_feedback": "_build_history appends tool results as role 'tool' messages to the workspace history (functionCall.py:126-143), which becomes the chat history of the next LLM call.",
+      "multi_turn_until_termination": "ReactAgent wraps FunctionCall in loop(..., stop_condition=isinstance(x, str), count=max_retries + 1) (reactAgent.py:109); it iterates until the model answers with plain text or the iteration cap is hit."
+    }
+  },
+  "topology": {
+    "verdict": "single-agent",
+    "evidence": [
+      {
+        "file": "lazyllm/tools/agent/reactAgent.py",
+        "lines": "109",
+        "snippet": "agent = loop(fc, stop_condition=lambda x: isinstance(x, str), count=self._max_retries + 1)"
+      },
+      {
+        "file": "lazyllm/tools/agent/planAndSolveAgent.py",
+        "lines": "57-61",
+        "snippet": "self._plan_llm = plan_llm.share(prompt=self._planner_prompter, stream=self._planner_stream)\\\n    .used_by(self._module_id)\nself._solve_llm = solve_llm.share().used_by(self._module_id)\nprompt = self._append_workspace_prompt(FC_PROMPT)\nself._fc = FunctionCall(llm=self._solve_llm, return_trace=return_trace, stream=stream,"
+      },
+      {
+        "file": "lazyllm/engine/engine.py",
+        "lines": "501-506",
+        "snippet": "@NodeConstructor.register('FunctionCall', subitems=['tools'])\ndef make_fc(base_model: str, tools: List[str], algorithm: Optional[str] = None):\n    f = lazyllm.tools.PlanAndSolveAgent if algorithm == 'PlanAndSolve' else \\\n        lazyllm.tools.ReWOOAgent if algorithm == 'ReWOO' else \\\n        lazyllm.tools.ReactAgent\n    return f(Engine().build_node(base_model).func.func, _get_tools(tools))"
+      },
+      {
+        "file": "lazyllm/tools/git/review/rounds/ragent_verify.py",
+        "lines": "269-277",
+        "snippet": "agent = ReactAgent(\n    llm, tools=traced_tools, max_retries=_R3_FILE_AGENT_RETRIES,\n    workspace=clone_dir, force_summarize=True,\n    force_summarize_context=(\n        f'Exploring context for {path}:\\n{diff_chunk[:800]}\\n\\n'\n        f'Key framework conventions:\\n{agent_instructions[:400]}'\n    ),\n    keep_full_turns=2,\n)"
+      }
+    ],
+    "justification": "The agent abstraction is one LLM driving one tool loop: ReactAgent wraps FunctionCall in loop(...) with a stop condition (reactAgent.py:109). PlanAndSolveAgent and ReWOOAgent share plan and solve LLM instances inside a fixed pipeline; only the solver runs the FunctionCall tool loop, the planner is a single prompt step of the same workflow (planAndSolveAgent.py:57-61). The git review application creates several independent ReactAgent instances per file or review unit (e.g. ragent_verify.py:269-277); fixed Python stage code decides which agent runs and collects their results. The engine's FunctionCall node accepts arbitrary engine nodes as tools (engine.py:501-506), so nesting agents is possible only through a user-defined graph.",
+    "verdict_raw": "single-agent"
+  },
+  "resilience": [
+    {
+      "name": "ReAct loop iteration cap",
+      "what_it_is": "The FunctionCall step runs inside loop(..., count=max_retries + 1) with max_retries defaulting to 5, so at most 6 LLM/tool rounds. If the loop ends with a pending tool-call dict and no text answer, _post_process raises ValueError. PlanAndSolveAgent applies the same cap to each solver sub-loop and FunctionCallAgent to its loop.",
+      "function_in_system": "Bounds the outer agent loop in ReactAgent.build_agent. Stops runaway tool-calling where the model keeps requesting tools and never produces a final answer. Otherwise a looping model burns unbounded tokens, time and tool side effects.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/base.py",
+          "lines": "31-32",
+          "snippet": "def __init__(self, llm=None, tools: Optional[List[Union[str, Callable, Dict]]] = None,\n             max_retries: int = 5, return_trace: bool = False,"
+        },
+        {
+          "file": "lazyllm/tools/agent/reactAgent.py",
+          "lines": "109",
+          "snippet": "agent = loop(fc, stop_condition=lambda x: isinstance(x, str), count=self._max_retries + 1)"
+        },
+        {
+          "file": "lazyllm/tools/agent/reactAgent.py",
+          "lines": "170-171",
+          "snippet": "raise ValueError(f'After retrying {self._max_retries} times, the react agent still failes to call '\n                 f'successfully.')"
+        },
+        {
+          "file": "lazyllm/tools/agent/planAndSolveAgent.py",
+          "lines": "90-91",
+          "snippet": "agent.lp.solve = loop(self._fc, stop_condition=lambda x: isinstance(x, str),\n                      count=self._max_retries + 1)"
+        }
+      ]
+    },
+    {
+      "name": "forced final summary on iteration exhaustion",
+      "what_it_is": "With force_summarize=True, hitting the iteration cap triggers one extra non-streaming LLM call. It receives the last 8 history messages (content cut to 300 chars, 1000 for the newest), an optional task context of up to 500 chars and the instruction to stop calling tools and answer immediately. Its text replaces the ValueError; if the call fails or returns nothing, the ValueError is raised as before.",
+      "function_in_system": "Sits in ReactAgent._post_process after the loop has run out of iterations. Converts a hard failure into a best-effort answer built from the tool observations gathered so far. Otherwise the caller receives only an exception and all intermediate work is lost.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/reactAgent.py",
+          "lines": "66-69",
+          "snippet": "_FORCE_SUMMARIZE_MSG = (\n    'You have reached the maximum number of tool calls. '\n    'Stop calling tools now and provide your final answer immediately.'\n)"
+        },
+        {
+          "file": "lazyllm/tools/agent/reactAgent.py",
+          "lines": "116-117, 129-130, 142-143",
+          "snippet": "def _force_summarize_from_history(self, history: list) -> Optional[str]:\n    recent = history[-8:]\n...\n    limit = 1000 if idx == len(recent) - 1 else 300\n    obs_lines.append(f'{role}: {content_str[:limit]}')\n...\n    summarize_llm = self._llm.share(stream=False)\n    resp = summarize_llm(summarize_prompt)"
+        },
+        {
+          "file": "lazyllm/tools/agent/reactAgent.py",
+          "lines": "155-169",
+          "snippet": "if self._force_summarize:\n    ...\n    if history:\n        LOG.warning(f'ReactAgent reached max_retries={self._max_retries}, attempting force summarize.')\n        summary = None\n        try:\n            summary = self._force_summarize_from_history(history)\n        except Exception as e:\n            LOG.warning(f'ReactAgent force-summarize call failed: {e}')\n        if summary is not None:\n            return summary"
+        }
+      ]
+    },
+    {
+      "name": "compaction of old tool results in chat history",
+      "what_it_is": "With keep_full_turns=N > 0, the chat history passed to the LLM keeps the newest N tool-result messages intact and truncates every older tool result to its first 200 characters, prefixed with a '[truncated X chars]' marker.",
+      "function_in_system": "Runs in FunctionCall._build_history before every LLM call. Keeps the prompt size in check during long tool chains with large observations. Otherwise the history grows with every full tool output until it hits the context window or inflates cost per turn.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/functionCall.py",
+          "lines": "41, 44-51",
+          "snippet": "_COMPACTION_TRUNCATE_LEN = 200  # chars kept per old tool result\n...\ndef _compact_chat_history(history: List[Dict[str, Any]], keep_full_turns: int) -> List[Dict[str, Any]]:\n    # identify tool-result message indices (role == 'tool'), from oldest to newest\n    tool_indices = [i for i, m in enumerate(history) if m.get('role') == 'tool']\n    # keep the last keep_full_turns tool results intact; truncate the rest\n    cutoff = len(tool_indices) - keep_full_turns\n    if cutoff <= 0:\n        return list(history)\n    to_truncate = set(tool_indices[:cutoff])"
+        },
+        {
+          "file": "lazyllm/tools/agent/functionCall.py",
+          "lines": "62-64",
+          "snippet": "if isinstance(content, str) and len(content) > _COMPACTION_TRUNCATE_LEN:\n    truncated = content[:_COMPACTION_TRUNCATE_LEN]\n    msg = dict(msg, content=f'[truncated {len(content)} chars] {truncated}...')"
+        },
+        {
+          "file": "lazyllm/tools/agent/functionCall.py",
+          "lines": "144-146",
+          "snippet": "chat_history = workspace['history'][:history_idx]\nif self._keep_full_turns > 0:\n    chat_history = _compact_chat_history(chat_history, self._keep_full_turns)"
+        }
+      ]
+    },
+    {
+      "name": "tool-call validation with error feedback to the model",
+      "what_it_is": "ToolManager checks every tool call for a valid structure, a known tool name and arguments that pass the pydantic schema generated from the tool signature and docstring. Each failure yields an error string as the tool result (e.g. 'Tool [x] is not available. Please choose from the available tools.'). Exceptions raised inside a tool are caught and returned as '[Tool Error] <Type>: <msg>'. MCP tool wrappers apply the same pattern: missing required parameters and failed MCP calls return an error string.",
+      "function_in_system": "Sits between the LLM output and tool execution in FunctionCall._post_action. Hallucinated tools, malformed arguments and crashing tools become observations the model reads in the next round and can correct. Otherwise one bad tool call raises out of the loop and aborts the whole agent run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/toolsManager.py",
+          "lines": "664-682",
+          "snippet": "def _parse_tool_call(self, tc):\n    func = tc.get('function') if isinstance(tc, dict) else None\n    if not func or 'name' not in func or 'arguments' not in func:\n        return None, f'Tool call format is invalid, expected: {TOOL_CALL_FORMAT_EXAMPLE}'\n    ...\n    tool = self._tool_call.get(name)\n    if tool is None:\n        ...\n        return None, f'Tool [{name}] is not available. Please choose from the available tools.'\n    if not self._validate_tool(name, arguments):\n        return None, f'Tool [{name}] parameters error.'\n    return tool, arguments"
+        },
+        {
+          "file": "lazyllm/tools/agent/toolsManager.py",
+          "lines": "217-225",
+          "snippet": "def validate_parameters(self, arguments: Dict[str, Any]) -> bool:\n    if len(self.required_args.difference(set(arguments.keys()))) == 0:\n        # contains all required parameters\n        try:\n            self._validate_input(arguments)\n            return True\n        except ValidationError:\n            return False\n    return False"
+        },
+        {
+          "file": "lazyllm/tools/agent/toolsManager.py",
+          "lines": "691-694, 699-704",
+          "snippet": "tool, args_or_err = self._parse_tool_call(tc)\nif tool is None:\n    callables.append(lambda *_, _e=args_or_err: _e)\n    call_arguments.append({})\n...\ndef _safe_call(args, _tool=tool):\n    try:\n        return _tool(args)\n    except Exception as e:\n        lazyllm.LOG.warning(f'[ToolCall] tool={_tool.name!r} raised: {type(e).__name__}: {e}')\n        return f'[Tool Error] {type(e).__name__}: {e}'"
+        },
+        {
+          "file": "lazyllm/tools/mcp/tool_adaptor.py",
+          "lines": "92-95, 106-108",
+          "snippet": "missing_params: Set[str] = set(required) - set(kwargs.keys())\nif missing_params:\n    LOG.warning(f'Missing required parameters: {missing_params}')\n    return f'Missing required parameters: {missing_params}'\n...\nexcept Exception as e:\n    LOG.error(f'Failed to call MCP tool \"{tool_name}\": {e!s}')\n    return f'Failed to call MCP tool \"{tool_name}\": {e!s}'"
+        }
+      ]
+    },
+    {
+      "name": "lenient tool-argument parsing and text fallback for tool calls",
+      "what_it_is": "Tool arguments are parsed with json5; on failure trailing commas are stripped, and as a last resort a truncated JSON is trimmed and closed by appending the missing brackets and braces. If the LLM output carries no structured tool_calls, a regex recognizes free text of the form 'Action: Call <tool> with parameters {...}' and turns it into a tool call.",
+      "function_in_system": "Sits at the parsing boundary between LLM output and ToolManager. Salvages slightly malformed or truncated model output (e.g. output cut off at the token limit, models that write tool calls as text). Otherwise such turns end the loop as a plain-text 'final answer' or fail argument parsing.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/toolsManager.py",
+          "lines": "645-662",
+          "snippet": "def _safe_parse_json(raw):\n    import re as _re\n    try:\n        return json.loads(raw)\n    except Exception:\n        pass\n    cleaned = _re.sub(r',\\s*([}\\]])', r'\\1', raw)\n    try:\n        return json.loads(cleaned)\n    except Exception:\n        pass\n    # last resort: close truncated JSON by counting unmatched braces\n    s = cleaned.strip()\n    opens = s.count('{') - s.count('}')\n    opens_sq = s.count('[') - s.count(']')\n    s = _re.sub(r'[,:\\\"\\'\\w\\s]*$', '', s.rstrip())\n    s = s + (']' * max(0, opens_sq)) + ('}' * max(0, opens))\n    return json.loads(s)"
+        },
+        {
+          "file": "lazyllm/tools/agent/functionCall.py",
+          "lines": "151-156",
+          "snippet": "if not llm_output.get('tool_calls'):\n    if (match := re.search(r'Action:\\s*Call\\s+(\\w+)\\s+with\\s+parameters\\s+(\\{.*?\\})', llm_output['content'])):\n        try:\n            llm_output['tool_calls'] = [{'function': {'name': match.group(1),\n                                                      'arguments': json.loads(match.group(2))}}]\n        except Exception: pass"
+        }
+      ]
+    },
+    {
+      "name": "history reset after a failed step",
+      "what_it_is": "If a FunctionCall step raises, the per-session agent workspace and the LLM chat history are cleared before the exception propagates.",
+      "function_in_system": "Sits in FunctionCall.forward around the LLM plus tool pipeline. Per the code comment, it keeps a follow-up request (e.g. the user saying 'continue') from inheriting a corrupted history with truncated tool_calls and invalid JSON arguments. Otherwise every later turn in the session replays the broken messages and fails again.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/functionCall.py",
+          "lines": "181-189",
+          "snippet": "try:\n    result = self._impl(input)\nexcept Exception:\n    # On failure, clear any in-progress workspace and the LLM chat history so that\n    # the next call (e.g. user says \"continue\") does not inherit a corrupted history\n    # that may contain truncated tool_calls with invalid JSON arguments.\n    locals['_lazyllm_agent'].pop('workspace', None)\n    locals['chat_history'][self._llm._module_id] = []\n    raise"
+        }
+      ]
+    },
+    {
+      "name": "dangerous-action guard in builtin tools",
+      "what_it_is": "shell_tool matches the command against a denylist (rm -rf, sudo, chmod, kill, package managers, curl/wget/ssh, git reset --hard, git clean -fd, output redirection). write_file on an existing file, delete_file, move_file and download_file are gated as well. A hit returns {'status': 'needs_approval', 'reason': ...} and the action is skipped. An optional root argument confines file paths to a directory. The gate is lifted by the allow_unsafe parameter, which is part of the tool schema exposed to the LLM; no code in the repo routes needs_approval to a human.",
+      "function_in_system": "Sits inside the builtin tools that every agent receives by default (enable_builtin_tools=True). Blocks the first attempt at a destructive or network action and tells the model why. The model can re-issue the call with allow_unsafe=True, so the guard is a speed bump that the model itself controls. Otherwise a single hallucinated command deletes files, installs packages or leaks data with no friction at all. Skill scripts started through run_script pass through the same shell_tool check.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/shell_tool.py",
+          "lines": "8-12, 23-26",
+          "snippet": "_DANGEROUS_WORD_TOKENS = [\n    'rm', 'sudo', 'chmod', 'chown', 'mkfs', 'dd', 'shutdown', 'reboot', 'poweroff',\n    'kill', 'killall', 'pkill', 'apt', 'yum', 'dnf', 'brew', 'pip', 'conda', 'curl',\n    'wget', 'scp', 'ssh',\n]\n...\ndef _detect_dangerous_command(cmd: str) -> Optional[str]:\n    lowered = cmd.lower()\n    if re.search(r'\\brm\\s+-rf\\b', lowered):\n        return 'rm -rf'"
+        },
+        {
+          "file": "lazyllm/tools/agent/shell_tool.py",
+          "lines": "41-42, 61-68",
+          "snippet": "def shell_tool(cmd: str, cwd: Optional[str] = None, timeout: int = 30,\n               env: Optional[Dict[str, str]] = None, allow_unsafe: bool = False) -> dict:\n...\n    dangerous = _detect_dangerous_command(cmd)\n    if dangerous and not allow_unsafe:\n        return {\n            'status': 'needs_approval',\n            'reason': f'Command contains potentially dangerous token: {dangerous}',\n            'command': cmd,\n            'cwd': cwd or os.getcwd(),\n        }"
+        },
+        {
+          "file": "lazyllm/tools/agent/file_tool.py",
+          "lines": "14-25",
+          "snippet": "def _check_root(path: str, root: Optional[str]) -> Optional[Dict[str, str]]:\n    if not root:\n        return None\n    root_abs = _resolve_path(root)\n    path_abs = _resolve_path(path)\n    if os.path.commonpath([path_abs, root_abs]) != root_abs:\n        return {\n            'status': 'needs_approval',\n            'reason': 'Path is outside the allowed root.',\n            'path': path_abs,\n            'root': root_abs,\n        }"
+        },
+        {
+          "file": "lazyllm/tools/agent/file_tool.py",
+          "lines": "251-256",
+          "snippet": "if not allow_unsafe:\n    return {\n        'status': 'needs_approval',\n        'reason': 'Deleting files requires approval.',\n        'path': path_abs,\n    }"
+        },
+        {
+          "file": "lazyllm/tools/agent/download_tool.py",
+          "lines": "33-38",
+          "snippet": "if not allow_unsafe:\n    return {\n        'status': 'needs_approval',\n        'reason': 'Downloading remote files requires approval.',\n        'url': url,\n        'path': dst_abs,\n    }"
+        },
+        {
+          "file": "lazyllm/tools/agent/skill_manager.py",
+          "lines": "352-355",
+          "snippet": "cmd = ['python' if ext == '.py' else 'bash' if ext in ('.sh', '.bash') else 'sh', script_path]\nif args:\n    cmd.extend(args)\nreturn _shell_tool(' '.join(shlex.quote(p) for p in cmd), cwd=cwd or base, allow_unsafe=allow_unsafe)"
+        }
+      ]
+    },
+    {
+      "name": "execution and output bounds for builtin tools",
+      "what_it_is": "Default limits on builtin tools: shell_tool subprocess timeout 30 s, download_file timeout 30 s, read_file returns at most 200000 chars and flags truncated=True, search_in_files stops at 50 matches and skips files over 2 MB, get_skill rejects SKILL.md files over 5 MB (config max_skill_md_bytes) with status 'too_large'.",
+      "function_in_system": "Sits inside the tool implementations, below ToolManager. Keeps a single tool call from hanging the loop or dumping a huge observation into the next prompt. Otherwise a stuck command blocks the agent indefinitely and a large file or search result floods the context window.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/shell_tool.py",
+          "lines": "70-77",
+          "snippet": "completed = subprocess.run(\n    cmd,\n    cwd=cwd,\n    env=env,\n    shell=True,\n    text=True,\n    capture_output=True,\n    timeout=timeout,\n)"
+        },
+        {
+          "file": "lazyllm/tools/agent/file_tool.py",
+          "lines": "60-63",
+          "snippet": "truncated = False\nif max_chars is not None and len(content) > max_chars:\n    content = content[:max_chars]\n    truncated = True"
+        },
+        {
+          "file": "lazyllm/tools/agent/file_tool.py",
+          "lines": "151-152, 161-162",
+          "snippet": "if os.path.getsize(file_path) > max_file_size:\n    continue\n...\nif len(results) >= max_results:\n    return {'status': 'ok', 'results': results}"
+        },
+        {
+          "file": "lazyllm/tools/agent/skill_manager.py",
+          "lines": "318-320",
+          "snippet": "if size > self._max_skill_md_bytes and not allow_large:\n    return {'status': 'too_large', 'name': name, 'path': skill_md,\n            'size': size, 'limit': self._max_skill_md_bytes}"
+        }
+      ]
+    },
+    {
+      "name": "lazy tool groups with gateway tool",
+      "what_it_is": "A tool group defined as dict (lazy=True by default) or an instance with __public_apis__ appears in the tool list as one gateway tool get_<group>_methods. Calling it records the group in the session's _active_groups; from then on tools_description includes the full schemas of the group's member tools.",
+      "function_in_system": "Sits in ToolManager.tools_description, which is rebuilt for every LLM call. Progressive disclosure keeps large toolsets out of the prompt until the model asks for them. Otherwise every tool schema of every group is sent on every turn, inflating prompt cost and diluting tool selection.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/toolsManager.py",
+          "lines": "370-373",
+          "snippet": "if not self._lazy or (active_groups is not None and self._name in active_groups):\n    return [x for item in self._expanded_descs\n            for x in (item.get_description(active_groups) if isinstance(item, ToolContainer) else [item])]\nreturn [self._gateway_desc]"
+        },
+        {
+          "file": "lazyllm/tools/agent/toolsManager.py",
+          "lines": "382-388",
+          "snippet": "def _gateway_apply() -> str:\n    workspace = lazyllm_locals['_lazyllm_agent'].get('workspace', {})\n    active = workspace.setdefault('_active_groups', [])\n    if group_name not in active:\n        active.append(group_name)\n    return (f'Activated tool group \"{group_name}\". '\n            f'Available tools: {\", \".join(child_names)}')"
+        },
+        {
+          "file": "lazyllm/tools/agent/toolsManager.py",
+          "lines": "526-527",
+          "snippet": "group = ToolGroup(tools=element['tools'], name=element['name'], desc=element['desc'],\n                  lazy=element.get('lazy', True), prefix=element.get('prefix', None),"
+        }
+      ]
+    },
+    {
+      "name": "credential-based tool hiding and first-valid provider fallback",
+      "what_it_is": "Tools or groups registered with a key_source (env var, config entry, globals entry or callable) are dropped from the tool descriptions when none of their keys resolves (should_skip). A group with pick_first_valid=True exposes only its first child whose key is available, forming an ordered fallback chain across tool providers.",
+      "function_in_system": "Sits in tool description generation before each LLM call. The model only sees tools that can actually run with the current credentials, and a provider group degrades to the next configured provider. Otherwise the model picks tools that fail with auth errors and wastes turns on them.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/toolsManager.py",
+          "lines": "446-449",
+          "snippet": "def should_skip(self) -> bool:\n    if self._key_source is None: return False\n    sources = self._key_source if isinstance(self._key_source, list) else [self._key_source]\n    return not any(bool(self._resolve_one_key(src)) for src in sources)"
+        },
+        {
+          "file": "lazyllm/tools/agent/toolsManager.py",
+          "lines": "364-369",
+          "snippet": "if self._pick_first_valid:\n    for child, precomputed in zip(self._children, self._expanded_descs):\n        if _child_is_valid(child):\n            return child.get_description(active_groups) if isinstance(child, ToolContainer) \\\n                else [precomputed]\n    return []"
+        }
+      ]
+    },
+    {
+      "name": "model-call retry with fixed delay schedule",
+      "what_it_is": "Online chat calls and TrainableModule calls are retried on requests exceptions (ConnectionError, ChunkedEncodingError and any RequestException, which includes every non-200 HTTP status) up to max_retries=3 attempts, sleeping 3 s, 10 s, 30 s between attempts. All error classes are retried alike, auth and bad-request errors included.",
+      "function_in_system": "Wraps the HTTP request inside the LLM module's forward, one level below the FunctionCall step. Absorbs transient network drops and provider hiccups before they surface as a failed agent step. Otherwise a single dropped connection raises through FunctionCall and ends the agent run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/module/llms/onlinemodule/base/onlineChatModuleBase.py",
+          "lines": "157-159, 187-203",
+          "snippet": "def _forward_with_retry(self, data: Dict[str, Any], *, runtime_url: str, stream_output: Union[bool, Dict],\n                        proxies: Optional[Dict], max_retries: int) -> List[Dict[str, Any]]:\n    _RETRY_DELAYS = [3, 10, 30]\n...\n    try:\n        msg_json = self._forward_impl(data, runtime_url=runtime_url,\n                                      stream_output=stream_output, proxies=proxies)\n    except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError):\n        if attempt < max_retries - 1:\n            partial_content = self._extract_partial_content(msg_json)\n            lazyllm.LOG.warning(f'Stream interrupted (attempt {attempt + 1}), retrying...')\n            time.sleep(_RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)])\n            continue\n        raise\n    except requests.RequestException:\n        if attempt < max_retries - 1:\n            lazyllm.LOG.warning(f'Request failed (attempt {attempt + 1}), retrying...')\n            time.sleep(_RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)])\n            continue\n        raise\n    break"
+        },
+        {
+          "file": "lazyllm/module/llms/onlinemodule/base/onlineChatModuleBase.py",
+          "lines": "144-147",
+          "snippet": "if r.status_code != 200:\n    err_msg = '\\n'.join([c.decode('utf-8') for c in r.iter_content(None)]) \\\n        if stream_output else r.text\n    raise requests.RequestException(f'{r.status_code}: {err_msg}')"
+        },
+        {
+          "file": "lazyllm/module/llms/trainablemodule.py",
+          "lines": "586, 590, 599-613",
+          "snippet": "_RETRY_DELAYS = [3, 10, 30]\n...\nfor attempt in range(max_retries):\n...\n    try:\n        return self._forward_impl(data, stream_output=stream_output, url=url,\n                                  text_input=text_input_for_token_usage, partial_out=partial_out)\n    except (requests.exceptions.ChunkedEncodingError, requests.exceptions.ConnectionError):\n        if attempt < max_retries - 1:\n            LOG.warning(f'Stream interrupted (attempt {attempt + 1}), retrying...')\n            time.sleep(_RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)])\n            continue\n        raise\n    except requests.RequestException:\n        if attempt < max_retries - 1:\n            LOG.warning(f'Request failed (attempt {attempt + 1}), retrying...')\n            time.sleep(_RETRY_DELAYS[min(attempt, len(_RETRY_DELAYS) - 1)])\n            continue\n        raise"
+        }
+      ]
+    },
+    {
+      "name": "continuation of interrupted streaming responses",
+      "what_it_is": "When a stream breaks mid-response, the content received so far is extracted. On the retry the online module appends it as an assistant message plus a user message asking the model to continue exactly where it left off with no repetition. If the cut happened inside a tool_calls block, the continuation is skipped and the original messages are resent, since truncated function arguments trigger 400 errors at providers. TrainableModule appends the partial output to the original input for the retry.",
+      "function_in_system": "Part of the retry loop of the LLM module. Preserves already generated tokens across a connection drop, saving time and output cost on long responses. Otherwise every interruption restarts generation from scratch.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/module/llms/onlinemodule/base/onlineChatModuleBase.py",
+          "lines": "160-167",
+          "snippet": "_CONTINUATION_PROMPT = (\n    'Your previous response was interrupted. '\n    'Please continue your response exactly from where it left off. '\n    'Do NOT repeat any content that was already provided. '\n    'Do NOT add any transitional phrases like \"Continuing...\" or \"As I was saying...\". '\n    'Just seamlessly continue the response. '\n    'Keep the same language as your previous response.'\n)"
+        },
+        {
+          "file": "lazyllm/module/llms/onlinemodule/base/onlineChatModuleBase.py",
+          "lines": "171-186",
+          "snippet": "if attempt > 0 and partial_content:\n    # If the stream was cut mid-tool-call, the partial assistant message contains\n    # a truncated tool_calls block with malformed JSON arguments.  Appending it\n    # back into the history causes a 400 from providers that validate\n    # function.arguments.  In that case, skip the continuation injection and\n    # retry with the original messages so the model can restart the tool call.\n    last_msg = data['messages'][-1] if data['messages'] else {}\n    stream_cut_in_tool_call = (\n        last_msg.get('role') == 'assistant' and last_msg.get('tool_calls')\n    )\n    if not stream_cut_in_tool_call:\n        data['messages'].append({'role': 'assistant', 'content': partial_content})\n        data['messages'].append({'role': 'user', 'content': _CONTINUATION_PROMPT})\n    else:\n        lazyllm.LOG.warning('Stream interrupted mid-tool-call; retrying without continuation injection.')\n    partial_content = ''"
+        },
+        {
+          "file": "lazyllm/module/llms/trainablemodule.py",
+          "lines": "591-598",
+          "snippet": "if attempt > 0 and partial_out:\n    partial_messages = partial_out[0]\n    if isinstance(data, dict):\n        data = dict(data)\n        data[inputs_key] = original_input + partial_messages\n    else:\n        data = original_input + partial_messages\n    partial_out.clear()"
+        }
+      ]
+    },
+    {
+      "name": "module result cache",
+      "what_it_is": "ModuleBase.use_cache() enables caching of a module's forward result keyed by an md5 hash of args and kwargs. Storage backends: memory (default), file, sqlite, redis (LAZYLLM_CACHE_STRATEGY); LAZYLLM_CACHE_MODE selects RW, RO, WO or NONE. The config flag cache_local_module turns it on for all TrainableModules and is described as intended for unit tests.",
+      "function_in_system": "Sits in ModuleBase._call_impl around every module call, LLM modules included. Returns a stored result for a repeated identical call and skips the model invocation. Otherwise identical requests (e.g. repeated test or development runs) pay for a full model call each time.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/module/module.py",
+          "lines": "33-34",
+          "snippet": "lazyllm.config.add('cache_mode', str, 'RW', 'CACHE_MODE', options=['RW', 'RO', 'WO', 'NONE'],\n                   description='The default cache mode to use(Read and Write, Read Only, Write Only, None).')"
+        },
+        {
+          "file": "lazyllm/module/module.py",
+          "lines": "348-358",
+          "snippet": "def _call_impl(self, *args, **kw):\n    if self._use_cache and 'R' in lazyllm.config['cache_mode']:\n        try:\n            return module_cache.get(self.__cache_hash__, args, kw)\n        except CacheNotFoundError:\n            self._cache_miss_handler()\n    with globals.stack_enter(self.identities):\n        r = self.forward(**args[0], **kw) if args and isinstance(args[0], kwargs) else self.forward(*args, **kw)\n    if self._use_cache and 'W' in lazyllm.config['cache_mode']:\n        module_cache.set(self.__cache_hash__, args, kw, r)\n    return r"
+        },
+        {
+          "file": "lazyllm/module/llms/trainablemodule.py",
+          "lines": "261-262, 279-280",
+          "snippet": "config.add('cache_local_module', bool, False, 'CACHE_LOCAL_MODULE',\n           description='Whether to cache the local module result. Use for unit test.')\n...\nif config['cache_local_module']:\n    self.use_cache()"
+        }
+      ]
+    },
+    {
+      "name": "model backend fallback chain and key-based provider selection at construction",
+      "what_it_is": "AutoModel tries, in order: a TrainableModule bound to a deployed endpoint from config, an OnlineModule from config, a plain OnlineModule, and finally a local TrainableModule; each failure is logged and the next stage is tried. When OnlineChatModule is created with no source, it picks the configured default source or else the first registered provider whose *_api_key is set.",
+      "function_in_system": "Runs once when the application wires up its LLM, before any agent loop starts. Lets the same code come up on whatever backend is available in the current environment. Otherwise a missing deployment or missing key for one provider aborts application startup.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/module/llms/automodel.py",
+          "lines": "36-59",
+          "snippet": "# 1) first: try TrainableModule with trainable config (for directly connecting deployed endpoint)\nif trainable_entry is not None:\n    ...\n    try:\n        module = TrainableModule(**trainable_args)\n        if module._url or module._impl._get_deploy_tasks.flag: return module\n    except Exception as e:\n        LOG.warning('Fail to create `TrainableModule`, will try to '\n                    f'load model {model} with `OnlineModule`. Since the error: {e}')\n\n# 2) second: try OnlineModule with online config if found\nif online_entry is not None:\n    online_args = process_online_args(model=model, source=source, type=type, entry=online_entry)\n    if online_args: return OnlineModule(**online_args)\n\n# 3) finally: fallback (no config or config unusable)\ntry:\n    return OnlineModule(model=model, source=source, type=type)\nexcept Exception as e:\n    LOG.warning('`OnlineModule` creation failed, and will try to '\n                f'load model {model} with local `TrainableModule`. Since the error: {e}')\n    return TrainableModule(model, type=type)"
+        },
+        {
+          "file": "lazyllm/module/llms/onlinemodule/base/utils.py",
+          "lines": "21-27",
+          "snippet": "if (default_source := config['default_source']):\n    return default_source, config['default_key']\n\nfor candidate in available_models.keys():\n    candidate = candidate[:-len(type)]\n    if config[f'{candidate}_api_key']:\n        return candidate, None"
+        }
+      ]
+    },
+    {
+      "name": "random spreading across multiple API keys and base URLs",
+      "what_it_is": "If api_key or base_url is given as a list, each request picks one entry via random.choice. Selection is uniform and ignores past failures.",
+      "function_in_system": "Sits in header and URL resolution of every online model request. Spreads load and per-key rate limits across several keys or endpoints. Otherwise all traffic hits one key or endpoint and runs into its rate limit sooner.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/module/llms/onlinemodule/base/utils.py",
+          "lines": "93-98",
+          "snippet": "def _api_key(self):\n    if self._dynamic_auth:\n        return self._materialize_lazy_api_key()\n    if isinstance(self.__api_keys, list):\n        return random.choice(self.__api_keys)\n    return self.__api_keys"
+        },
+        {
+          "file": "lazyllm/module/llms/onlinemodule/base/onlineChatModuleBase.py",
+          "lines": "50-52",
+          "snippet": "@property\ndef _base_url(self):\n    return random.choice(self.__base_url) if isinstance(self.__base_url, list) else self.__base_url"
+        }
+      ]
+    },
+    {
+      "name": "subprocess sandbox with timeout for tool execution",
+      "what_it_is": "DummySandbox writes the code to a fresh tempfile.mkdtemp directory, runs it as a separate Python process with the temp dir as cwd, kills it after timeout=30 s and removes the directory in a finally block. ToolManager serializes every registered tool with execute_in_sandbox=True (the ModuleTool default) and its arguments via cloudpickle into a script and runs that script in the sandbox; builtin tools set execute_in_sandbox=False. SandboxFusion is a remote backend selectable via SANDBOX_TYPE with run_timeout, compile_timeout, memory_limit_mb and a ping check before first use.",
+      "function_in_system": "Sits in ToolManager.forward between tool-call validation and tool execution. Hanging tools are stopped after 30 s, crashes and file side effects stay inside a child process and a throwaway directory. On the ToolManager path the sandbox returns only result.stderr on failure, so a timeout or blocked script reaches the model as an empty observation. Otherwise a user tool that hangs or crashes blocks or kills the agent process itself.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/base.py",
+          "lines": "36, 59",
+          "snippet": "sandbox: Union[str, LazyLLMSandboxBase, None] = 'auto',\n...\nself._sandbox = create_sandbox() if sandbox == 'auto' else sandbox"
+        },
+        {
+          "file": "lazyllm/tools/agent/toolsManager.py",
+          "lines": "695-697",
+          "snippet": "elif self._sandbox and tool.execute_in_sandbox:\n    callables.append(self._sandbox)\n    call_arguments.append(self._build_sandbox_args(tool, args_or_err))"
+        },
+        {
+          "file": "lazyllm/tools/agent/toolsManager.py",
+          "lines": "242-248",
+          "snippet": "        return f'''\nimport base64\nimport cloudpickle\ntool = cloudpickle.loads(base64.b64decode({repr(tool_dump)}.encode('utf-8')))\nkwargs = cloudpickle.loads(base64.b64decode({repr(args_dump)}.encode('utf-8')))\nresult = tool(kwargs)\nprint(f'{SANDBOX_TOOL_RESULT_PREFIX}{{result}}')  # noqa print"
+        },
+        {
+          "file": "lazyllm/tools/sandbox/dummy_sandbox.py",
+          "lines": "39-49",
+          "snippet": "proc = subprocess.Popen(\n    [sys.executable, '-u', script_path],\n    stdout=subprocess.PIPE, stderr=subprocess.PIPE,\n    cwd=cwd, env=env or os.environ.copy(), text=True, bufsize=1,\n)\ntry:\n    stdout, stderr = proc.communicate(timeout=self._timeout)\nexcept subprocess.TimeoutExpired:\n    proc.kill()\n    proc.wait()\n    raise"
+        },
+        {
+          "file": "lazyllm/tools/sandbox/dummy_sandbox.py",
+          "lines": "52-58",
+          "snippet": "def _create_context(self) -> dict:\n    return {'temp_dir': tempfile.mkdtemp(prefix='lazyllm_sandbox_')}\n\ndef _cleanup_context(self, context: dict) -> None:\n    temp_dir = context.get('temp_dir')\n    if temp_dir:\n        shutil.rmtree(temp_dir, ignore_errors=True)"
+        },
+        {
+          "file": "lazyllm/tools/sandbox/sandbox_base.py",
+          "lines": "9, 116-122",
+          "snippet": "config.add('sandbox_type', str, 'dummy', 'SANDBOX_TYPE')\n...\nif self._return_sandbox_result:\n    return result.to_dict()\nelse:\n    if result.success:\n        match = re.search(rf'^{SANDBOX_TOOL_RESULT_PREFIX}(.*)', result.stdout, re.MULTILINE)\n        return match.group(1) if match else result.stdout\n    return result.stderr"
+        },
+        {
+          "file": "lazyllm/tools/sandbox/sandbox_fusion.py",
+          "lines": "88-95",
+          "snippet": "call_params = {\n    'code': code,\n    'compile_timeout': self._compile_timeout,\n    'run_timeout': self._run_timeout,\n    'memory_limit_mb': self._memory_limit_mb,\n    'language': language,\n    'files': context['files'],\n}"
+        }
+      ]
+    },
+    {
+      "name": "AST denylist check before code execution",
+      "what_it_is": "SecurityVisitor parses the code with ast and raises on calls to exec, eval, open, compile, getattr, setattr, __import__, globals, locals, vars, on os.system/popen/remove/rmdir/unlink/rename, sys.exit, os.environ access and on imports of pickle, subprocess, socket, shutil, requests, inspect and tempfile. A violation or syntax error returns _SandboxResult(success=False) with the reason and the process is never started.",
+      "function_in_system": "Sits in DummySandbox._execute before the subprocess launch. It filters model-written code sent through the code_interpreter tool, which calls the sandbox with return_sandbox_result=True, so the rejection reason reaches the model as the tool result and it can rewrite the code. For cloudpickled user tools it only inspects the wrapper script. Otherwise generated code can delete files, spawn processes or read secrets from the environment on the host.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/sandbox/dummy_sandbox.py",
+          "lines": "26-35, 90-92",
+          "snippet": "def _check_code_safety(self, code: str) -> Tuple[bool, Optional[str]]:\n    try:\n        tree = ast.parse(code)\n    except SyntaxError as e:\n        return False, f'Syntax error: {e}'\n    try:\n        SecurityVisitor().visit(tree)\n    except ValueError as e:\n        return False, str(e)\n    return True, None\n...\nis_safe, msg = self._check_code_safety(code)\nif not is_safe:\n    return _SandboxResult(success=False, error_message=msg)"
+        },
+        {
+          "file": "lazyllm/common/utils.py",
+          "lines": "46-56",
+          "snippet": "DANGEROUS_BUILTINS = {'exec', 'eval', 'open', 'compile', 'getattr',\n                      'setattr', '__import__', 'globals', 'locals', 'vars'}\n\n# **Dangerous os operations**\nDANGEROUS_OS_CALLS = {'system', 'popen', 'remove', 'rmdir', 'unlink', 'rename'}\n\n# **Dangerous sys operations**\nDANGEROUS_SYS_CALLS = {'exit', 'modules'}\n\n# **Dangerous modules**\nDANGEROUS_MODULES = {'pickle', 'subprocess', 'socket', 'shutil', 'requests', 'inspect', 'tempfile'}"
+        },
+        {
+          "file": "lazyllm/tools/agent/code_interpreter.py",
+          "lines": "11, 24-25",
+          "snippet": "_sandbox = _create_sandbox_impl(return_sandbox_result=True)\n...\ncall_once(_sandbox_once, _create_sandbox)\nreturn _sandbox(code=code, language=language)"
+        }
+      ]
+    },
+    {
+      "name": "progressive skill disclosure",
+      "what_it_is": "SkillManager builds a skill index from the YAML front matter (name, description) of each SKILL.md, skipping files above max_skill_md_bytes (5 MB), unreadable files and invalid metadata. The system prompt lists only names and descriptions; the full SKILL.md is loaded on demand through the get_skill tool. The prompt requires get_skill before read_reference/run_script and demands rel_path values copied verbatim from SKILL.md; the code checks only that the path exists.",
+      "function_in_system": "Sits in system-prompt construction and in the skill tools of the agent. Only the skill instructions relevant to the current task enter the context, and the path rule targets hallucinated script and reference paths. Otherwise every installed skill body is loaded into every prompt, or the model guesses file paths and runs arbitrary scripts.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/agent/skill_manager.py",
+          "lines": "31-35",
+          "snippet": "### How to Use Skills (Progressive Disclosure)\nYou can see the name/description above, but only fetch a skill's full instructions when it's relevant.\n\n1) **Identify relevance**: If a skill's description matches the task, consider using it.\n2) **Get the skill's full usage**: Call `get_skill` to retrieve the complete workflow."
+        },
+        {
+          "file": "lazyllm/tools/agent/skill_manager.py",
+          "lines": "242-251",
+          "snippet": "for skill_dir, skill_md in self._iter_skill_files():\n    if self._fs_getsize(skill_md) > self._max_skill_md_bytes:\n        continue\n    try:\n        content = self._fs_read(skill_md)\n    except Exception:\n        continue\n    meta = self._extract_yaml_meta(content)\n    if not self._is_meta_valid(meta):\n        continue"
+        },
+        {
+          "file": "lazyllm/tools/agent/skill_manager.py",
+          "lines": "294-301",
+          "snippet": "def build_prompt(self) -> str:\n    self._load_skills_index()\n    skills_list = self._format_skills_list(list(self._skills_index.keys()))\n    lines = ['**Skills Directory**']\n    if self._skills_dir:\n        lines.append(self._format_skills_locations())\n    lines += ['**Available Skills**', skills_list or '- (none)']\n    return f'{SKILLS_PROMPT}\\n\\n' + '\\n'.join(lines)"
+        },
+        {
+          "file": "lazyllm/tools/agent/skill_manager.py",
+          "lines": "47-51",
+          "snippet": "**Prerequisite**: You MUST call `get_skill` for the skill first and receive its\nSKILL.md content before you can use `read_reference` or `run_script`.\n\n**Path Rule**: The `rel_path` argument MUST be copied verbatim from the SKILL.md\nbody. You are FORBIDDEN from fabricating, guessing, or extrapolating paths."
+        },
+        {
+          "file": "lazyllm/tools/agent/base.py",
+          "lines": "66-68, 75-76",
+          "snippet": "if use_skills:\n    self._skill_manager = SkillManager(dir=skills_dir, skills=self._skills, fs=fs)\n    self._ensure_default_skill_tools()\n...\nif skills is None:\n    return False, []"
+        }
+      ]
+    },
+    {
+      "name": "stage checkpointing with resume and invalidation",
+      "what_it_is": "The PR review pipeline stores every stage result and a done flag per stage in a per-PR JSON checkpoint, flushed to disk on each save. resume_from=<stage> marks that stage and all later ones as invalid, a higher _PIPELINE_VERSION discards the whole checkpoint, and a changed head sha backs up the old file and purges all diff-dependent data while keeping CLONE, ARCH and SPEC. UPLOAD is skipped only on an explicit done flag.",
+      "function_in_system": "Wraps every stage of the git review runner. After a crash, timeout or failed comment upload the next run continues at the first missing stage and reuses all finished LLM and agent rounds, and the upload stage avoids double posting. Otherwise every interruption repeats the full multi-round review and its LLM cost.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/git/review/checkpoint.py",
+          "lines": "120-140",
+          "snippet": "def __init__(self, path: str, resume_from: Optional[ReviewStage] = None) -> None:\n    self._path = path\n    self._data: Dict[str, Any] = {}\n    self._resume_from = resume_from\n    if os.path.isfile(path):\n        try:\n            with open(path, 'r', encoding='utf-8') as f:\n                self._data = json.load(f)\n            lazyllm.LOG.info(f'Loaded checkpoint from {path}')\n        except (json.JSONDecodeError, OSError):\n            self._data = {}\n    old_ver = self._data.get(self._PIPELINE_VERSION_KEY, 0)\n    if old_ver < self._PIPELINE_VERSION:\n        lazyllm.LOG.warning(\n            f'Checkpoint pipeline version {old_ver} < {self._PIPELINE_VERSION}, invalidating all stages'\n        )\n        self._data = {}\n    self._data[self._PIPELINE_VERSION_KEY] = self._PIPELINE_VERSION\n    self._flush()\n    if resume_from is not None:\n        self._mark_invalidated_from(resume_from)"
+        },
+        {
+          "file": "lazyllm/tools/git/review/checkpoint.py",
+          "lines": "174-188",
+          "snippet": "def get(self, key: str) -> Any:\n    val = self._data.get(key)\n    if val is None:\n        return None\n    # clone_dir staleness check: treat as missing if directory no longer exists\n    if key == 'clone_dir' and val and not os.path.isdir(val):\n        lazyllm.LOG.warning(f'Cached clone_dir {val} no longer exists, treating as missing')\n        return None\n    # if this key belongs to an invalidated stage, treat as missing\n    inv = self._invalidated_stage()\n    if inv is not None:\n        key_stage = self._stage_for_key(key)\n        if key_stage is not None and key_stage.index() >= inv.index():\n            return None\n    return val"
+        },
+        {
+          "file": "lazyllm/tools/git/review/checkpoint.py",
+          "lines": "207-217",
+          "snippet": "def should_use_cache(self, stage: ReviewStage) -> bool:\n    # UPLOAD is a side-effectful stage (GitHub API call): never skip it based on\n    # the absence of an invalidation marker alone — require an explicit done flag.\n    if stage == ReviewStage.UPLOAD:\n        return self.is_stage_done(ReviewStage.UPLOAD)\n    if self._resume_from is None:\n        inv = self._invalidated_stage()\n        if inv is None:\n            return True\n        return stage < inv\n    return stage < self._resume_from"
+        },
+        {
+          "file": "lazyllm/tools/git/review/checkpoint.py",
+          "lines": "232-241, 269-273",
+          "snippet": "def rotate_on_head_sha_change(self, new_sha: str) -> bool:\n    # If head_sha changed, backup checkpoint and purge all review-round data.\n    # Returns True if rotation happened, False otherwise.\n    # Keeps only repo-level keys (clone, arch, spec) and pipeline metadata.\n    old_sha = self._data.get('head_sha')\n    if not old_sha or old_sha == new_sha:\n        return False\n    # backup old checkpoint\n    if os.path.isfile(self._path):\n        backup = self._path.replace('.json', f'.{old_sha[:8]}.json')\n...\nkeep['head_sha'] = new_sha\n# remove invalidation marker — we've physically purged, no need for soft invalidation\nkeep.pop(self._INVALIDATED_FROM_KEY, None)\nself._data = keep\nself._flush()"
+        },
+        {
+          "file": "lazyllm/tools/git/review/runner.py",
+          "lines": "173-182",
+          "snippet": "ckpt_path = checkpoint_path or _ReviewCheckpoint.default_path(_ckpt_key, repo)\nif clear_checkpoint:\n    # clear_checkpoint takes priority over resume_from\n    ckpt = _ReviewCheckpoint(ckpt_path)\n    ckpt.clear()\n    if os.path.isdir(pr_dir):\n        shutil.rmtree(pr_dir, ignore_errors=True)\n    ckpt = _ReviewCheckpoint(ckpt_path)\nelse:\n    ckpt = _ReviewCheckpoint(ckpt_path, resume_from=resume_from)"
+        },
+        {
+          "file": "lazyllm/tools/git/review/runner.py",
+          "lines": "451",
+          "snippet": "lazyllm.LOG.warning('Some upload batches failed; re-run with --resume_from=upload to retry')"
+        },
+        {
+          "file": "lazyllm/tools/git/review/rounds/pipeline.py",
+          "lines": "165",
+          "snippet": "ckpt.mark_stage_done(ReviewStage.RHunkScan)"
+        }
+      ]
+    },
+    {
+      "name": "review LLM-call retry with rate-limit-aware backoff and JSON repair",
+      "what_it_is": "_llm_call_with_retry retries failed calls after 3, 8 and 20 s, tripling the wait when the error matches rate-limit patterns (rate limit, 429, quota, throttle). A response that fails JSON parsing is retried as well. _parse_json_with_repair salvages truncated arrays by cutting after the last complete object and closing the bracket, then falls back to json_repair. _ensure_non_streaming_llm raises max_tokens to 32000 so multi-issue JSON answers fit.",
+      "function_in_system": "Sits under every single-shot LLM call of the review rounds, as a second retry layer above the module-level retry. Absorbs rate limits and truncated or malformed JSON output. After the last attempt a JSON call returns [] and the stage continues with an empty result. Otherwise one throttled or cut-off answer aborts the review run or crashes the stage parser.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/git/review/utils.py",
+          "lines": "184-187",
+          "snippet": "_QPS_PATTERNS = re.compile(\n    r'rate.?limit|too.?many.?request|qps|quota|429|throttl', re.IGNORECASE\n)\n_RETRY_DELAYS = (3, 8, 20)  # seconds to wait before each retry attempt"
+        },
+        {
+          "file": "lazyllm/tools/git/review/utils.py",
+          "lines": "268-286",
+          "snippet": "delays = list(_RETRY_DELAYS) + [None]\nfor attempt, delay in enumerate(delays):\n    try:\n        resp = llm(prompt)\n        if not resp or not isinstance(resp, str):\n            return [] if parse_json else ''\n        raw_response = resp.strip()\n    except Exception as exc:\n        last_llm_exc = exc\n        err_str = str(exc)\n        is_qps = bool(_QPS_PATTERNS.search(err_str))\n        if delay is None:\n            raise RuntimeError(f'LLM call failed after {len(delays) - 1} retries: {err_str}') from exc\n        wait = delay * (3 if is_qps else 1)\n        lazyllm.LOG.warning(\n            f'LLM call failed (attempt {attempt + 1}/{len(delays) - 1}, {\"QPS\" if is_qps else \"error\"}): '\n            f'{err_str[:120]}. Retrying in {wait}s...'\n        )\n        time.sleep(wait)"
+        },
+        {
+          "file": "lazyllm/tools/git/review/utils.py",
+          "lines": "289-293, 304-305, 318-323",
+          "snippet": "if not parse_json:\n    return raw_response\njson_text = _extract_json_text(raw_response)\nparsed = _parse_json_with_repair(json_text)\nif parsed is not None:\n...\n# JSON parse failed — could be a truncated response; retry if budget allows\nif delay is None:\n...\n    return []\nlazyllm.LOG.warning(\n    f'JSON parse failed (attempt {attempt + 1}/{len(delays) - 1}), retrying. '\n    f'Raw snippet: {raw_response[:120]}'\n)\ntime.sleep(delay)"
+        },
+        {
+          "file": "lazyllm/tools/git/review/utils.py",
+          "lines": "241-258",
+          "snippet": "# Attempt to salvage a truncated JSON array: find the last complete object and close the array.\nlast_obj_end = text.rfind('}')\nif last_obj_end != -1:\n    candidate = text[:last_obj_end + 1]\n    # strip trailing comma/whitespace and close the array\n    candidate = candidate.rstrip().rstrip(',') + ']'\n    # ensure it starts with '['\n    if not candidate.lstrip().startswith('['):\n        bracket = candidate.find('{')\n        if bracket != -1:\n            candidate = '[' + candidate[bracket:]\n    try:\n        return json.loads(candidate)\n    except json.JSONDecodeError:\n        pass\ntry:\n    from json_repair import repair_json\n    repaired = repair_json(text, return_objects=True)"
+        },
+        {
+          "file": "lazyllm/tools/git/review/utils.py",
+          "lines": "345-352",
+          "snippet": "def _ensure_non_streaming_llm(llm: Any) -> Any:\n    if hasattr(llm, '_stream') and llm._stream and hasattr(llm, 'share'):\n        llm = llm.share(stream=False)\n    # Ensure output is long enough to hold multi-issue JSON responses.\n    if hasattr(llm, 'static_params') and hasattr(llm, '_static_params'):\n        cur = llm._static_params.get('max_tokens', 0)\n        if not cur or cur < _REVIEW_MAX_TOKENS:\n            llm._static_params = dict(llm._static_params, max_tokens=_REVIEW_MAX_TOKENS)"
+        }
+      ]
+    },
+    {
+      "name": "agent verification pass over earlier findings (KEEP/MODIFY/DISCARD)",
+      "what_it_is": "RAgentVerify runs a ReactAgent per review unit (max_retries=8, force_summarize=True, keep_full_turns=2, 300 s timeout) that explores the cloned repo for context, then checks every issue from the earlier diff and architecture rounds. The prompt demands DEFAULT TO KEEP and allows DISCARD only with concrete evidence. Code removes only issues explicitly marked discard: true with an r1_idx; unmentioned issues pass through.",
+      "function_in_system": "Sits after the limited-context review rounds and before dedup and upload. Acts as a verifier that filters false positives using repository context. Otherwise hallucinated or out-of-scope findings from single-shot rounds are posted to the PR.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/git/review/rounds/ragent_verify.py",
+          "lines": "43-44",
+          "snippet": "_R3_FILE_AGENT_RETRIES = 8\n_R3_FILE_TIMEOUT_SECS = 300"
+        },
+        {
+          "file": "lazyllm/tools/git/review/rounds/ragent_verify.py",
+          "lines": "269-277",
+          "snippet": "agent = ReactAgent(\n    llm, tools=traced_tools, max_retries=_R3_FILE_AGENT_RETRIES,\n    workspace=clone_dir, force_summarize=True,\n    force_summarize_context=(\n        f'Exploring context for {path}:\\n{diff_chunk[:800]}\\n\\n'\n        f'Key framework conventions:\\n{agent_instructions[:400]}'\n    ),\n    keep_full_turns=2,\n)"
+        },
+        {
+          "file": "lazyllm/tools/git/review/rounds/ragent_verify.py",
+          "lines": "352-356, 359-365",
+          "snippet": "entry, r1_idx, is_discard = parsed\nif r1_idx is not None:\n    if is_discard:\n        explicitly_discarded_idxs.add(r1_idx)\n        continue  # discarded issues are not added to result\n...\n# Only issues explicitly marked discard:true enter disc_keys.\n# Issues the agent simply didn't mention are NOT discarded — they pass through.\ndiscarded_keys = {\n    f'{c.get(\"path\", path)}:{c.get(\"line\")}:{c.get(\"bug_category\", \"\")}'\n    for i, c in enumerate(r1_issues) if i in explicitly_discarded_idxs\n}\nreturn result, discarded_keys"
+        },
+        {
+          "file": "lazyllm/tools/git/review/rounds/prompt.py",
+          "lines": "472-486",
+          "snippet": "The following issues were found in earlier rounds with limited context. For each one, decide:\n- KEEP: valid issue (you may improve the description). Include it in output with \"r1_idx\" field set.\n- MODIFY: partially correct — fix the problem/suggestion and include with \"r1_idx\" field set.\n- DISCARD: confirmed invalid. Include it in output with \"r1_idx\" field set AND \"discard\": true.\n\nDEFAULT TO KEEP. Only DISCARD when you can point to specific evidence that the issue is factually wrong:\n  - The code already handles this case (cite the exact line that handles it)\n  - The assumption about types/initialization is demonstrably incorrect (explain why)\n  - The issue targets a line that was NOT changed in this PR and has no relation to the diff\n\nDO NOT DISCARD because:\n  - The description could be improved → use MODIFY instead\n  - You found a better way to describe the same root cause → use MODIFY with r1_idx\n  - It is a design preference without a concrete runtime failure\n  - You are not 100% certain → default to KEEP"
+        },
+        {
+          "file": "lazyllm/tools/git/review/runner.py",
+          "lines": "37",
+          "snippet": "enable_r3: bool             # always True for now; kept for future per-strategy toggle"
+        }
+      ]
+    },
+    {
+      "name": "diff-size adaptive review scope and context budgets",
+      "what_it_is": "_decide_review_strategy caps the files sent to agent verification at 10, 15 or 20 and the chunks per file depending on diff lines and file count. The diff is truncated at a file boundary at max_diff_chars=120000, hunks are capped at max_hunks=50, a hard limit of 8 chunks per file applies to large files, and fixed character budgets per prompt slot (architecture 6000, summary 600, symbol context 12000) clip the prompt parts. Files beyond the limit get only the first-round review.",
+      "function_in_system": "Sits in the review runner before the rounds are dispatched and in prompt assembly of each round. Keeps every prompt below the context limit and bounds the number of agent runs on large PRs. Otherwise large PRs overflow the context window and trigger unbounded LLM and agent cost.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/git/review/runner.py",
+          "lines": "62-82",
+          "snippet": "def _decide_review_strategy(stats: _DiffStats) -> _ReviewStrategy:\n    if stats.diff_lines_total > 3000 or stats.file_count > 50:\n        return _ReviewStrategy(\n            enable_r3=True,\n            large_file_threshold=100,\n            max_files_for_r3=10,\n            max_chunks_per_file=2,\n        )\n    if stats.diff_lines_total > 1000 or stats.file_count > 20:\n        return _ReviewStrategy(\n            enable_r3=True,\n            large_file_threshold=150,\n            max_files_for_r3=15,\n            max_chunks_per_file=2,\n        )\n    return _ReviewStrategy(\n        enable_r3=True,\n        large_file_threshold=200,\n        max_files_for_r3=R3_MAX_FILES,\n        max_chunks_per_file=R3_MAX_CHUNKS_PER_FILE,\n    )"
+        },
+        {
+          "file": "lazyllm/tools/git/review/runner.py",
+          "lines": "85-93",
+          "snippet": "def _truncate_diff_at_file_boundary(diff_text: str, max_chars: int) -> tuple:\n    # Truncate diff at a clean file boundary instead of mid-file.\n    # Returns (truncated_diff, was_truncated).\n    # Finds the last \"diff --git\" header that starts before max_chars,\n    # and cuts just before it if including that file would exceed the limit.\n    import re\n    file_starts = [m.start() for m in re.finditer(r'^diff --git ', diff_text, re.MULTILINE)]\n    if not file_starts:\n        return diff_text[:max_chars] + '\\n... [diff truncated]\\n', True"
+        },
+        {
+          "file": "lazyllm/tools/git/review/runner.py",
+          "lines": "134-135",
+          "snippet": "max_diff_chars: Optional[int] = 120000,\nmax_hunks: Optional[int] = 50,"
+        },
+        {
+          "file": "lazyllm/tools/git/review/constants.py",
+          "lines": "20-28",
+          "snippet": "# R3 throttle limits (agent verification round)\nR3_MAX_FILES = 20\nR3_MAX_CHUNKS_PER_FILE = 3\n# Hard upper bound on chunks per file regardless of strategy (prevents runaway LLM calls).\n# Only triggers when *both* chunk count > R3_MAX_CHUNKS_HARD *and* effective diff lines >\n# R3_MAX_CHUNKS_HARD_LINES. Files with many small hunks (e.g. lots of 2-line tweaks) are\n# processed in full even when chunk count exceeds the hard limit.\nR3_MAX_CHUNKS_HARD = 8\nR3_MAX_CHUNKS_HARD_LINES = 800"
+        },
+        {
+          "file": "lazyllm/tools/git/review/rounds/ragent_verify.py",
+          "lines": "40-49",
+          "snippet": "_R3_ARCH_BUDGET = 6000\n_R3_SUMMARY_BUDGET = 600\n_R3_AGENT_DIFF_BUDGET = SINGLE_CALL_CONTEXT_BUDGET - 14000\n_R3_FILE_AGENT_RETRIES = 8\n_R3_FILE_TIMEOUT_SECS = 300\n\n_R3_RICH_CONTEXT_BUDGET = 12000\n_R3_SYMBOL_CONTEXT_MAX = 12000\n_R3_FILE_SKELETON_MAX = 8000\n_R3_FIXED_OVERHEAD = 26000"
+        }
+      ]
+    },
+    {
+      "name": "stage timeouts with skip",
+      "what_it_is": "The coverage stage (RCov) runs in a worker thread with a timeout derived from diff size, min(900, max(300, 270 + 30 s per 10k diff chars)); on timeout it is logged and skipped. The context-collection agent in RAgentVerify gets a fixed 300 s timeout per unit.",
+      "function_in_system": "Sits around long-running review stages in the runner. A hanging LLM or agent stage ends after a bounded time and the rest of the review continues. Otherwise one stuck stage blocks the whole review run indefinitely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/git/review/runner.py",
+          "lines": "369, 377-390",
+          "snippet": "_rcov_timeout = int(min(900, max(300, 3 * 90 + len(diff_text) // 10000 * 30)))\n...\n    _exe = _cf.ThreadPoolExecutor(max_workers=1)\n    _fut = _exe.submit(\n        _run_coverage_check, llm, diff_text, pr_summary, clone_dir, language,\n        _usage_scenarios_str,\n    )\n    try:\n        rcov_issues = _fut.result(timeout=_rcov_timeout)\n        _rcov_ran = True\n    finally:\n        _exe.shutdown(wait=False)\n    ckpt.save('rcov_issues', rcov_issues)\n    ckpt.mark_stage_done(ReviewStage.RCov)\nexcept _cf.TimeoutError:\n    lazyllm.LOG.warning(f'RCov analysis timed out after {_rcov_timeout}s, skipping')"
+        },
+        {
+          "file": "lazyllm/tools/git/review/rounds/ragent_verify.py",
+          "lines": "284-289",
+          "snippet": "with ThreadPoolExecutor(max_workers=1) as ex:\n    fut = ex.submit(agent, prompt)\n    try:\n        raw = fut.result(timeout=_R3_FILE_TIMEOUT_SECS)\n    except FuturesTimeoutError:\n        raise RuntimeError(f'RAgentVerify context collection timed out for {path} after {_R3_FILE_TIMEOUT_SECS}s')"
+        }
+      ]
+    },
+    {
+      "name": "LLM compression of long comments before merge prompts",
+      "what_it_is": "Existing PR comments longer than 200 chars and new issues longer than 300 chars are summarized in one batched LLM call (bodies capped at 800 chars). The summaries replace the full text in the dedup and merge prompts; short items keep their text.",
+      "function_in_system": "Sits before the dedup and post-merge prompts of the review pipeline. Shrinks the prompt when many long comments must be compared. Otherwise the merge prompt grows with every comment body and may exceed the context budget.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/git/review/rounds/common.py",
+          "lines": "418-419",
+          "snippet": "_BODY_COMPRESS_THRESHOLD = 200\n_NEW_ISSUE_COMPRESS_THRESHOLD = 300"
+        },
+        {
+          "file": "lazyllm/tools/git/review/rounds/common.py",
+          "lines": "425",
+          "snippet": "batch_input = [{'idx': item['idx'], body_key: item[body_key][:800]} for item in items]"
+        },
+        {
+          "file": "lazyllm/tools/git/review/rounds/common.py",
+          "lines": "441-450",
+          "snippet": "def _compress_items(\n    llm: Any, items: List[Dict[str, Any]], threshold: int, body_fn: Any, extra_fields_fn: Any,\n) -> List[Dict[str, Any]]:\n    long_items = [{'idx': i, 'body': body_fn(c)} for i, c in enumerate(items) if len(body_fn(c)) > threshold]\n    summaries = _batch_llm_summarize(llm, long_items, 'body', 'Item') if long_items else {}\n    long_idx_set = {item['idx'] for item in long_items}\n    return [\n        {'idx': i, **extra_fields_fn(c, summaries.get(i) if i in long_idx_set else None)}\n        for i, c in enumerate(items)\n    ]"
+        }
+      ]
+    },
+    {
+      "name": "deployment readiness check with automatic job restart",
+      "what_it_is": "When a locally deployed model server (vLLM, LMDeploy, LightLLM, Infinity, MindIE) starts, verify_func tails the job log queue. A startup line such as 'Uvicorn running on' marks the job ready; an error line ('ERROR:'), a Failed job status or 600 s without a startup line count as failure. Job.start(restart=3) then stops the job, waits 2 s and restarts it up to three times before raising a RuntimeError with the last log lines. Kubernetes jobs use restart_policy='OnFailure' with backoff_limit=3.",
+      "function_in_system": "Sits in model deployment, before any agent calls the model. Catches servers that crash or hang during startup and restarts them. Otherwise the agent is wired to a dead endpoint and the failure surfaces only at the first LLM call inside the loop.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/launcher/base.py",
+          "lines": "150-163",
+          "snippet": "def start(self, *, restart=3, fixed=False):\n    self._start(fixed=fixed)\n    if not (lazyllm.config['mode'] == lazyllm.Mode.Display or self._fixed_cmd.checkf(self)):\n        if restart > 0:\n            for ii in range(restart):\n                LOG.warning(f'Job failed, restarting... ({ii + 1}/{restart})')\n                self.restart(fixed=fixed)\n                if self._fixed_cmd.checkf(self): break\n            else:\n                detail = self.queue.get_recent(join='\\n', join_prefix=' Last logs:\\n')\n                raise RuntimeError(f'Job failed after retrying {restart} times.{detail}')\n        else:\n            detail = self.queue.get_recent(join='\\n', join_prefix=' Last logs:\\n')\n            raise RuntimeError(f'Job failed without retries.{detail}')"
+        },
+        {
+          "file": "lazyllm/components/deploy/base.py",
+          "lines": "73-98",
+          "snippet": "def verify_func(job):\n    begin_time = time.time()\n    while True:\n        try:\n            line = job.queue.get(timeout=3)\n        except Empty:\n            line = ''\n            status = job.status\n            if status == lazyllm.launchers.status.Failed:\n                LOG.error('[Verify] Service Startup Failed, '\n                          'use `export LAZYLLM_EXPECTED_LOG_MODULES=all` for more logs')\n                return False\n            LOG.debug(f'[Verify] Timeout when getting log line and current service status: {status}.')\n        if _hit(error_message, line, err_judge):\n            LOG.error(f'[Verify] Capture error message: {line} \\n\\n '\n                      ', use `export LAZYLLM_EXPECTED_LOG_MODULES=all` for more logs')\n            return False\n        elif _hit(running_message, line, run_judge):\n            LOG.info(f'[Verify] Capture startup message: {line}', name='launcher')\n            LOG.success(f'job `{str(job._fixed_cmd).strip()}` executed successfully!')\n            break\n        if time.time() - begin_time > 600:\n            LOG.error('[Verify] Service Startup Timeout, '\n                      'use `export LAZYLLM_EXPECTED_LOG_MODULES=all` for more logs')\n            return False\n    return True"
+        },
+        {
+          "file": "lazyllm/components/deploy/base.py",
+          "lines": "101",
+          "snippet": "verify_fastapi_func = verify_func_factory('ERROR:', 'Uvicorn running on')"
+        },
+        {
+          "file": "lazyllm/components/deploy/vllm.py",
+          "lines": "125",
+          "snippet": "checkf=(verify_vllm_openai_func if self._openai_api else verify_fastapi_func))"
+        },
+        {
+          "file": "lazyllm/launcher/k8s.py",
+          "lines": "149-156",
+          "snippet": "# use OnFailure for job to avoid infinite restart\ntemplate = k8s.client.V1PodTemplateSpec(\n    metadata=k8s.client.V1ObjectMeta(labels={'app': self.deployment_name}),\n    spec=k8s.client.V1PodSpec(restart_policy='OnFailure', containers=[container], volumes=volumes)\n)\njob_spec = k8s.client.V1JobSpec(\n    template=template,\n    backoff_limit=3"
+        }
+      ]
+    },
+    {
+      "name": "transient-error retry with exponential backoff in RAG ingestion",
+      "what_it_is": "retry_transient retries only errors whose message or type name matches a list of transient patterns (Connection, Timeout, SSLEOFError, Too Many Requests, Bad Gateway, rate limit, ...) and re-raises all others immediately. The delay grows as base_delay ** (attempt + 1), i.e. 2, 4, 8 s, for up to 3 retries. An on_retry hook resets the embedding state of the affected nodes. The generic @retry decorator (3 attempts, fixed delay) wraps PDF loading.",
+      "function_in_system": "Sits around batch embedding in parallel_do_embedding and around each PDF split sent to the MinerU and PaddleOCR services during document ingestion for retrieval. Absorbs network hiccups and rate limits of embedding and OCR backends. Otherwise one transient error aborts indexing of a whole document and leaves the knowledge base incomplete.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/common/common.py",
+          "lines": "557-564, 571-587",
+          "snippet": "def retry_transient(func=None, *, max_retries=3, base_delay=2.0, log_prefix='', on_retry=None):\n    _transient_tokens = (\n        'Connection', 'IncompleteRead', 'Timeout', 'RemoteDisconnected',\n        'ConnectionError', 'ReadTimeout', 'timeout', 'SSLEOFError',\n        'SSLZeroReturnError', 'ProtocolError', 'ChunkedEncodingError',\n        'Too Many Requests', 'Service Unavailable', 'Internal Server Error',\n        'Bad Gateway', 'rate limit', 'Max retries exceeded',\n    )\n...\nfor attempt in range(max_retries + 1):\n    try:\n        return fn(*args, **kwargs)\n    except Exception as e:\n        last_exc = e\n        if not any(t.lower() in str(e).lower() or t.lower() in type(e).__name__.lower()\n                   for t in _transient_tokens):\n            raise\n        if attempt >= max_retries:\n            break\n        delay = base_delay ** (attempt + 1)\n        LOG.warning(f'{log_prefix}transient error (attempt {attempt + 1}/{max_retries + 1}), '\n                    f'retrying in {delay:.1f}s: {e}')\n        if on_retry:\n            on_retry(attempt + 1, e)\n        time.sleep(delay)\nraise last_exc"
+        },
+        {
+          "file": "lazyllm/tools/rag/utils.py",
+          "lines": "201-210",
+          "snippet": "max_retries = 3\n\ndef _reset_embed_state(_attempt, _exc):\n    for n in knodes:\n        if k not in n.embedding_state:\n            n.embedding_state.add(k)\n\n@retry_transient(max_retries=max_retries, base_delay=2.0,\n                 log_prefix=f'[LazyLLM - parallel_do_embedding][{k}] ',\n                 on_retry=_reset_embed_state)"
+        },
+        {
+          "file": "lazyllm/tools/rag/readers/ocrReader/mineru_pdf_reader.py",
+          "lines": "274-278, 284-286",
+          "snippet": "if len(splits) == 1:\n    return retry_transient(\n        self._fetch_async_by_upload,\n        log_prefix=f'[MineruPDFReader] {os.path.basename(file_str)} ')(\n            splits[0][0], task_dir=task_dir)\n...\nretry_transient(\n    self._fetch_async_by_upload,\n    log_prefix=f'[MineruPDFReader] {os.path.basename(sub_path)} '),"
+        },
+        {
+          "file": "lazyllm/tools/rag/readers/pdfReader.py",
+          "lines": "26-27",
+          "snippet": "@retry(stop_after_attempt=3)\ndef _load_data(self, file: Path, fs: Optional['fsspec.AbstractFileSystem'] = None) -> List[DocNode]:"
+        }
+      ]
+    },
+    {
+      "name": "lease-based task claiming with renewal and stale-task recovery in the parsing worker",
+      "what_it_is": "Parsing workers claim tasks from a SQL-backed queue with SELECT ... FOR UPDATE and receive a lease (default 300 s). A daemon thread extends the lease every 60 s while the task runs. claim() also takes over WORKING tasks whose lease has expired. On worker start, _cleanup_stale_tasks resets expired WORKING queue entries to WAITING and marks orphaned WORKING node-group status rows as FAILED.",
+      "function_in_system": "Sits in the document parsing service that ingests and indexes documents for RAG retrieval, around each task execution in _run_task. Recovers from crashed or hung workers by returning their tasks to the queue for another worker. Otherwise a worker crash leaves documents stuck in WORKING forever and they never reach the knowledge base.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "lazyllm/tools/rag/parsing_service/queue.py",
+          "lines": "144-149, 155-156",
+          "snippet": "query = query.filter(\n    (TableCls.status == status_waiting)\n    | ((TableCls.status == status_working)\n       & ((TableCls.lease_expires_at < now)\n          | (TableCls.lease_expires_at.is_(None))))\n)\n...\nrecord.worker_id = worker_id\nrecord.lease_expires_at = now + timedelta(seconds=lease_duration)"
+        },
+        {
+          "file": "lazyllm/tools/rag/parsing_service/queue.py",
+          "lines": "166-178",
+          "snippet": "def extend_lease(self, task_id: str, worker_id: str, lease_duration: float) -> bool:\n    try:\n        with self._sql_manager.get_session() as session:\n            TableCls = self._sql_manager.get_table_orm_class(self._table_name)\n            now = datetime.now()\n            record = session.query(TableCls).filter(\n                TableCls.task_id == task_id,\n                TableCls.worker_id == worker_id\n            ).first()\n            if not record:\n                return False\n            record.lease_expires_at = now + timedelta(seconds=lease_duration)\n            record.updated_at = now"
+        },
+        {
+          "file": "lazyllm/tools/rag/parsing_service/worker.py",
+          "lines": "34-35",
+          "snippet": "def __init__(self, db_config: dict = None, task_poller=None, lease_duration: float = 300.0,\n             lease_renew_interval: float = 60.0, poll_mode: str = 'thread',"
+        },
+        {
+          "file": "lazyllm/tools/rag/parsing_service/worker.py",
+          "lines": "195-205",
+          "snippet": "def _start_lease_renewal(self, task_id: str):\n    if self._lease_renew_interval <= 0:\n        return\n    self._lease_stop_event = threading.Event()\n\n    def _renew():\n        while not self._lease_stop_event.wait(self._lease_renew_interval):\n            try:\n                self._waiting_task_queue.extend_lease(task_id, self._worker_id, self._lease_duration)\n            except Exception as e:\n                LOG.warning(f'{self._log_prefix(task_id)} Failed to extend lease: {e}')"
+        },
+        {
+          "file": "lazyllm/tools/rag/parsing_service/worker.py",
+          "lines": "139-147",
+          "snippet": "stale = session.query(TableCls).filter(\n    TableCls.status == TaskStatus.WORKING.value,\n    (TableCls.lease_expires_at < now) | (TableCls.lease_expires_at.is_(None))\n).all()\nif stale:\n    for row in stale:\n        row.status = TaskStatus.WAITING.value\n        row.worker_id = None\n        row.lease_expires_at = None"
+        },
+        {
+          "file": "lazyllm/tools/rag/parsing_service/worker.py",
+          "lines": "981-983",
+          "snippet": "LOG.info(f'{self._log_prefix()} Starting worker...')\nself._lazy_init()\nself._cleanup_stale_tasks()"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,1739 @@
+{
+  "repo": "lsdefine/GenericAgent",
+  "commit": "c25ea7c15c",
+  "system_type": "application",
+  "system_type_reason": "Self-contained autonomous computer-use agent with CLI/TUI/IM frontends.",
+  "repo_overview": {
+    "summary": "Minimal self-evolving autonomous agent (~3K core lines). A ~100-line agent loop gives any LLM control over the local computer through 9 atomic tools (code_run, file read/write/patch, web_scan/web_execute_js, ask_user, working checkpoint, long-term memory update). Solved tasks are written back as reusable SOPs/skills into a layered file memory (L1 insight index, L2 global facts, L3 SOPs, L4 session archive); many frontends (CLI/TUI/Qt/IM bots) wrap the same GenericAgent runtime.",
+    "components": [
+      {
+        "path": "agent_loop.py",
+        "purpose": "core loop agent_runner_loop, BaseHandler tool dispatch (do_<tool>), StepOutcome control object"
+      },
+      {
+        "path": "ga.py",
+        "purpose": "tool implementations and GenericAgentHandler: code_run, file_*, web_*, ask_user, plan mode, no_tool handling, working checkpoint / anchor prompt, turn_end_callback"
+      },
+      {
+        "path": "llmcore.py",
+        "purpose": "LLM backends (Claude/OpenAI, native tool-calling and text protocol), SSE parsing, streaming retry, history compression/trimming, prompt-cache markers, usage tracking, multi-session mixing"
+      },
+      {
+        "path": "agentmain.py",
+        "purpose": "GenericAgent runtime: task queue, LLM switching, abort, slash commands, system prompt with memory injection, --reflect mode"
+      },
+      {
+        "path": "assets/",
+        "purpose": "system prompts, tool schemas, memory templates, code_run header, installer/setup scripts, CDP browser extension"
+      },
+      {
+        "path": "memory/",
+        "purpose": "L3 SOP markdown files (plan, verify, review, supervisor, goal mode, subagent, memory management, ...) and helper scripts (OCR, UI detection, ADB, L4 session compression)"
+      },
+      {
+        "path": "reflect/",
+        "purpose": "autonomous trigger modules polled at an interval via check(): scheduler, goal mode, autonomous idle mode, BBS worker/master for agent teams"
+      },
+      {
+        "path": "plugins/",
+        "purpose": "hook registry, Langfuse tracing, project mode"
+      },
+      {
+        "path": "frontends/",
+        "purpose": "user interfaces and chat bots (TUI, Qt, Streamlit, Telegram/Feishu/WeChat, Tauri desktop) plus slash commands (continue, review, model, cost tracker, plan state)"
+      },
+      {
+        "path": "TMWebDriver.py, simphtml.py",
+        "purpose": "browser control via CDP bridge and HTML simplification for web_scan"
+      },
+      {
+        "path": "ga_cli/, ga, hub.pyw, launch.pyw",
+        "purpose": "CLI entry point and launchers"
+      },
+      {
+        "path": "mykey_template.py, mykey_template_en.py",
+        "purpose": "API key and model configuration"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "agent_loop.py",
+        "lines": "50, 59",
+        "snippet": "while turn < handler.max_turns:\n        response_gen = client.chat(messages=messages, tools=tools_schema)"
+      },
+      {
+        "file": "agent_loop.py",
+        "lines": "81",
+        "snippet": "gen = handler.dispatch(tool_name, args, response, index=ii, tool_num=len(tool_calls))"
+      },
+      {
+        "file": "agent_loop.py",
+        "lines": "90-93",
+        "snippet": "if outcome.should_exit: \n                exit_reason = {'result': 'EXITED', 'data': outcome.data}; break\n            if not outcome.next_prompt: \n                exit_reason = {'result': 'CURRENT_TASK_DONE', 'data': outcome.data}; break"
+      },
+      {
+        "file": "agent_loop.py",
+        "lines": "104",
+        "snippet": "messages = [{\"role\": \"user\", \"content\": next_prompt, \"tool_results\": tool_results}]   # just new message, history is kept in *Session"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "The tool calls in the LLM response are dispatched to handler.do_<tool> (agent_loop.py:70-81), so the model chooses the next action.",
+      "consumes_feedback": "Tool outputs are collected as tool_results and sent with the next user message (agent_loop.py:95-104), feeding the next client.chat call.",
+      "multi_turn_until_termination": "while turn < handler.max_turns (agent_loop.py:50) iterates until a tool returns should_exit or no next_prompt (agent_loop.py:90-93) or the turn budget is exhausted."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent",
+    "evidence": [
+      {
+        "file": "agentmain.py",
+        "lines": "209-220",
+        "snippet": "    if (args.func or args.task) and not args.nobg:\n        import subprocess, platform\n        cmd = [sys.executable, os.path.abspath(__file__)] + [a for a in sys.argv[1:]] + ['--nobg']\n        if args.task:\n            d = os.path.join(script_dir, f'temp/{args.task}'); os.makedirs(d, exist_ok=True)\n            out = open(os.path.join(d, 'stdout.log'), 'w', encoding='utf-8')\n            err = open(os.path.join(d, 'stderr.log'), 'w', encoding='utf-8')\n        else: out, err = subprocess.DEVNULL, subprocess.DEVNULL\n        p = subprocess.Popen(cmd, cwd=script_dir,\n            creationflags=0x08000000 if platform.system() == 'Windows' else 0,\n            stdout=out, stderr=err)\n        print('PID:', p.pid); sys.exit(0)"
+      },
+      {
+        "file": "agentmain.py",
+        "lines": "222-226, 239-247",
+        "snippet": "    agent = GeneraticAgent()\n    if args.nolog: agent.log_path = False\n    agent.next_llm(args.llm_no)\n    agent.verbose = args.verbose\n    threading.Thread(target=agent.run, daemon=True).start()\n    if args.func or args.task:\n        agent.peer_hint = False\n        with open(infile, encoding='utf-8') as f: raw = f.read()\n        while True:\n            dq = agent.put_task(raw, source='func' if args.func else 'task')\n            while 'done' not in (item := dq.get(timeout=1200)): \n                if 'next' in item: \n                    with open(outfile, 'w', encoding='utf-8') as f: f.write(item.get('next', ''))\n            with open(outfile, 'w', encoding='utf-8') as f: f.write(item['done'] + '\\n\\n[ROUND END]\\n')"
+      },
+      {
+        "file": "agentmain.py",
+        "lines": "249-253",
+        "snippet": "            consume_file(d, '_stop')  # 已经成功停下来了，避免打断下次reply\n            for _ in range(300):  # 等reply.txt，10分钟超时\n                time.sleep(2)\n                if (raw := consume_file(d, 'reply.txt')): break\n            else: break"
+      },
+      {
+        "file": "memory/subagent.md",
+        "lines": "3-18",
+        "snippet": "## 两种模式\n\n### --func 纯函数模式\n- `python agentmain.py --func prompt.txt [--llm_no N]`（cwd=代码根）\n- 读prompt文件→执行→结果写`prompt.out.txt`→退出，主agent读完可删\n- 后台启动(print PID)，加`--nobg`前台同步等结果\n- 适用：单次任务、并行map、不需要追问的场景\n\n### --task 持续协作模式\n- `python agentmain.py --task {name} [--input \"短文本\"] [--llm_no N]`（cwd=代码根）\n- `--input`自动建目录+清旧output+写input.txt；长文本先手动写input.txt再启动(不带--input)\n- **不要--nobg**（会卡在等reply循环），只能后台启动\n- 通信：output.txt(`[ROUND END]`=轮完成) → 写reply.txt继续 → 不写10min退出。reply后输出为output1/2/3.txt\n- 干预文件：`_stop`(当轮结束) | `_keyinfo`(注入working memory) | `_intervene`(追加指令)\n- [[可选fork]]：将变量history(str)写入task目录下`_history.json`继承对话上下文\n- [[可选监察者]]：主agent空闲时读output观察进度，必要时干预文件纠偏。加`--verbose`可审查原始数据"
+      },
+      {
+        "file": "memory/subagent.md",
+        "lines": "22, 32-35",
+        "snippet": "- input：目标+约束即可，subagent同等智能。**禁写步骤/过度描述**，大量数据给路径\n## 场景2：Map模式 - 并行处理\n**用途**：N个独立同构子任务分发，独立上下文避免交叉污染\n**约束**：文件系统共享(优点)；键鼠不可共享；浏览器避免同tab\n**流程**：准备独立输入文件→每个启动subagent(--func优先)→收集输出汇总"
+      },
+      {
+        "file": "memory/supervisor_sop.md",
+        "lines": "8-12, 20-22, 32-34",
+        "snippet": "监察者不是工人。你是挑刺的监工，只负责看 subagent 是否按目标、约束和证据闭环完成任务；有 SOP 按 SOP 把关，无 SOP 按常理和经验把关。\n\n## 2. 红线\n\n- **禁止下场干活**：不替 subagent 操作浏览器、不写代码、不执行任务步骤。\n**Step A — 立刻启动 subagent**（纯机械，不需思考）\n\n读完本 SOP 和 `subagent.md` 后，从用户 prompt 中剥离任务，写 input，启动。调用细节见 `subagent.md`；input 只给目标+约束，长文本给路径。\n**Step C — tail 监控与干预**（预期文档写完后开始）\n\n轮询 `temp/{task_name}/output*.txt`。看到 `[ROUND END]` 后判断是否需要写 `reply.txt` 续聊或用干预文件纠偏。tail 中若发现新信息（真实文件结构、字段、约束、隐藏难点），回头补充/更新预期文档，尤其补全此前想不到的验收指标。tail 时盯这些偏离："
+      },
+      {
+        "file": "memory/goal_hive_sop.md",
+        "lines": "8, 30, 51",
+        "snippet": "## 启动\n2. 你**负责任务调度和团队组织**，只能干上述duty中提到的内容，不允许亲自干活导致 worker 空转\n启动 worker：`start /b python <CodeRoot>/agentmain.py --reflect <CodeRoot>/reflect/agent_team_worker.py --base_url http://127.0.0.1:<PORT> --board_key <BOARD_KEY> --name hive-worker-1`。"
+      }
+    ],
+    "justification": "The main GenericAgent delegates work to subagents by launching agentmain.py --func/--task as separate background processes (agentmain.py:209-220). Each subagent instantiates its own GeneraticAgent with its own LLM client and runs a full agent loop (agentmain.py:222-247), communicating with the parent through a file protocol (input.txt, output*.txt with [ROUND END], reply.txt, _stop/_keyinfo/_intervene; subagent.md:11-16, agentmain.py:249-253). The SOPs use this for parallel map processing, where each subtask gets its own isolated context to avoid cross-contamination (subagent.md:32-35), and for a supervisor role in which the parent only monitors and corrects the subagent (supervisor_sop.md:8-16). In Goal Hive mode a master agent and several worker agents run as separate agentmain processes, each with its own LLM loop, and coordinate over a BBS (goal_hive_sop.md:8, 30, 51). A boss agent delegating to helper agents with their own LLM loop makes the system multi-agent. The delegation is SOP-driven: the parent starts subagents via code_run when a prompt or SOP instructs it, and the default single-task path runs one agent.",
+    "verdict_raw": "multi-agent"
+  },
+  "resilience": [
+    {
+      "name": "turn budget cap",
+      "what_it_is": "The agent loop runs while turn < handler.max_turns (default 40, 180 in the GenericAgent runtime, raised to 100 on entering plan mode) and returns MAX_TURNS_EXCEEDED when the budget is spent.",
+      "function_in_system": "Outer bound of agent_runner_loop. Stops runaway or stuck task executions. Otherwise a looping model keeps calling the LLM and tools indefinitely, burning cost and time.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agent_loop.py",
+          "lines": "42-43, 48, 50",
+          "snippet": "def agent_runner_loop(client, system_prompt, user_input, handler, tools_schema, \n                      max_turns=40, verbose=True, initial_user_content=None, yield_info=False):\n    turn = 0;  handler.max_turns = max_turns\n    while turn < handler.max_turns:"
+        },
+        {
+          "file": "agent_loop.py",
+          "lines": "107",
+          "snippet": "return exit_reason or {'result': 'MAX_TURNS_EXCEEDED'}"
+        },
+        {
+          "file": "agentmain.py",
+          "lines": "165",
+          "snippet": "max_turns=180, verbose=self.verbose, yield_info=True)"
+        },
+        {
+          "file": "ga.py",
+          "lines": "431",
+          "snippet": "self.working['in_plan_mode'] = plan_path; self.max_turns = 100"
+        }
+      ]
+    },
+    {
+      "name": "malformed / unknown tool-call feedback",
+      "what_it_is": "The text-protocol parser turns unparseable <tool_use> JSON into a pseudo tool call 'bad_json' carrying the parse error; the dispatcher returns that error, or an 'unknown tool' message for unregistered tool names, as the next prompt. Both cases clear last_tools so the full tool schema is re-sent next turn.",
+      "function_in_system": "Sits between the LLM response parsing (llmcore ToolClient) and tool dispatch (BaseHandler.dispatch). Converts model format errors into feedback for the next turn so the model can self-correct. Otherwise a malformed or hallucinated tool call crashes the run or is silently dropped.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "llmcore.py",
+          "lines": "878-885",
+          "snippet": "except json.JSONDecodeError:\n                    errors.append(f'Failed to parse tool_use JSON: {json_str[:200]}')\n                    self.last_tools = ''\n                except: pass\n            if not tool_calls:\n                for e in errors:\n                    print(f\"[Warn] {e}\"); tool_calls.append(MockToolCall('bad_json', {'msg': e}))"
+        },
+        {
+          "file": "agent_loop.py",
+          "lines": "26-29",
+          "snippet": "elif tool_name == 'bad_json': return StepOutcome(None, next_prompt=args.get('msg', 'bad_json'), should_exit=False)\n        else:\n            yield f\"未知工具: {tool_name}\\n\"\n            return StepOutcome(None, next_prompt=f\"未知工具 {tool_name}\", should_exit=False)"
+        },
+        {
+          "file": "agent_loop.py",
+          "lines": "94",
+          "snippet": "if outcome.next_prompt.startswith('未知工具'): client.last_tools = ''"
+        }
+      ]
+    },
+    {
+      "name": "tool-schema deduplication with periodic refresh",
+      "what_it_is": "The text-protocol ToolClient sends the full tool JSON only when it differs from the last sent schema and otherwise a one-line 'tools still active' notice. The schema is forcibly re-sent every 10 turns, when estimated accumulated history exceeds 9000 tokens, and after parse or unknown-tool errors.",
+      "function_in_system": "Applied in prompt construction for every LLM call on the text-protocol path (native tool-calling backends are unaffected). Saves prompt tokens per turn; the refresh counteracts the model forgetting the tool protocol in long contexts. Otherwise every turn repeats the full schema, or the model loses the tool definitions and emits invalid calls.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "llmcore.py",
+          "lines": "828-831",
+          "snippet": "if self.auto_save_tokens and self.last_tools == tools_json:\n            tool_instruction = \"\\n### Tools: still active, **ready to call**. Protocol unchanged.\\n\" if _en else \"\\n### 工具库状态：持续有效（code_run/file_read等），**可正常调用**。调用协议沿用。\\n\"\n        else: self.total_cd_tokens = 0\n        self.last_tools = tools_json"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "847",
+          "snippet": "if self.total_cd_tokens > 9000: self.last_tools = ''"
+        },
+        {
+          "file": "agent_loop.py",
+          "lines": "56",
+          "snippet": "if turn%10 == 0: client.last_tools = ''  # 每10轮重置一次工具描述"
+        }
+      ]
+    },
+    {
+      "name": "done-hook self-check before task end",
+      "what_it_is": "handler._done_hooks is a prompt queue; when a turn ends the task (no next prompt or CURRENT_TASK_DONE), the loop pops the next hook prompt and continues instead of terminating. The autonomous-operation SOP instructs the model to enqueue a 're-read the SOP and check your wrap-up, fix it if wrong' prompt via code_run.",
+      "function_in_system": "Sits at the loop's termination check. Forces an extra verification turn before the agent declares completion. Otherwise premature or incorrect 'done' results in autonomous runs go unchecked.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "agent_loop.py",
+          "lines": "99-101",
+          "snippet": "if len(next_prompts) == 0 or exit_reason:\n            if len(handler._done_hooks) == 0 or exit_reason.get('result', '') == 'EXITED': break\n            next_prompts.add(handler._done_hooks.pop(0))"
+        },
+        {
+          "file": "memory/autonomous_operation_sop.md",
+          "lines": "26",
+          "snippet": "- 调用code_run准备结尾回调, script为handler._done_hooks.append(\"重读自主任务sop，检查你刚刚的收尾工作是否正确，不正确则改正\")，inline_eval=True （秘密参数）"
+        }
+      ]
+    },
+    {
+      "name": "code execution timeout and abort",
+      "what_it_is": "code_run polls the spawned subprocess every second and kills it after `timeout` seconds (default 60, settable per call by the model) or when the stop signal is set by a user abort; '[Timeout Error]' or '[Stopped]' is appended to the returned output.",
+      "function_in_system": "Wraps every code_run tool execution. Bounds a single tool call in time and reports the kill to the model as feedback. Otherwise a hanging script or blocking command stalls the whole agent loop indefinitely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "67-74",
+          "snippet": "        while t.is_alive():\n            istimeout = time.time() - start_t > timeout\n            if istimeout or stop_signal:\n                process.kill()\n                myprint(\"[Debug] Process killed due to timeout or stop signal.\")\n                if istimeout: full_stdout.append(\"\\n[Timeout Error] 超时强制终止\")\n                else: full_stdout.append(\"\\n[Stopped] 用户强制终止\")\n                break"
+        },
+        {
+          "file": "agentmain.py",
+          "lines": "112",
+          "snippet": "        if self.handler is not None: self.handler.code_stop_signal.append(1)"
+        }
+      ]
+    },
+    {
+      "name": "tool output size capping",
+      "what_it_is": "Tool results are head/tail-truncated by smart_format with an '[omitted long output]' marker: code_run 10k, file_read 15k, web_scan 35k, web_execute_js 8k chars, each divided by the number of tool calls in the turn. file_read additionally truncates overlong lines and marks partial reads ('PARTIAL showing N; assess need for more'); web_execute_js can offload the full result to a file via save_to_file.",
+      "function_in_system": "Applied to every tool result before it enters the next prompt. Keeps observations inside a bounded token budget. Otherwise large stdout, pages or files flood the context window and inflate cost per turn.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "254-257",
+          "snippet": "def smart_format(data, max_str_len=100, omit_str=' ... '):\n    if not isinstance(data, str): data = str(data)\n    if len(data) < max_str_len + len(omit_str)*2: return data\n    return f\"{data[:max_str_len//2]}{omit_str}{data[-max_str_len//2:]}\""
+        },
+        {
+          "file": "ga.py",
+          "lines": "297",
+          "snippet": "        maxlen = 10000 // args.get('_tool_num', 1)"
+        },
+        {
+          "file": "ga.py",
+          "lines": "229, 234-235",
+          "snippet": "            realcnt = len(res); L_MAX = min(max(100, 256000//max(realcnt,1)), 8000); TAG = \" ... [TRUNCATED]\"\n            total_tag = f\"[FILE] {tl_str} lines\" + (f\" | PARTIAL showing {realcnt}; assess need for more\" if partial else \"\") + \"\\n\"\n            res = [(i, l if len(l) <= L_MAX else l[:L_MAX] + TAG) for i, l in res]"
+        },
+        {
+          "file": "ga.py",
+          "lines": "345-351",
+          "snippet": "        if save_to_file and \"js_return\" in result:\n            content = str(result[\"js_return\"] or '')\n            abs_path = self._get_abs_path(save_to_file)\n            result[\"js_return\"] = smart_format(content, max_str_len=170)\n            try:\n                with open(abs_path, 'w', encoding='utf-8') as f: f.write(str(content))\n                result[\"js_return\"] += f\"\\n\\n[已保存完整内容到 {abs_path}]\""
+        },
+        {
+          "file": "ga.py",
+          "lines": "420-421",
+          "snippet": "        maxlen = 15000 // args.get('_tool_num', 1)\n        result = smart_format(result, max_str_len=maxlen, omit_str='\\n\\n[omitted long content]\\n\\n')"
+        }
+      ]
+    },
+    {
+      "name": "unique-match guard for file patching",
+      "what_it_is": "file_patch replaces old_content only if it occurs exactly once in the file; zero or multiple matches return an error with instructions (re-read with file_read, patch smaller blocks, ask the user after repeated failures, never fall back to overwrite).",
+      "function_in_system": "Inside the file_patch tool. Prevents ambiguous or wrong in-place edits and steers the model away from destructive full rewrites. Otherwise a non-unique or stale match silently corrupts the file.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "199-202",
+          "snippet": "        count = full_text.count(old_content)\n        if count == 0: return {\"status\": \"error\", \"msg\": \"未找到匹配的旧文本块，建议：先用 file_read 确认当前内容，再分小段进行 patch。若多次失败则询问用户，严禁自行使用 overwrite 或代码替换。\"}\n        if count > 1: return {\"status\": \"error\", \"msg\": f\"找到 {count} 处匹配，无法确定唯一位置。请提供更长、更具体的旧文本块以确保唯一性。建议：包含上下文行来增强特征，或分小段逐个修改。\"}\n        updated_text = full_text.replace(old_content, new_content)"
+        }
+      ]
+    },
+    {
+      "name": "empty / truncated LLM response retry",
+      "what_it_is": "When a turn has no tool call, do_no_tool checks for an empty response, an interrupted stream ('[!!! 流异常中断' / '!!!Error:') or a max_tokens cutoff and re-prompts the model (for max_tokens: 'use multi small steps'); after 3 such events (counter is never reset within a handler) the run exits.",
+      "function_in_system": "Sits in the no-tool branch of the loop after the LLM call. Recovers from defective model outputs at loop level. Otherwise an empty or cut-off response is treated as the final answer and the task ends silently incomplete.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "451-454",
+          "snippet": "    def _retry_or_exit(self, prompt):\n        self._empty_ct = getattr(self, '_empty_ct', 0) + 1\n        if self._empty_ct >= 3: return StepOutcome({}, should_exit=True)\n        return StepOutcome({}, next_prompt=prompt)"
+        },
+        {
+          "file": "ga.py",
+          "lines": "462-468",
+          "snippet": "        if not response or (not content.strip() and not thinking.strip()):\n            yield \"[Warn] LLM returned an empty response. Retrying...\\n\"\n            return self._retry_or_exit(\"[System] Blank response, regenerate and tooluse\")\n        if '[!!! 流异常中断' in content[-100:] or '!!!Error:' in content[-100:]:\n            return self._retry_or_exit(\"[System] Incomplete response. Regenerate and tooluse.\")\n        if 'max_tokens !!!]' in content[-100:]:\n            return self._retry_or_exit(\"[System] max_tokens limit reached. Use multi small steps to do it.\")"
+        }
+      ]
+    },
+    {
+      "name": "plan-mode verification gate",
+      "what_it_is": "In plan mode, a response claiming completion (keywords like '任务完成', '全部完成', '🏁') without 'VERDICT' or '[VERIFY]' is intercepted and the model is told to start a verification subagent per plan_sop before claiming completion; plan mode exits automatically once plan.md has no unchecked '[ ]' items. The model enters plan mode itself as instructed by plan_sop.",
+      "function_in_system": "Sits at the loop's completion point (no-tool turn) while plan mode is active. Blocks unverified completion claims on multi-step plans. Otherwise the agent can declare a long plan finished with open or unverified steps.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "470-473",
+          "snippet": "        if self._in_plan_mode() and any(kw in content for kw in ['任务完成', '全部完成', '已完成所有', '🏁']):\n            if 'VERDICT' not in content and '[VERIFY]' not in content and '验证subagent' not in content:\n                yield \"[Warn] Plan模式完成声明拦截。\\n\"\n                return StepOutcome({}, next_prompt=\"⛔ [验证拦截] 检测到你在plan模式下声称完成，但未执行[VERIFY]验证步骤。请先按plan_sop §四启动验证subagent，获得VERDICT后才能声称完成。\")"
+        },
+        {
+          "file": "ga.py",
+          "lines": "498-501",
+          "snippet": "        if self._in_plan_mode():\n            remaining = self._check_plan_completion()\n            if remaining == 0:\n                self._exit_plan_mode(); yield \"[Info] Plan完成：plan.md中0个[ ]残留，退出plan模式。\\n\""
+        },
+        {
+          "file": "ga.py",
+          "lines": "434-437",
+          "snippet": "    def _check_plan_completion(self):\n        if not os.path.isfile(p:=self._in_plan_mode() or ''): return None\n        try: return len(re.findall(r'\\[ \\]', open(p, encoding='utf-8', errors='replace').read()))\n        except: return None"
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "5",
+          "snippet": "单独使用一个code_run({'inline_eval':True, 'script':'handler.enter_plan_mode(\"./plan_XXX/plan.md\")'})进入plan模式"
+        }
+      ]
+    },
+    {
+      "name": "code-block-without-tool-call detection",
+      "what_it_is": "If a no-tool response consists of exactly one large code block (>=50 chars) at the end with at most 30 chars of other text, the model is asked to either call the proper tool (code_run, file_write, ...) or add an explanation.",
+      "function_in_system": "Sits in the no-tool branch before the task is treated as done. Catches the failure where the model writes code instead of executing it. Otherwise the run ends as 'done' although the intended action never ran.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "477-496",
+          "snippet": "        code_block_pattern = r\"```[a-zA-Z0-9_]*\\n[\\s\\S]{50,}?```\"\n        blocks = re.findall(code_block_pattern, content)\n        if len(blocks) == 1:\n            m = re.search(code_block_pattern, content)\n            after_block = content[m.end():]\n            if not after_block.strip():\n                residual = content.replace(m.group(0), \"\")\n                residual = re.sub(r\"<thinking>[\\s\\S]*?</thinking>\", \"\", residual, flags=re.IGNORECASE)\n                residual = re.sub(r\"<summary>[\\s\\S]*?</summary>\", \"\", residual, flags=re.IGNORECASE)\n                clean_residual = re.sub(r\"\\s+\", \"\", residual)\n                if len(clean_residual) <= 30:\n                    yield \"[Info] Detected large code block without tool call and no extra natural language. Requesting clarification.\\n\"\n                    next_prompt = (\n                        \"[System] 检测到你在上一轮回复中主要内容是较大代码块，且本轮未调用任何工具。\\n\"\n                        \"如果这些代码需要执行、写入文件或进一步分析，请重新组织回复并显式调用相应工具\"\n                        \"（例如：code_run、file_write、file_patch 等）；\\n\"\n                        \"如果只是向用户展示或讲解代码片段，请在回复中补充自然语言说明，\"\n                        \"并明确是否还需要额外的实际操作。\"\n                    )\n                    return StepOutcome({}, next_prompt=next_prompt)"
+        }
+      ]
+    },
+    {
+      "name": "working-memory anchor prompt",
+      "what_it_is": "Each turn the model must emit a one-line <summary> (missing summaries trigger a '[SYSTEM] must include <summary>' reminder); summaries are stored in history_info. After tool calls a [WORKING MEMORY] block is appended with the last 30 summaries, older ones folded (max 70 entries), the current turn, key_info and related_sop set via update_working_checkpoint; reading memory/SOP files adds a tip to copy key points into working memory. key_info carried over into the next task is tagged as set N conversations ago with an instruction to update or clear it.",
+      "function_in_system": "Appended to the next prompt after every tool call, while the session history itself is trimmed in llmcore. Keeps task goal, progress and constraints salient in long runs. Otherwise the agent loses track of earlier steps and drifts once history is truncated.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "537-547",
+          "snippet": "    def _get_anchor_prompt(self, skip=False):\n        if skip: return \"\\n\"\n        h = self.history_info; W = 30\n        earlier = f'<earlier_context>\\n{self._fold_earlier(h[:-W])}\\n</earlier_context>\\n' if len(h) > W else \"\"\n        h_str = \"\\n\".join(h[-W:])\n        prompt = f\"\\n### [WORKING MEMORY]\\n{earlier}<history>\\n{h_str}\\n</history>\"\n        prompt += f\"\\nCurrent turn: {self.current_turn}\\n\"\n        if self.working.get('key_info'): prompt += f\"\\n<key_info>{self.working.get('key_info')}</key_info>\"\n        if self.working.get('related_sop'): prompt += f\"\\n有不清晰的地方请再次读取{self.working.get('related_sop')}\"\n        if getattr(self.parent, 'verbose', False): self.print(prompt)\n        return prompt"
+        },
+        {
+          "file": "ga.py",
+          "lines": "550-561",
+          "snippet": "        _c = re.sub(r'```.*?```|<thinking>.*?</thinking>', '', response.content, flags=re.DOTALL)\n        rsumm = re.search(r\"<summary>(.*?)</summary>\", _c, re.DOTALL)\n        if rsumm: summary = rsumm.group(1).strip()\n        else:\n            tc = tool_calls[0]; tool_name, args = tc['tool_name'], tc['args']   # at least one because no_tool\n            clean_args = {k: v for k, v in args.items() if not k.startswith('_')}\n            summary = f\"{tool_name}, args: {clean_args}\"\n            if tool_name == 'no_tool': summary = \"直接回答了用户问题\"\n            next_prompt += \"\\n\\n\\n[SYSTEM] 必须在回复文本中包含<summary>！\\n\\n\"\n            summary = smart_format(summary.replace('\\n', ''), max_str_len=40)\n        summary = smart_format(summary.replace('\\n', ''), max_str_len=80)\n        self.history_info.append(f'[Agent] {summary}')"
+        },
+        {
+          "file": "ga.py",
+          "lines": "439-445",
+          "snippet": "    def do_update_working_checkpoint(self, args, response):\n        '''为整个任务设定后续需要临时记忆的重点。'''\n        key_info = args.get(\"key_info\", \"\")\n        related_sop = args.get(\"related_sop\", \"\")\n        if \"key_info\" in args: self.working['key_info'] = key_info\n        if \"related_sop\" in args: self.working['related_sop'] = related_sop\n        self.working['passed_sessions'] = 0"
+        },
+        {
+          "file": "ga.py",
+          "lines": "424-425",
+          "snippet": "        if 'memory' in path or 'sop' in path: \n            next_prompt += \"\\n[SYSTEM TIPS] 正在读取记忆或SOP文件，若决定按sop执行请提取sop中的关键点（特别是靠后的）update working memory.\""
+        },
+        {
+          "file": "agentmain.py",
+          "lines": "154-158",
+          "snippet": "            if self.handler and 'key_info' in self.handler.working: \n                ki = re.sub(r'\\n\\[SYSTEM\\] 此为.*?工作记忆[。\\n]*', '', self.handler.working['key_info'])  # 去旧\n                handler.working['key_info'] = ki\n                handler.working['passed_sessions'] = ps = self.handler.working.get('passed_sessions', 0) + 1\n                if ps > 0: handler.working['key_info'] += f'\\n[SYSTEM] 此为 {ps} 个对话前设置的key_info，若已在新任务，先更新或清除工作记忆。\\n'"
+        },
+        {
+          "file": "memory/scheduled_task_sop.md",
+          "lines": "16",
+          "snippet": "4. **收到任务后第一件事**：用 update_working_checkpoint 记录报告目标文件路径，防止长任务执行中遗忘"
+        }
+      ]
+    },
+    {
+      "name": "periodic self-correction nudges",
+      "what_it_is": "turn_end_callback injects turn-count triggered system hints: every 7 turns save a checkpoint, stop ineffective retries and switch strategy / re-read SOPs; every 25 turns write findings to a file; every 10 turns re-inject global memory; in plan mode every 5 turns from turn 10 re-read plan.md and state the current step.",
+      "function_in_system": "Runs at every turn end and shapes the next prompt. Counters retry loops, strategy fixation and context loss in long runs. Otherwise the model keeps repeating a failing approach and forgets memory or plan state.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "566-573",
+          "snippet": "        elif turn % 7 == 0:\n            next_prompt += f\"\\n\\n[SYSTEM] Turn {turn}. Call update_working_checkpoint to save key context. Stop ineffective retries; if no progress, switch strategy: 1) Probe physical boundaries 2) **Re-read relevant SOPs**\"\n        elif turn % 25 == 0:\n            next_prompt += f\"\\n\\n[SYSTEM] Turn {turn}. Write checkpoints/key findings/tried approaches to a **file** for future reference (not only working_checkpoint!). Avoid losing critical info.\"\n        elif turn % 10 == 0: next_prompt += get_global_memory()\n\n        if _plan and turn >= 10 and turn % 5 == 0:\n            next_prompt = f\"[Plan Hint] 正在计划模式。必须 file_read({_plan}) 确认当前步骤，回复开头引用：📌 当前步骤：...\\n\\n\" + next_prompt"
+        }
+      ]
+    },
+    {
+      "name": "forced human check-in on long runs",
+      "what_it_is": "At turn 175 (outside plan mode) and from turn 190 in plan mode a [DANGER] hint demands calling ask_user to report progress and get direction, with 'no more blind retries'.",
+      "function_in_system": "Runs at turn end as an escalation before the 180-turn budget or during very long plan runs. Hands control back to the human instead of continuing blindly. Otherwise a stuck run silently exhausts its budget.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "564-565",
+          "snippet": "        if turn % 175 == 0 and (not _plan):\n            next_prompt += f\"\\n\\n[DANGER] Turn {turn}. Must call ask_user to summarize progress and get direction. No more blind retries.\""
+        },
+        {
+          "file": "ga.py",
+          "lines": "574",
+          "snippet": "        if _plan and turn >= 190: next_prompt += f\"\\n\\n[DANGER] Plan模式已运行 {turn} 轮，已达上限。必须 ask_user 汇报进度并确认是否继续。\""
+        }
+      ]
+    },
+    {
+      "name": "external intervention channel",
+      "what_it_is": "At every turn end the handler consumes the files <task_dir>/_keyinfo (appended to working key_info as [MASTER]) and <task_dir>/_intervene (appended to the next prompt), deleting them after reading. They are written by a supervising master agent per plan/supervisor/subagent SOPs or by the TUI when the user types during a running task.",
+      "function_in_system": "Sits in turn_end_callback between two LLM calls. Allows correcting a running agent from outside without aborting it. Otherwise a drifting agent can only be stopped and restarted, losing progress.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "576-579",
+          "snippet": "        injkeyinfo = consume_file(self.parent.task_dir, '_keyinfo')\n        injprompt = consume_file(self.parent.task_dir, '_intervene')\n        if injkeyinfo: self.working['key_info'] = self.working.get('key_info', '') + f\"\\n[MASTER] {injkeyinfo}\"\n        if injprompt: next_prompt += f\"\\n\\n[MASTER] {injprompt}\\n\""
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "50-51",
+          "snippet": "   - 方向偏了 → 写 `_intervene` 追加指令纠正\n   - 缺少关键上下文 → 写 `_keyinfo` 注入信息"
+        },
+        {
+          "file": "memory/subagent.md",
+          "lines": "16",
+          "snippet": "- 干预文件：`_stop`(当轮结束) | `_keyinfo`(注入working memory) | `_intervene`(追加指令)"
+        }
+      ]
+    },
+    {
+      "name": "ask_user human-in-the-loop tool",
+      "what_it_is": "ask_user returns an INTERRUPT/HUMAN_INTERVENTION result with question and candidate answers; the handler exits the loop and waits for the user's reply as the next task input.",
+      "function_in_system": "A tool the model can call at any turn; file_patch errors and the long-run check-in point to it. Escalates ambiguity or blockers to the human. Otherwise the model guesses or loops on an unresolved question.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "100-103",
+          "snippet": "def ask_user(question, candidates=None):\n    \"\"\"question: 向用户提出的问题。candidates: 可选的候选项列表\"\"\"\n    return {\"status\": \"INTERRUPT\", \"intent\": \"HUMAN_INTERVENTION\",\n        \"data\": {\"question\": question, \"candidates\": candidates or []}}"
+        },
+        {
+          "file": "ga.py",
+          "lines": "312-317",
+          "snippet": "    def do_ask_user(self, args, response):\n        question = args.get(\"question\", \"请提供输入：\")\n        candidates = args.get(\"candidates\", [])\n        result = ask_user(question, candidates)\n        yield f\"Waiting for your answer ...\\n\"\n        return StepOutcome(result, next_prompt=\"\", should_exit=True)"
+        }
+      ]
+    },
+    {
+      "name": "probe-first hint on import/attribute errors",
+      "what_it_is": "A header prepended to every code_run python script installs a sys.excepthook that prints '[Agent Hint]: NO GUESSING! You MUST probe first. If missing common package, pip.' on ImportError/AttributeError.",
+      "function_in_system": "Inside the code_run execution output that returns to the model. Steers the model away from hallucinated APIs or modules towards probing and installing. Otherwise the model keeps guessing names across failed runs.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "assets/code_run_header.py",
+          "lines": "27",
+          "snippet": "sys.excepthook = lambda t, v, tb: (sys.__excepthook__(t, v, tb), print(f\"\\n[Agent Hint]: NO GUESSING! You MUST probe first. If missing common package, pip.\")) if issubclass(t, (ImportError, AttributeError)) else sys.__excepthook__(t, v, tb)"
+        },
+        {
+          "file": "ga.py",
+          "lines": "26-27",
+          "snippet": "        cr_header = os.path.join(script_dir, 'assets', 'code_run_header.py')\n        if os.path.exists(cr_header): tmp_file.write(open(cr_header, encoding='utf-8').read())"
+        }
+      ]
+    },
+    {
+      "name": "verified-experience distillation to long-term memory",
+      "what_it_is": "The start_long_term_update tool returns the memory management SOP plus a prompt to store only action-verified environment facts (L2) and pitfalls of complex tasks (L3 SOPs) via minimal file_patch updates, skipping unverified or trivial information.",
+      "function_in_system": "Called by the model after completing a task. Persists verified lessons so later runs avoid repeated failures and retries. Otherwise every run rediscovers the same pitfalls, or unverified guesses pollute memory.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "506-521",
+          "snippet": "    def do_start_long_term_update(self, args, response):\n        '''Agent觉得当前任务完成后有重要信息需要记忆时调用此工具。'''\n        prompt = '''### [总结提炼经验] 既然你觉得当前任务有重要信息需要记忆，请提取最近一次任务中【事实验证成功且长期有效】的环境事实、用户偏好、重要步骤，更新记忆。\n本工具是标记开启结算过程，若已在更新记忆过程或没有值得记忆的点，忽略本次调用。\n**如果没有经验证的，未来能用上的信息，忽略本次调用！**\n**只能提取行动验证成功的信息**：\n- **环境事实**（路径/凭证/配置）→ `file_patch` 更新 L2，同步 L1\n- **复杂任务经验**（关键坑点/前置条件/重要步骤）→ L3 精简 SOP（只记你被坑得多次重试的核心要点）\n**禁止**：临时变量、具体推理过程、未验证信息、通用常识、你可以轻松复现的细节、只是做了但没有验证的信息\n**操作**：严格遵循提供的L0的记忆更新SOP。先 `file_read` 看现有 → 判断类型 → 最小化更新 → 无新内容跳过，保证对记忆库最小局部修改。\\n\n''' + get_global_memory()\n        yield \"[Info] Start distilling good memory for long-term storage.\\n\"\n        path = './memory/memory_management_sop.md'\n        if os.path.exists(path): result = 'This is L0:\\n' + file_read(path, show_linenos=False)\n        else: result = \"Memory Management SOP not found. Do not update memory.\"\n        return StepOutcome(result, next_prompt=prompt)"
+        },
+        {
+          "file": "memory/memory_management_sop.md",
+          "lines": "2-5",
+          "snippet": "1.  **行动验证原则 (Action-Verified Only)**\n    *   **定义**：任何写入 L1/L2/L3 的信息，必须源自**成功的工具调用结果**（如 `shell` 执行成功、`file_read` 确认内容存在、代码运行通过）。\n    *   **禁止**：严禁将模型的“固有知识”、“推理猜测”、“未执行的计划”或“未验证的假设”作为事实写入。\n    *   **口号**：**No Execution, No Memory. (无行动，不记忆)**"
+        }
+      ]
+    },
+    {
+      "name": "LLM request retry with backoff",
+      "what_it_is": "_stream_with_retry retries the HTTP request on retryable status codes (408/409/425/429/5xx/52x/529) and on timeouts or connection errors, including an empty response; delay honors the retry-after header, else 1.5*2^attempt capped at 30s; max_retries defaults to 4 (per-session config). Connect/read timeouts (5/40s streaming, 10/240s non-streaming) bound each call. A failure after streaming started is not retried and returned as a '[!!! 流异常中断' marker; error responses are kept out of the session history.",
+      "function_in_system": "Wraps every raw LLM call inside a session. Absorbs transient provider and network failures before they reach the agent loop. Otherwise a single rate limit or dropped connection ends the turn with an error.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "llmcore.py",
+          "lines": "363-399",
+          "snippet": "def _stream_with_retry(sess, url, headers, payload, parse_fn):\n    _RETRYABLE = {408, 409, 425, 429, 500, 502, 503, 504, 520, 521, 522, 523, 524, 525, 526, 527, 529}\n    def _delay(resp, attempt):\n        try: ra = float((resp.headers or {}).get(\"retry-after\"))\n        except: ra = None\n        return max(0.5, ra if ra is not None else min(30.0, 1.5 * (2 ** attempt)))\n    for attempt in range(sess.max_retries + 1):\n        streamed = False\n        try:\n            with requests.post(url, headers=headers, json=payload, stream=sess.stream, \n                               timeout=(sess.connect_timeout, sess.read_timeout), proxies=sess.proxies, verify=sess.verify) as r:\n                if r.status_code >= 400:\n                    if r.status_code in _RETRYABLE and attempt < sess.max_retries:\n                        d = _delay(r, attempt)\n                        print(f\"[LLM Retry] HTTP {r.status_code}, retry in {d:.1f}s ({attempt+1}/{sess.max_retries+1})\")\n                        time.sleep(d); continue\n                    try: body = r.text.strip()[:500]\n                    except: body = \"\"\n                    err = f\"!!!Error: HTTP {r.status_code}\" + (f\": {body}\" if body else \"\")\n                    yield err; return [{\"type\": \"text\", \"text\": err}]\n                gen = parse_fn(r)\n                try:\n                    while True: chunk = next(gen); streamed = True; yield chunk\n                except StopIteration as e:\n                    if not e.value and not streamed: raise requests.ConnectionError(\"empty response\")\n                    return e.value or []\n        except (requests.Timeout, requests.ConnectionError) as e:\n            #pathlib.Path(__file__).parent.joinpath('temp','bad_requests.json').write_text(json.dumps({\"url\":url,\"headers\":headers,\"payload\":payload,\"err\":str(e),\"t\":time.time()},ensure_ascii=False),encoding='utf-8')\n            err = f\"!!!Error: {type(e).__name__}: {e}\" if str(e) else f\"!!!Error: {type(e).__name__}\"\n            if attempt < sess.max_retries:\n                d = _delay(None, attempt)\n                print(f\"[LLM Retry] {type(e).__name__}, retry in {d:.1f}s ({attempt+1}/{sess.max_retries+1})\")\n                yield err; time.sleep(d); continue\n            yield err; return [{\"type\": \"text\", \"text\": err}]\n        except Exception as e:\n            err = f\"\\n\\n[!!! 流异常中断 {type(e).__name__}: {e} !!!]\" if streamed else f\"!!!Error: {type(e).__name__}: {e}\"\n            yield err; return [{\"type\": \"text\", \"text\": err}]"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "538, 541-543",
+          "snippet": "        self.max_retries = max(0, int(cfg.get('max_retries', 4)))\n        default_ct, default_rt = (5, 40) if self.stream else (10, 240)\n        self.connect_timeout = max(1, int(cfg.get('timeout', default_ct)))\n        self.read_timeout = max(5, int(cfg.get('read_timeout', default_rt)))"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "585",
+          "snippet": "            if content.strip() and not content.startswith(\"!!!Error:\"): self.history.append({\"role\": \"assistant\", \"content\": [{\"type\": \"text\", \"text\": content}]})"
+        }
+      ]
+    },
+    {
+      "name": "multi-model failover with spring-back",
+      "what_it_is": "MixinSession wraps a configured list of sessions (llm_nos) whose own retries are disabled; on an error chunk it rotates to the next session, sleeping min(30, base_delay*1.5^round) after each full round, up to max_retries. After a successful fallback it stays on that session for spring_back seconds (default 300) before returning to the primary; a mid-stream failure moves the next call to the next session.",
+      "function_in_system": "Sits between the tool client and the concrete LLM sessions. Keeps the run alive when one provider or relay is down or rate-limited, where retrying the same endpoint does not help. Otherwise a provider outage stops the agent until the user switches models manually.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "llmcore.py",
+          "lines": "941-956",
+          "snippet": "class MixinSession:\n    \"\"\"Multi-session fallback with spring-back to primary.\"\"\"\n    def __init__(self, all_sessions, cfg):\n        self._retries, self._base_delay = cfg.get('max_retries', 3), cfg.get('base_delay', 1.5)\n        self._spring_sec = cfg.get('spring_back', 300)\n        self._sessions = [all_sessions[i].backend if isinstance(i, int) else \n                          next(s.backend for s in all_sessions if type(s) is not dict and s.backend.name == i) for i in cfg.get('llm_nos', [])]\n        is_native = lambda s: 'Native' in s.__class__.__name__\n        groups = {is_native(s) for s in self._sessions}\n        assert len(groups) == 1, f\"MixinSession: sessions must be in same group (Native or non-Native), got {[type(s).__name__ for s in self._sessions]}\"\n        self.name = '|'.join(s.name for s in self._sessions)\n        import copy; self._sessions = [copy.copy(s) for s in self._sessions]\n        for s in self._sessions: s.max_retries = 0\n        self._orig_raw_asks = [s.raw_ask for s in self._sessions]\n        self._sessions[0].raw_ask = self._raw_ask\n        self._cur_idx, self._switched_at = 0, 0.0"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "971-1003",
+          "snippet": "    def _pick(self):\n        if self._cur_idx and time.time() - self._switched_at > self._spring_sec: self._cur_idx = 0\n        return self._cur_idx\n    def _raw_ask(self, *args, **kwargs):\n        base, n = self._pick(), len(self._sessions)\n        test_error = lambda x: isinstance(x, str) and x.lstrip().startswith(('!!!Error:', '[Error:'))\n        for attempt in range(self._retries + 1):\n            idx = (base + attempt) % n\n            gen = self._orig_raw_asks[idx](*args, **kwargs)\n            print(f'[MixinSession] Using session ({self._sessions[idx].name})')\n            last_chunk, return_val, yielded = None, [], False\n            try:\n                while True:\n                    chunk = next(gen); last_chunk = chunk\n                    if not yielded and test_error(chunk): continue\n                    yield chunk; yielded = True\n            except StopIteration as e: return_val = e.value or []\n            is_err = test_error(last_chunk)\n            if not is_err:\n                if attempt > 0: self._cur_idx = idx; self._switched_at = time.time()\n                elif isinstance(last_chunk, str) and '[!!! 流异常中断' in last_chunk and n > 1:\n                    self._cur_idx = (idx + 1) % n; self._switched_at = time.time()\n                    print(f'[MixinSession] Partial failure, next call → s{self._cur_idx} ({self._sessions[self._cur_idx].name})')\n                return return_val\n            if attempt >= self._retries:\n                yield last_chunk; return return_val\n            nxt = (base + attempt + 1) % n\n            if nxt == base:  # full round failed, delay before next\n                rnd = (attempt + 1) // n\n                delay = min(30, self._base_delay * (1.5 ** rnd))\n                print(f'[MixinSession] {last_chunk[:80]}, round {rnd} exhausted, retry in {delay:.1f}s')\n                time.sleep(delay)\n            else: print(f'[MixinSession] {last_chunk[:80]}, retry {attempt+1}/{self._retries} (s{idx}→s{nxt})')"
+        },
+        {
+          "file": "mykey_template.py",
+          "lines": "130-136",
+          "snippet": "mixin_config = {\n    'llm_nos': [],               # 默认空：桌面端会显示一个空的「渠道组（自动故障转移）」，添加模型后\n                                 # 在设置里用 ➕ 把基本模型加进来即可（也可在此手填名字）\n    # 'llm_nos': ['cc-relay-1', 'cc-relay-2', 'gpt-native'],  # 按优先级排列；Claude 与 GPT 混用，注意: 启用时需要启用'cc-relay-1', 'cc-relay-2'配置!\n    'max_retries': 10,           # int；整个 rotation 的总重试次数上限\n    'base_delay': 0.5,           # float 秒；指数退避起始延迟（retry n 时延迟≈base_delay * 2^n）\n    # 'spring_back': 300,        # int 秒；切到备用节点后多久再尝试回到第一个节点"
+        },
+        {
+          "file": "agentmain.py",
+          "lines": "74, 78-82",
+          "snippet": "                if 'mixin' in k: llm_sessions += [{'mixin_cfg': cfg}]\n            if isinstance(s, dict) and 'mixin_cfg' in s:\n                try:\n                    mixin = MixinSession(llm_sessions, s['mixin_cfg'])\n                    if isinstance(mixin._sessions[0], (NativeClaudeSession, NativeOAISession)): llm_sessions[i] = NativeToolClient(mixin)\n                    else: llm_sessions[i] = ToolClient(mixin)"
+        }
+      ]
+    },
+    {
+      "name": "two-stage context window management",
+      "what_it_is": "Before each LLM call: every 5 calls, contents of <thinking>/<tool_use>/<tool_result> and tool blocks in all but the last 10 messages are head/tail-truncated to 800 chars and old working-memory blocks (<history>, <key_info>, <earlier_context>) collapse to [...]. If history exceeds context_win*3 chars it is force-compressed keeping 4 recent messages, then the oldest messages are dropped at user-turn boundaries until under 60% (trim_keep_rate); orphaned tool_results are rewritten to text and missing tool_result pairs are filled with '(error)'. Model-specific defaults (e.g. deepseek 70000, interval 25, keep 0.3).",
+      "function_in_system": "Runs in session.ask on every turn, complemented by the working-memory anchor prompt that re-supplies trimmed progress. Keeps the growing history inside the model's context window and bounds per-turn cost. Otherwise long runs hit context-overflow errors or grow expensive with each turn.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "llmcore.py",
+          "lines": "40-54",
+          "snippet": "def compress_history_tags(messages, keep_recent=10, max_len=800, force=False, interval=5):\n    \"\"\"Compress <thinking>/<tool_use>/<tool_result> tags in older messages to save tokens.\"\"\"\n    compress_history_tags._cd = getattr(compress_history_tags, '_cd', 0) + 1\n    if force: compress_history_tags._cd = 0\n    if compress_history_tags._cd % interval != 0: return messages\n    _before = sum(len(json.dumps(m, ensure_ascii=False)) for m in messages)\n    _pats = {tag: re.compile(rf'(<{tag}>)([\\s\\S]*?)(</{tag}>)') for tag in ('thinking', 'think', 'tool_use', 'tool_result')}\n    _hist_pat = re.compile(r'<(history|key_info|earlier_context)>[\\s\\S]*?</\\1>')\n    def _trunc_str(s): return s[:max_len//2] + '\\n...[Truncated]...\\n' + s[-max_len//2:] if isinstance(s, str) and len(s) > max_len else s\n    def _trunc(text):\n        text = _hist_pat.sub(lambda m: f'<{m.group(1)}>[...]</{m.group(1)}>', text)\n        for pat in _pats.values(): text = pat.sub(lambda m: m.group(1) + _trunc_str(m.group(2)) + m.group(3), text)\n        return text\n    for i, msg in enumerate(messages):\n        if i >= len(messages) - keep_recent: break"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "97-110",
+          "snippet": "def trim_messages_history(history, sess):\n    cap = sess.context_win * 3\n    target = int(cap * getattr(sess, 'trim_keep_rate', 0.6))\n    def cost(): return sum(len(json.dumps(m, ensure_ascii=False)) for m in history)\n    compress_history_tags(history, interval=getattr(sess, 'cut_msg_interval', 5))\n    print(f'[Debug] Current context: {cost()} chars, {len(history)} messages.')\n    if cost() <= cap: return\n    compress_history_tags(history, keep_recent=4, force=True)\n    if cost() <= target: return\n    while len(history) > 9 and cost() > target:\n        history.pop(0)\n        while history and history[0].get('role') != 'user': history.pop(0)\n        if history and history[0].get('role') == 'user': history[0] = _sanitize_leading_user_msg(history[0])\n    print(f'[Debug] Trimmed context, current: {cost()} chars, {len(history)} messages.')"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "530-533",
+          "snippet": "        default_context_win = 30000\n        if 'deepseek' in self.model.lower():\n            default_context_win = 70000; self.cut_msg_interval = 25; self.trim_keep_rate = 0.3\n        self.context_win = cfg.get('context_win', default_context_win)"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "569-574",
+          "snippet": "    def ask(self, prompt):\n        def _ask_gen():\n            with self.lock:\n                self.history.append({\"role\": \"user\", \"content\": [{\"type\": \"text\", \"text\": prompt}]})\n                trim_messages_history(self.history, self)\n                messages = self.make_messages(self.history)"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "661",
+          "snippet": "            m['content'] = [got.get(u) or {\"type\": \"tool_result\", \"tool_use_id\": u, \"content\": \"(error)\"} for u in prev_uses] + rest"
+        }
+      ]
+    },
+    {
+      "name": "prompt caching",
+      "what_it_is": "Anthropic cache_control breakpoints are stamped on the last two user messages (Claude, native Claude, and OpenAI-compatible relays serving Claude models), on the system prompt and on the last tool definition; the OpenAI Responses API gets a fixed prompt_cache_key. Cache creation/read tokens are logged per call.",
+      "function_in_system": "Applied when building every LLM request. Lets the provider reuse the unchanged prefix of the growing conversation. Otherwise every turn pays full input-token cost and latency for the whole history.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "llmcore.py",
+          "lines": "350-361",
+          "snippet": "def _stamp_oai_cache_markers(messages, model):\n    \"\"\"Add cache_control to last 2 user messages for Anthropic models via OAI-compatible relay.\"\"\"\n    ml = model.lower()\n    if not any(k in ml for k in ('claude', 'anthropic')): return\n    user_idxs = [i for i, m in enumerate(messages) if m.get('role') == 'user']\n    for idx in user_idxs[-2:]:\n        c = messages[idx].get('content')\n        if isinstance(c, str):\n            messages[idx] = {**messages[idx], 'content': [{'type': 'text', 'text': c, 'cache_control': {'type': 'ephemeral'}}]}\n        elif isinstance(c, list) and c:\n            c = list(c); c[-1] = dict(c[-1], cache_control={'type': 'ephemeral'})\n            messages[idx] = {**messages[idx], 'content': c}"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "614, 618-623",
+          "snippet": "        if self.system: payload[\"system\"] = [{\"type\": \"text\", \"text\": self.system, \"cache_control\": {\"type\": \"persistent\"}}]\n    def make_messages(self, raw_list):\n        msgs = _drop_unsigned_thinking([{\"role\": m['role'], \"content\": list(m['content'])} for m in raw_list])\n        user_idxs = [i for i, m in enumerate(msgs) if m['role'] == 'user']\n        for idx in user_idxs[-2:]:\n            msgs[idx][\"content\"][-1] = dict(msgs[idx][\"content\"][-1], cache_control={\"type\": \"ephemeral\"})\n        return msgs"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "699-711",
+          "snippet": "        if self.tools:\n            claude_tools = openai_tools_to_claude(self.tools)\n            tools = [dict(t) for t in claude_tools]; tools[-1][\"cache_control\"] = {\"type\": \"ephemeral\"}\n            payload[\"tools\"] = tools\n        else: print(\"[ERROR] No tools provided for this session.\")\n        payload['system'] = [{\"type\": \"text\", \"text\": \"You are Claude Code, Anthropic's official CLI for Claude.\", \"cache_control\": {\"type\": \"ephemeral\"}}]\n        if self.system:\n            if self.fake_cc_system_prompt: payload[\"system\"].append({\"type\": \"text\", \"text\": self.system})\n            else: payload[\"system\"] = [{\"type\": \"text\", \"text\": self.system}]\n        user_idxs = [i for i, m in enumerate(messages) if m['role'] == 'user']\n        for idx in user_idxs[-2:]:\n            messages[idx] = {**messages[idx], \"content\": list(messages[idx][\"content\"])}\n            messages[idx][\"content\"][-1] = dict(messages[idx][\"content\"][-1], cache_control={\"type\": \"ephemeral\"})"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "411-412",
+          "snippet": "        payload = {\"model\": model, \"input\": _to_responses_input(messages), \"stream\": sess.stream, \n                   \"prompt_cache_key\": _RESP_CACHE_KEY, \"instructions\": sess.system or \"You are an Omnipotent Executor.\","
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "316-318",
+          "snippet": "    elif api_mode == 'messages':\n        ci, cr, inp = usage.get(\"cache_creation_input_tokens\", 0), usage.get(\"cache_read_input_tokens\", 0), usage.get(\"input_tokens\", 0)\n        print(f\"[Cache] input={inp} creation={ci} read={cr}\")"
+        }
+      ]
+    },
+    {
+      "name": "lenient tool-call parsing",
+      "what_it_is": "Before a call is declared bad_json, several repairs are tried: tryparse strips backticks/json prefixes, drops a trailing character or cuts after the last '}'; concatenated argument objects '{..}{..}' are split into separate calls; text tool calls are accepted as JSON arrays, <tool_use>/<tool_call> tags or bare name/arguments JSON, also as a fallback when a native session returns tool calls only in text.",
+      "function_in_system": "Sits in response parsing between the LLM call and tool dispatch. Recovers slightly malformed tool calls, common with weaker models or relays. Otherwise such turns are lost to parse errors and extra correction turns.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "llmcore.py",
+          "lines": "930-939",
+          "snippet": "def tryparse(json_str):\n    try: return json.loads(json_str)\n    except: pass\n    json_str = json_str.strip().strip('`').replace('json\\n', '', 1).strip()\n    try: return json.loads(json_str)\n    except: pass\n    try: return json.loads(json_str[:-1])\n    except: pass\n    if '}' in json_str: json_str = json_str[:json_str.rfind('}') + 1]\n    return json.loads(json_str)"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "195-209",
+          "snippet": "def _try_parse_tool_args(raw):\n    \"\"\"Parse tool args string; split concatenated JSON objects like {..}{..} if needed.\n    Returns list of parsed dicts.\"\"\"\n    if not raw: return [{}]\n    try: return [json.loads(raw)]\n    except: pass\n    parts = re.split(r'(?<=\\})(?=\\{)', raw)\n    if len(parts) > 1:\n        parsed = []\n        for p in parts:\n            try: parsed.append(json.loads(p))\n            except: return [{\"_raw\": raw}]\n        return parsed\n    return [{\"_raw\": raw}]\n"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "888-908",
+          "snippet": "def _parse_text_tool_calls(content):\n    \"\"\"Fallback: extract tool calls from text when model doesn't use native tool_use blocks.\"\"\"\n    tcs = []\n    # try JSON array: [{\"type\":\"tool_use\", \"name\":..., \"input\":...}]\n    _jp = next((p for p in ['[{\"type\":\"tool_use\"', '[{\"type\": \"tool_use\"'] if p in content), None)\n    if _jp and content.endswith('}]'):\n        try:\n            idx = content.index(_jp); raw = json.loads(content[idx:])\n            tcs = [MockToolCall(b[\"name\"], b.get(\"input\", {}), id=b.get(\"id\", \"\")) for b in raw if b.get(\"type\") == \"tool_use\"]\n            return tcs, content[:idx].strip()\n        except: pass\n    # try XML tags: <tool_call>{\"name\":..., \"arguments\":...}</tool_call>\n    _xp = r\"<(?:tool_use|tool_call)>((?:(?!<(?:tool_use|tool_call)>).){15,}?)</(?:tool_use|tool_call)>\"\n    for s in re.findall(_xp, content, re.DOTALL):\n        try:\n            d = tryparse(s.strip()); name = d.get('name')\n            args = d.get('arguments') or d.get('args') or d.get('input') or {}\n            if name: tcs.append(MockToolCall(name, args))\n        except: pass\n    if tcs: content = re.sub(_xp, \"\", content, flags=re.DOTALL).strip()\n    return tcs, content"
+        },
+        {
+          "file": "llmcore.py",
+          "lines": "733",
+          "snippet": "        if not tool_calls: tool_calls, content = _parse_text_tool_calls(content)"
+        }
+      ]
+    },
+    {
+      "name": "task abort via stop signal",
+      "what_it_is": "abort() sets stop_sig, which breaks the output loop, and appends to the handler's code_stop_signal, which kills a running code_run process. In task mode the runtime consumes a <task_dir>/_stop file on every output chunk and aborts when present, so a supervising agent can stop a subagent from outside; Ctrl+C in the CLI also calls abort().",
+      "function_in_system": "Sits in the runtime around agent_runner_loop. Emergency stop for a misbehaving run that keeps session history intact. Otherwise the only way to stop a runaway agent is killing the process.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agentmain.py",
+          "lines": "108-112",
+          "snippet": "    def abort(self):\n        if not self.is_running: return\n        print('Abort current task...')\n        self.stop_sig = True\n        if self.handler is not None: self.handler.code_stop_signal.append(1)"
+        },
+        {
+          "file": "agentmain.py",
+          "lines": "168-170",
+          "snippet": "                for chunk in gen:\n                    if consume_file(self.task_dir, '_stop'): self.abort() \n                    if self.stop_sig: break"
+        },
+        {
+          "file": "agentmain.py",
+          "lines": "314-316",
+          "snippet": "            except KeyboardInterrupt:\n                agent.abort()\n                print('\\n[Interrupted]')"
+        },
+        {
+          "file": "memory/subagent.md",
+          "lines": "16",
+          "snippet": "- 干预文件：`_stop`(当轮结束) | `_keyinfo`(注入working memory) | `_intervene`(追加指令)"
+        }
+      ]
+    },
+    {
+      "name": "long user prompt offloading",
+      "what_it_is": "User prompts longer than 2000 chars are written to temp/user_prompt_<ts>.md and replaced by 'Long user prompt saved to <file>. Read and execute.'; the history entry stores at most 200 chars of the query.",
+      "function_in_system": "Applied when a task enters the runtime. Keeps large inputs out of the conversation history that is resent every turn; the model reads the file on demand. Otherwise a long prompt occupies context and cost on every turn.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agentmain.py",
+          "lines": "144-149",
+          "snippet": "            if len(raw_query) > 2000:\n                task_file = os.path.join(script_dir, 'temp', f'user_prompt_{int(time.time())}.md')\n                with open(task_file, 'w', encoding='utf-8') as f: f.write(raw_query)\n                raw_query = f'Long user prompt saved to {task_file}. Read and execute.'\n            rquery = smart_format(raw_query.replace('\\n', ' '), max_str_len=200)\n            self.history.append(f\"[USER]: {rquery}\")"
+        }
+      ]
+    },
+    {
+      "name": "goal-mode time budget and wake-up cap with wrap-up turn",
+      "what_it_is": "Each goal-mode check() reads start_time, budget_seconds (default 1800) and max_turns (default 50, commented as an anti-idle-spinning cap) from the state JSON. When the budget or the cap is reached it sets status 'wrapping_up' and sends one final wrap-up prompt (summarize progress, list open items, clean up temp files and processes). on_done then marks the state 'done_budget' and the next check() returns /exit.",
+      "function_in_system": "Sits in the reflect watcher that re-wakes the agent across many tasks, where the agent is told it can never declare completion. Bounds total cost and wall-clock time of the open-ended optimization loop and ends it with a clean handover. Otherwise the agent would be woken indefinitely and burn tokens without limit.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "reflect/goal_mode.py",
+          "lines": "79-94",
+          "snippet": "    start_time = state.get('start_time', time.time())\n    budget_sec = state.get('budget_seconds', 1800)  # 默认30分钟\n    elapsed = time.time() - start_time\n    remaining = budget_sec - elapsed\n    turn = state.get('turns_used', 0) + 1\n    max_turns = state.get('max_turns', 50)  # 防空转上限\n    \n    # 预算耗尽或轮次上限\n    if remaining <= 0 or turn > max_turns:\n        state['status'] = 'wrapping_up'\n        _save(state)\n        return BUDGET_LIMIT_PROMPT.format(\n            objective=state['objective'],\n            budget_min=budget_sec / 60,\n            done_prompt=state.get('done_prompt', '')\n        )"
+        },
+        {
+          "file": "reflect/goal_mode.py",
+          "lines": "106-113",
+          "snippet": "def on_done(result):\n    state = _load()\n    if state is None: return\n    \n    if state.get('status') == 'wrapping_up':\n        state['status'] = 'done_budget'\n        state['end_time'] = time.time()\n        _save(state)"
+        },
+        {
+          "file": "reflect/goal_mode.py",
+          "lines": "73-77",
+          "snippet": "    state = _load()\n    if state is None: return '/exit'\n    \n    status = state.get('status', 'running')\n    if status != 'running': return '/exit'"
+        },
+        {
+          "file": "memory/goal_mode_sop.md",
+          "lines": "23-24, 44",
+          "snippet": "- `budget_seconds`：最少 3 小时（10800），按用户要求调整\n- `max_turns`：防空转上限，一般 200 够用\n- 预算耗尽时自动进入收口轮，然后停止"
+        }
+      ]
+    },
+    {
+      "name": "goal-mode alternating verify/improve cycle",
+      "what_it_is": "The goal-mode continuation prompt makes each wake-up alternate between a verification phase (switch perspective, harder untested cases, fact and citation checks, hands-on testing, optionally a third-party subagent review) and an improvement phase. A basic pass bar comes first (no factual errors, runs, passes basic tests). An improvement round with no changes is forbidden; if verification finds nothing, the agent must raise its verification standard for the next round.",
+      "function_in_system": "Drives every goal-mode wake-up after the first. Acts as a recurring self-critique that surfaces defects in the deliverable before the budget ends. Otherwise the agent tends to accept its first result and later wake-ups add little.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "reflect/goal_mode.py",
+          "lines": "34-52",
+          "snippet": "你正在 Goal Mode 下工作：无法宣告完成，你会被无法阻止地持续唤醒直到预算耗尽\n唤醒后流程（3选1）：\n1. 创造阶段(第一次唤醒)：分析objective，在cwd建工作文件夹，严格按照objective执行\n2. 检验阶段：从不同视角检验创造结果，产出检验报告\n    - 换身份查看（读者/受众/用户/测试工程师/领导） | 设计未跑过的更难测例 | 查素材/事实/引用的真实性与数量/说服力 | 代码质量/产物格式/美观 | 实测验证(亲自执行/模拟用户操作)\n    - 按任务类型**轮换**选用合适的角色和方法\n    - 在遵循原始需求约束下追求超预期，拒绝保守和平庸，必须提出“不够出色”的点\n    - 先保及格线（无事实错误/乱码/格式错误，能运行，过基础测例，遵循用户约束），及格同时追求出色\n3. 改进阶段：针对检验报告优化改进交付物，必须实质性改进\n\n原则：\n1. 每次唤醒**交替**进行检验阶段和改进阶段，保留每次的检验报告和改进changelog。\n2. 除非发现严重问题，不要对创造结果进行完全重写，而是改进\n3. 严格区分交付物和进度报告，交付物中不要混入`已检验`等中间信息\n4. 若检验都是无关紧要问题，下次升级检验（要求更出色产物/更苛刻视角/更难测试/对照原始需求重审/开subagent第三方评审）\n5. 改进阶段禁止产出\"无改动\"。若检验未发现值得改的点，说明检验标准太低——本轮产出\"检验标准升级报告\"，论证当前标准为何不够高并提出新标准，下轮按新标准重新检验。\n6. 在工作文件夹中记录进度，不要更新全局记忆\n7. 所有阶段都建议进行充分调研：web调研、查看记忆和相关SOP、获取用户倾向\n8. 禁止进行sha1等无用验证，文件版本不会出错"
+        }
+      ]
+    },
+    {
+      "name": "deterministic pre-check before waking the agent",
+      "what_it_is": "Every reflect script implements check() as cheap deterministic code (poll BBS for post ids above the last seen id, read a state file, evaluate schedule windows) and returns None when nothing needs doing. The reflect loop only calls agent.put_task when check() returns a prompt.",
+      "function_in_system": "Sits in the agentmain --reflect polling loop in front of every agent run. Saves LLM calls during long polling operation. Otherwise every INTERVAL tick (e.g. 60 s) would start a full agent task just to find out that nothing changed.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "reflect/agent_team_worker.py",
+          "lines": "1-2",
+          "snippet": "# reflect module: BBS接单\n# check()内预检BBS，无新帖返回None不唤醒agent"
+        },
+        {
+          "file": "reflect/agent_team_worker.py",
+          "lines": "31-33",
+          "snippet": "    if not posts or max(p['id'] for p in posts) <= _last_id: return None\n    _last_id = max(p['id'] for p in posts)\n    return _prompt()"
+        },
+        {
+          "file": "reflect/checklist_master.py",
+          "lines": "44-49",
+          "snippet": "    new_posts = _poll_bbs(data)\n    tasks = data.get(\"tasks\", [])\n    has_open = any(t[\"result\"] is None for t in tasks)\n    if new_posts and has_open: return _prompt(data, new_posts)\n    if not has_open and (not tasks or random.random() < 0.2): return _prompt(data, new_posts)\n    return None"
+        },
+        {
+          "file": "agentmain.py",
+          "lines": "271-277",
+          "snippet": "            try: task = mod.check()\n            except Exception as e: \n                print(f'[Reflect] check() error: {e}'); task = None\n            if task and task == '/exit': break\n            if task:\n                print(f'[Reflect] triggered: {task[:80]}')\n                dq = agent.put_task(task, source='reflect')"
+        }
+      ]
+    },
+    {
+      "name": "scheduler duplicate and stale trigger guard",
+      "what_it_is": "The scheduler binds 127.0.0.1:45762 at import, so a second scheduler instance crashes on start (the lock survives hot reloads). Per task, the last run is reconstructed from report filenames in sche_tasks/done, and a cooldown slightly shorter than the period (e.g. 20 h for daily, to absorb drift) blocks re-triggering. Tasks more than max_delay_hours (default 6) past their schedule are skipped and logged.",
+      "function_in_system": "Sits in scheduler.check() before a scheduled task is handed to the agent. Prevents the same task from running twice (parallel schedulers or repeated ticks) and prevents outdated tasks from firing after a late machine start. Otherwise duplicate or stale agent runs would repeat side effects and waste cost.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "reflect/scheduler.py",
+          "lines": "4-9",
+          "snippet": "# 端口锁：防止重复启动，bind失败时agentmain会直接崩溃退出\n# reload时mod.__dict__保留_lock，跳过重复绑定\ntry: _lock\nexcept NameError:\n    _lock = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)\n    _lock.bind(('127.0.0.1', 45762)); _lock.listen(1)"
+        },
+        {
+          "file": "reflect/scheduler.py",
+          "lines": "32-49",
+          "snippet": "def _parse_cooldown(repeat):\n    \"\"\"解析repeat为冷却时间(比实际周期略短,防漂移)\"\"\"\n    if repeat == 'once': return timedelta(days=999999)\n    if repeat in ('daily', 'weekday'): return timedelta(hours=20)\n    if repeat == 'weekly': return timedelta(days=6)\n    if repeat == 'monthly': return timedelta(days=27)\n    if repeat.startswith('every_'):\n        try:\n            parts = repeat.split('_')\n            n = int(parts[1].rstrip('hdm'))\n            u = parts[1][-1]\n            if u == 'h': return timedelta(hours=n)\n            if u == 'm': return timedelta(minutes=n)\n            if u == 'd': return timedelta(days=n)\n        except (ValueError, IndexError):\n            pass  # fall through to warning below\n    _logger.warning(f'Unknown repeat type: {repeat}, fallback to 20h cooldown')\n    return timedelta(hours=20)"
+        },
+        {
+          "file": "reflect/scheduler.py",
+          "lines": "51-60",
+          "snippet": "def _last_run(tid, done_files):\n    \"\"\"找最近一次执行时间\"\"\"\n    latest = None\n    for df in done_files:\n        if not df.endswith(f'_{tid}.md'): continue\n        try:\n            t = datetime.strptime(df[:15], '%Y-%m-%d_%H%M')\n            if latest is None or t > latest: latest = t\n        except: continue\n    return latest"
+        },
+        {
+          "file": "reflect/scheduler.py",
+          "lines": "105-117",
+          "snippet": "        # 执行窗口检查：超过max_delay小时则跳过（防止开机太晚触发过时任务）\n        max_delay = task.get('max_delay_hours', DEFAULT_MAX_DELAY)\n        sched_minutes = h * 60 + m\n        now_minutes = now.hour * 60 + now.minute\n        if (now_minutes - sched_minutes) > max_delay * 60:\n            _logger.info(f'SKIP {tid}: {now_minutes - sched_minutes}min past schedule, '\n                         f'exceeds max_delay={max_delay}h')\n            continue\n        \n        # 检查冷却\n        last = _last_run(tid, done_files)\n        cooldown = _parse_cooldown(repeat)\n        if last and (now - last) < cooldown: continue"
+        },
+        {
+          "file": "memory/scheduled_task_sop.md",
+          "lines": "10",
+          "snippet": "max_delay_hours（可选，默认6）：超过schedule多少小时后不再触发，防止开机太晚执行过时任务"
+        }
+      ]
+    },
+    {
+      "name": "reflect watcher self-termination caps",
+      "what_it_is": "The BBS worker counts consecutive poll failures, returns None while failed < 10 and returns /exit at the tenth, resetting the counter on success. The checklist master returns /exit after 1000 check() calls or when its state is missing or closed.",
+      "function_in_system": "Sits in the watcher check() functions of the multi-agent BBS setups. Tolerates transient network errors and stops the watcher process once the board is permanently unreachable or the run exceeds its lifetime. Otherwise a dead BBS or forgotten master keeps the process polling forever.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "reflect/agent_team_worker.py",
+          "lines": "27-30",
+          "snippet": "        failed = 0\n    except Exception:\n        failed += 1\n        return None if failed < 10 else '/exit'"
+        },
+        {
+          "file": "reflect/checklist_master.py",
+          "lines": "36-40",
+          "snippet": "    check.times = getattr(check, \"times\", 0) + 1\n    if check.times > 1000: return '/exit'\n    if not _folder: return '/exit'\n    data = _load()\n    if not data or data.get(\"closed\"): return '/exit'"
+        }
+      ]
+    },
+    {
+      "name": "BBS worker claim confirmation and anti-echo rules",
+      "what_it_is": "The worker prompt requires replying to claim a task, then re-reading the latest posts and executing only if it was the earliest claimer. Pure ACK or confirmation posts and replies to them are forbidden.",
+      "function_in_system": "Governs coordination among several worker agents on the shared BBS. Avoids two workers doing the same task and agents replying to each other in an endless acknowledgment loop. Otherwise work is duplicated and each echo post wakes further agent runs.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "reflect/agent_team_worker.py",
+          "lines": "42",
+          "snippet": "3. 回复抢单，然后**看最新帖子确认是最早接单后**，执行任务，务必注意不要和别的worker重复"
+        },
+        {
+          "file": "reflect/agent_team_worker.py",
+          "lines": "47",
+          "snippet": "8. 除非明确需要，不允许无意义的回复，不回应纯ACK/确认帖，避免回声"
+        }
+      ]
+    },
+    {
+      "name": "Langfuse tracing of agent, LLM and tool spans",
+      "what_it_is": "A hook-based plugin that self-activates only when langfuse_config is set in mykey. It opens one trace per task (agent_before/agent_after), one generation span per LLM call with token usage including cache read/creation tokens teed from the SSE stream, and one span per tool call with arguments and the returned data/next_prompt/should_exit.",
+      "function_in_system": "Hooks into agent_runner_loop at task, LLM-call and tool-call boundaries. Makes loops, failing tool calls, cache effectiveness and per-run cost visible for later diagnosis. Otherwise failures and cost blow-ups of long autonomous runs stay invisible beyond the local console output.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "plugins/langfuse_tracing.py",
+          "lines": "1-18",
+          "snippet": "\"\"\"Langfuse tracing via hook system. Self-activates on import if langfuse_config exists in mykey.\n\nReplaces old monkey-patch approach with hooks on:\n  - agent_before / agent_after  -> agent trace\n  - llm_before / llm_after    -> generation span\n  - tool_before / tool_after  -> tool span\n\nUsage tracking (SSE parser wrapping) stays as internal llmcore patch.\n\"\"\"\nimport threading, sys\n\ntry:\n    from llmcore import _load_mykeys\n    _cfg = _load_mykeys().get('langfuse_config')\n    from langfuse import Langfuse\n    _lf = Langfuse(**_cfg) if _cfg else None\nexcept Exception:\n    _lf = None"
+        },
+        {
+          "file": "plugins/langfuse_tracing.py",
+          "lines": "26-33",
+          "snippet": "    @hooks.register('agent_before')\n    def _on_agent_before(ctx):\n        try:\n            _tls.trace_obs = _lf.start_observation(\n                name='agent.task', as_type='agent',\n                input={'user_input': ctx.get('user_input', '')})\n        except Exception:\n            _tls.trace_obs = None"
+        },
+        {
+          "file": "plugins/langfuse_tracing.py",
+          "lines": "49-57",
+          "snippet": "    @hooks.register('llm_before')\n    def _on_llm_before(ctx):\n        try:\n            _tls.gen = _lf.start_observation(\n                name='llm.chat', as_type='generation',\n                input=str(ctx.get('messages', ''))[:20000])\n            _tls._usage = None\n        except Exception:\n            _tls.gen = None"
+        },
+        {
+          "file": "plugins/langfuse_tracing.py",
+          "lines": "73-81",
+          "snippet": "    @hooks.register('tool_before')\n    def _on_tool_before(ctx):\n        try:\n            name = ctx.get('tool_name', '?')\n            args = {k: v for k, v in (ctx.get('args') or {}).items() if not k.startswith('_')}\n            if not hasattr(_tls, 'tstack'): _tls.tstack = []\n            _tls.tstack.append(_lf.start_observation(name=name, as_type='tool', input=args))\n        except Exception:\n            pass"
+        },
+        {
+          "file": "plugins/langfuse_tracing.py",
+          "lines": "108-112",
+          "snippet": "            if evt.get('type') == 'message_start':\n                us = evt.get('message', {}).get('usage', {}) or {}\n                u['input'] = us.get('input_tokens', u.get('input', 0))\n                if us.get('cache_creation_input_tokens'): u['cache_creation_input_tokens'] = us['cache_creation_input_tokens']\n                if us.get('cache_read_input_tokens'): u['cache_read_input_tokens'] = us['cache_read_input_tokens']"
+        },
+        {
+          "file": "plugins/langfuse_tracing.py",
+          "lines": "131-146",
+          "snippet": "    def _wrap_parser(orig):\n        def wrapped(resp_lines, *a, **kw):\n            buf = []\n            def tee():\n                for ln in resp_lines:\n                    buf.append(ln); yield ln\n            ret = yield from orig(tee(), *a, **kw)\n            try:\n                _tls._usage = _extract_usage(buf)\n            except Exception:\n                pass\n            return ret\n        return wrapped\n\n    llmcore._parse_claude_sse = _wrap_parser(llmcore._parse_claude_sse)\n    llmcore._parse_openai_sse = _wrap_parser(llmcore._parse_openai_sse)"
+        },
+        {
+          "file": "agent_loop.py",
+          "lines": "22, 24, 49, 58, 67, 106",
+          "snippet": "            _hook('tool_before', locals())\n            _hook('tool_after', locals())\n    _hook('agent_before', locals())\n        _hook('llm_before', locals())\n        _hook('llm_after', locals())\n    _hook('agent_after', locals())"
+        },
+        {
+          "file": "mykey_template.py",
+          "lines": "423-428",
+          "snippet": "# 可选：Langfuse 追踪。不设此项则不 import langfuse，零影响\n# langfuse_config = {\n#     'public_key': 'pk-lf-...',\n#     'secret_key': 'sk-lf-...',\n#     'host': 'https://cloud.langfuse.com',   # 或自托管地址\n# }"
+        }
+      ]
+    },
+    {
+      "name": "supervisor agent with expectation document and acceptance gate",
+      "what_it_is": "A supervisor agent launches a subagent and, while it explores, writes an expectation document (intent and anchors, action protocol, required completion evidence). It tails the subagent's output*.txt against a fixed deviation list (wrong target object, skipped SOP, unverified dangerous action, blind trial and error, missing evidence), intervenes with one-sentence corrections via _keyinfo/_intervene, and accepts the result only after checking every item of the document, sending it back for rework otherwise.",
+      "function_in_system": "Sits one level above a working subagent as an external monitor and critic, restricted to read-only probing. Catches drift, protocol violations and premature completion claims before the result reaches the user. Otherwise the user has to discover such errors and correct the agent over several rounds.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/supervisor_sop.md",
+          "lines": "8-16",
+          "snippet": "监察者不是工人。你是挑刺的监工，只负责看 subagent 是否按目标、约束和证据闭环完成任务；有 SOP 按 SOP 把关，无 SOP 按常理和经验把关。\n\n## 2. 红线\n\n- **禁止下场干活**：不替 subagent 操作浏览器、不写代码、不执行任务步骤。\n- **只读探测**：可用 `file_read`、`web_scan`、`web_execute_js`、只读 `code_run` 辅助判断对象、进度和证据；探测不是代做。\n- **沉默为主**：没发现会导致用户纠偏的问题，就不说话。\n- **一句话干预**：必须短、硬、具体，像用户直接纠偏，禁长篇教程。\n- **`_keyinfo` 只用于预注入**：在 subagent 到达关键步骤前提醒；已经犯错必须用 `_intervene`。"
+        },
+        {
+          "file": "memory/supervisor_sop.md",
+          "lines": "24-30",
+          "snippet": "**Step B — 写预期文档**（利用 subagent 启动+读环境的时间）\n\nsubagent 在跑前几轮环境探测时，你写一屏预期文档（产出文件），只写三项：\n\n1. **意图与锚点**：目标、必须先看的对象、明显不是目标的对象；只列显性或高代价的账号/身份/归属字段。\n2. **行动协议**：正确推进顺序；必须先找/读哪些 SOP 或工具说明，并把其中的禁止/必须/格式要求纳入约束；何时核对对象/路径/账号/窗口/字段；危险动作前验证什么；调研/测试类先跑通最小可复现闭环再扩大。\n3. **完成证据**：最后必须有什么证据才能交付：状态、截图、日志、diff、测试结果、报告路径、使用方法等。"
+        },
+        {
+          "file": "memory/supervisor_sop.md",
+          "lines": "32-43",
+          "snippet": "**Step C — tail 监控与干预**（预期文档写完后开始）\n\n轮询 `temp/{task_name}/output*.txt`。看到 `[ROUND END]` 后判断是否需要写 `reply.txt` 续聊或用干预文件纠偏。tail 中若发现新信息（真实文件结构、字段、约束、隐藏难点），回头补充/更新预期文档，尤其补全此前想不到的验收指标。tail 时盯这些偏离：\n\n- 没先落到用户锚点，凭记忆/猜测行动。\n- 没找应有 SOP/工具说明，或读了却没按其中禁止/必须/格式要求做。\n- 对象、路径、窗口、账号、环境、数据源偏了。\n- 顺序错，尤其危险/不可逆动作前没验证。\n- 粒度错：该先跑通却大设计，该最小改动却重构，该调研测试却泛泛写报告。\n- 要交付了，但证据、路径、格式、测试或说明不够。\n- 反复试错、泛泛搜索、卡住不读日志/不看 SOP/不收敛到下一步。\n"
+        },
+        {
+          "file": "memory/supervisor_sop.md",
+          "lines": "57-59",
+          "snippet": "## 4. 最终验收\n\n按预期文档逐条核对：锚点是否命中、行动协议是否遵守、危险前是否验证、最终产物/结果是否满足用户目标、质量是否够、证据是否足够且路径/格式明确。任一不满足就返工；全部满足才交付用户。"
+        }
+      ]
+    },
+    {
+      "name": "idle subagent auto-exit",
+      "what_it_is": "After each round a --task subagent waits at most 300 x 2 s (10 min) for reply.txt and then leaves its loop and exits. A pending _stop file is consumed before waiting so that an old stop signal cannot abort the next round. In the desktop conductor, a cleanup thread checks every 300 s and aborts, exits and removes pooled subagents that have been stopped and idle for more than 3600 s.",
+      "function_in_system": "Sits in the file-protocol loop of background subagents launched by a parent agent. Reclaims processes and their LLM clients when the parent forgets or abandons a subagent. Otherwise orphaned background agents accumulate and hold resources indefinitely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "agentmain.py",
+          "lines": "249-253",
+          "snippet": "            consume_file(d, '_stop')  # 已经成功停下来了，避免打断下次reply\n            for _ in range(300):  # 等reply.txt，10分钟超时\n                time.sleep(2)\n                if (raw := consume_file(d, 'reply.txt')): break\n            else: break"
+        },
+        {
+          "file": "memory/subagent.md",
+          "lines": "15",
+          "snippet": "- 通信：output.txt(`[ROUND END]`=轮完成) → 写reply.txt继续 → 不写10min退出。reply后输出为output1/2/3.txt"
+        },
+        {
+          "file": "frontends/conductor.py",
+          "lines": "204-216",
+          "snippet": "    def _auto_cleanup_loop(self):\n        IDLE_TIMEOUT = 3600\n        while True:\n            time.sleep(300) \n            now = time.time()\n            to_abort = []\n            with self.lock:\n                for sid, s in self.subagents.items():\n                    if s.status == \"stopped\" and (now - s.updated_at) > IDLE_TIMEOUT: to_abort.append((sid, s))\n            for sid, s in to_abort:\n                s.agent.abort()\n                s.agent.task_queue.put(\"EXIT\")  \n                with self.lock: self.subagents.pop(sid, None)  "
+        }
+      ]
+    },
+    {
+      "name": "independent adversarial verification subagent with fix loop",
+      "what_it_is": "Once all plan steps are [✓], the main agent starts a fresh subagent that receives only the task description, plan path, deliverables and required checks, explicitly without execution history. Following verify_sop, the verifier must try to prove the deliverable broken: run every check with tool evidence, apply per-artifact-type actions and at least one adversarial probe (boundary values, idempotency, missing dependencies), and end with a literal VERDICT: PASS/FAIL/PARTIAL line. A PASS without tool output counts as FAIL. On FAIL only the failed items are appended as [FIX] steps and re-verified, with at most 2 FAIL rounds before ask_user.",
+      "function_in_system": "Sits at the end of every plan-mode task as an external critic with a clean context; plan-mode verification gate (code) forces the agent to invoke it. Counters the executing agent's confirmation bias and catches shallow successes such as mock-only tests or half-empty implementations. Otherwise the executor would grade its own work and report broken deliverables as done.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "176-183",
+          "snippet": "## 四、验证态（subagent独立验证）\n\n> 全部步骤[✓]后进入。**强制**启动独立subagent做对抗性验证，避免上下文污染。\n\n### 触发条件\n\n- 所有执行步骤标记为 `[✓]`\n- **所有plan模式任务必须经subagent验证**（主agent有确认偏误，易被表面成功迷惑）"
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "195, 201-208",
+          "snippet": "**传什么**：任务描述、plan路径、交付物清单、必做检查。**不传**：执行过程、调试记录。\n- **角色**：你是独立验证者，工作是对抗性验证（证明交付物不能用）\n- **第一步强制**：file_read verify_sop.md 完整阅读验证SOP\n- **按 verify_sop.md 第3节**选择对应task_type的验证策略执行\n- **每个检查必须有工具调用证据**（实际执行，不是叙述）\n- **任务描述**：（填入原始任务描述）\n- **交付物清单**：（填入deliverables列表）\n- **输出**：在 result.md 中按 verify_sop.md 第6节格式输出，最后一行 `VERDICT: PASS / FAIL / PARTIAL`\n- **约束**：3轮内完成，每轮至少1个实际工具调用"
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "214-222",
+          "snippet": "轮询 output.txt 等待 `[ROUND END]`，然后读取 result.md：\n\n1. **找VERDICT行**：读取result.md最后几行，提取 `VERDICT: PASS/FAIL/PARTIAL`\n2. **检查有效性**：如果所有PASS项都没有工具调用输出（只有叙述），视为验证无效，按FAIL处理\n3. **按结果处理**：\n   - **PASS** → 进入任务完成收尾\n   - **FAIL** → 进入修复循环\n   - **PARTIAL** → 主agent判断可接受则完成，否则修复\n   - **无VERDICT行** → 从output.txt提取关键信息，主agent自行判断PASS/FAIL"
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "234-241",
+          "snippet": "### 修复循环（FAIL后）\n\nFAIL → 提取具体失败项 → 回执行态修复（不重新规划） → 修复完成 → 再次启动验证subagent → 最多2轮FAIL-重试，超过 ask_user 介入\n\n修复时：\n\n1. 将FAIL项作为新步骤追加到plan.md（标记为 `[FIX]`）\n2. 只修复失败项，不重做已PASS的部分"
+        },
+        {
+          "file": "memory/verify_sop.md",
+          "lines": "1-14",
+          "snippet": "## 你的两个失败模式\n\n1. **验证回避**：找理由不运行——读代码、描述\"会怎样\"、写PASS。读代码不是验证。\n2. **被前80%迷惑**：看到通过的测试就想PASS，没注意一半功能是空壳。你的价值在最后20%。\n\n调用方可能抽查重新执行你的命令——输出对不上，报告作废。\n\n---\n\n## 铁律（违反 → VERDICT 无效）\n\n1. **必须运行**。能跑的必须跑，能看的必须截图看。\n2. **必须有工具证据**。无工具输出的 PASS = SKIP。\n3. **独立验证**。实现者也是LLM——它的测试可能全是mock和happy path。测试套件是上下文，不是证据。"
+        },
+        {
+          "file": "memory/verify_sop.md",
+          "lines": "41-43",
+          "snippet": "## 对抗性探测（至少运行一个，否则你只确认了happy path）\n\n边界值(0/空/超长/unicode) · 幂等性(同一操作两次) · 缺失依赖 · 孤儿ID"
+        },
+        {
+          "file": "memory/verify_sop.md",
+          "lines": "62-65",
+          "snippet": "最终裁定（字面量，无变体）：\n- `VERDICT: PASS` — 关键检查通过\n- `VERDICT: FAIL` — 未解决问题（附失败项+复现步骤）\n- `VERDICT: PARTIAL` — 仅限环境限制无法验证（说明原因）"
+        }
+      ]
+    },
+    {
+      "name": "context-preserving delegation to subagents",
+      "what_it_is": "In plan mode the main agent must delegate environment exploration to a read-only subagent (at most 10 tool calls, structured findings file) and may write _stop early to save turns. Steps involving heavy work (reading more than 3 files or about 100 lines, web extraction, more than 3 repetitive operations, test/build output analysis) are marked [D] and, like such work discovered during execution, handed to a subagent that returns only a condensed summary.",
+      "function_in_system": "Governs how the main plan-mode agent spends its own context window, which the SOP calls the scarcest resource. Keeps long tool outputs out of the planner's history. Otherwise exploration and bulk reading fill the main context and crowd out planning and execution.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "14-22",
+          "snippet": "- **主agent禁止直接执行环境探测**（必须委托subagent，无例外）\n- 主agent只做：创建目录、匹配SOP、启动subagent、读取结论\n- subagent只读探测，禁止修改任何文件、执行有副作用的操作\n- **探索subagent启动失败时：排查原因→重试，最多2次。禁止主agent回退为自己探测**\n\n**目标**：在写任何计划之前，搞清3件事：\n① 环境现状（有什么、缺什么） ② 可用SOP ③ 关键不确定点\n\n**为什么必须用subagent**：主agent上下文是最稀缺资源，探测长输出会挤占规划执行空间。"
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "41",
+          "snippet": "- **约束**：只读探测，禁止修改文件，≤10次工具调用"
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "52",
+          "snippet": "   - 已获取足够信息 → 写 `_stop` 提前终止，节省轮次"
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "65-71",
+          "snippet": "**[D] 委托标注规则**：写每个步骤时，结合探索发现评估操作量，符合以下任一条件则标 `[D]`：\n\n- 需要读取大量代码/文件（预估 >3个文件或 >100行）\n- 需要浏览网页并提取信息\n- 需要执行 3 次以上重复性操作\n- 需要运行测试/构建并分析输出\n"
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "164-172",
+          "snippet": "### 💡 动态委托原则\n\n即使步骤未标 `[D]`，执行中发现以下情况时，主动委托 subagent 处理：\n\n- 需要读取大量代码/文件才能理解上下文（>3个文件或预估 >100行）\n- 需要反复试错调试\n- 需要浏览网页提取信息\n\n做法：起 subagent 完成具体操作，要求返回精简摘要，主 agent 基于摘要继续决策。保持主 agent 上下文干净是第一优先级。"
+        }
+      ]
+    },
+    {
+      "name": "plan review gate with user approval",
+      "what_it_is": "After writing plan.md the agent runs a self-check list (findings reflected, SOP assignment plausible, dependencies complete, high-risk steps clarified, concrete step granularity, [D] marks set, [VERIFY] step present) and must then get the plan confirmed by the user via ask_user before execution starts.",
+      "function_in_system": "Sits between planning and execution in plan mode. Catches flawed or incomplete plans before they cost turns or cause side effects. Otherwise a wrong plan is executed step by step and errors surface only at verification or after irreversible actions.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "59",
+          "snippet": "## 二、规划态（含审查门）"
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "117-129",
+          "snippet": "### 步骤5：自检清单（主agent逐项检查）\n\n- □ 探索发现是否都反映在plan中？（没遗漏关键约束）\n- □ 每步的SOP标注是否合理？（SOP真的能解决该步？）\n- □ 步骤间依赖是否正确？（有没有隐含依赖没写出来）\n- □ 高风险步骤（SOP:无/不可逆）有没有清晰的执行思路？\n- □ 步骤粒度是否合适？（禁止\"处理所有文件\"，必须展开具体条目）\n- □ **复杂/繁琐步骤是否标注了[D]？**（读大量代码/网页/重复操作必须委托subagent）\n- □ **是否包含\"验证检查点\"section，且有[VERIFY]步骤？（必须有，这是强制步骤）**\n\n### 步骤6：用户确认\n\nask_user 确认plan后才能转入执行态。**⛔ 用户未确认不得执行。**"
+        }
+      ]
+    },
+    {
+      "name": "file-based plan checkpoint with per-step re-read and termination scan",
+      "what_it_is": "plan.md carries an execution protocol: before each step the agent re-reads plan.md to find the first open [ ] item (executing from memory is forbidden), performs a mini verification of the step output, marks the item [✓ result] via file_patch, and after the last step scans the whole file to confirm zero open [ ] items before declaring completion.",
+      "function_in_system": "Keeps plan progress in a file outside the trimmed conversation history during plan-mode execution. Prevents skipped steps, repeated steps and early termination in long plans. Otherwise the agent relies on a truncated context and loses its place or stops with open items.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "76-85",
+          "snippet": "```markdown\n<!-- EXECUTION PROTOCOL (每轮必读，这是你的执行指南)\n1. file_read(plan.md)，找到第一个 [ ] 项\n2. 该步标注了SOP → file_read 该SOP的🔑速查段\n3. 执行该步骤 + Mini验证产出\n4. file_patch 标记 [ ] → [✓]+简要结果，然后回到步骤1继续下一个[ ]\n5. 所有步骤（包括验证步骤）标记完成后 → 终止检查：file_read(plan.md)确认0个[ ]残留\n⚠ 禁止凭记忆执行 | 禁止跳过验证步骤 | 禁止未经终止检查就结束 | 禁止停下来输出纯文字汇报\n💡 搬砖活（读大量代码/文件/网页/重复操作）优先委托subagent，保持主agent上下文干净\n-->"
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "141-162",
+          "snippet": "### 每轮流程\n\n1. **读plan** — `file_read(plan.md)` 定位第一个 `[ ]` 项\n2. **读SOP** — 该步标注了SOP → 先 file_read 该SOP\n3. **检查标记** — `[D]`标记 → 必须委托subagent执行，主agent只收结果摘要；`[P]`标记 → 读 subagent.md 执行Map模式；`[?]`条件 → 评估条件选分支，未选标[SKIP]\n4. **执行** — 无特殊标记的步骤由主agent自己执行\n5. **Mini验证** — 快速确认产出存在且合理（file_read确认非空、检查exit code等）\n6. **标记完成** — `file_patch` 标记 `[ ]` → `[✓ 简要结果]`（进度写入plan.md）\n7. **继续** — 立即回到步骤1，file_read(plan.md) 执行下一个 `[ ]`\n\n### 终止检查（最后一步标记后，不可跳过）\n\nfile_read(plan.md) 全文扫描，确认所有步骤（含[VERIFY]）均为 `[✓]`/`[✗]`，0个 `[ ]` 残留。\n输出：`🏁 终止检查：[总步数]步全部完成，0个[ ]残留 → 任务结束`\n若发现遗漏 → 继续执行，禁止声称完成。\n\n### ⚠ 执行态禁令\n\n- **禁止凭记忆执行**：每次做新步骤前必须 `file_read(plan.md)`，不可\"我记得下一步是...\"\n- **禁止跳过验证步骤**：[VERIFY]步骤是强制的，不可以\"任务都做完了\"为由跳过\n- **禁止未经终止检查就结束**：最后一步标记后必须 file_read 全文扫描确认0个[ ]残留，输出🏁终止确认行\n- **禁止停下来输出纯文字汇报**：做完一步后必须立即 file_read(plan.md) 继续，不要输出进度总结"
+        }
+      ]
+    },
+    {
+      "name": "step failure triage policy",
+      "what_it_is": "Plan-mode failures are handled by type: network timeouts are retried 3 times (2s/4s/8s), configuration errors go to the user, other failures are marked [✗] and skipped; a failed subagent is diagnosed via stderr.log and restarted at most twice (also for the exploration subagent); dependent steps are marked [SKIP]; a wrong plan sends the agent back to planning and the review gate.",
+      "function_in_system": "Sits in the plan-mode execution loop whenever a step or subagent fails. Bounds retries and stops errors from cascading into dependent steps. Otherwise the agent loops on a failing step or builds later steps on missing results.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "17",
+          "snippet": "- **探索subagent启动失败时：排查原因→重试，最多2次。禁止主agent回退为自己探测**"
+        },
+        {
+          "file": "memory/plan_sop.md",
+          "lines": "250-256",
+          "snippet": "## 五、失败处理\n\n1. **记录**：checkpoint中 `step_X: [FAILED] 原因 (retry: N/3)`\n2. **重试**：网络超时→自动重试3次(2s/4s/8s) | 配置错误→询问用户 | 其他→标[✗]跳过\n3. **subagent失败**：查stderr.log→明确错误主agent修正重启 | 未知错误重试1次 | 最多重启2次\n4. **依赖传播**：步骤失败后，后续依赖项标[SKIP]\n5. **plan有误**：回退到规划态修正plan.md，重新过审查门"
+        }
+      ]
+    },
+    {
+      "name": "best-accepted-version anchor with gain-only merge",
+      "what_it_is": "The Goal Hive master keeps a 'current best accepted version' as anchor. Each round changes it only incrementally; a change is merged when acceptance shows the value J increased and rolled back when it got worse. When the budget ends, the current anchor is delivered. From round 2 on, exploration only covers what changed or remained unclear.",
+      "function_in_system": "Governs how the master merges worker output across many rounds of the multi-worker goal loop. Guards against regressions and keeps a deliverable version available at any time. Otherwise parallel workers can degrade the product and a budget stop hands over a broken intermediate state.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/goal_hive_master_duty.md",
+          "lines": "3",
+          "snippet": "Master 是 Hive 的总体设计部：不亲自生产子任务产物，只负责**拆解子任务、判断、汇总**，靠调度 worker 把核心交付物在给定时间内稳定推向用户满意。Master 无权停止自己，不得设计自停条件。"
+        },
+        {
+          "file": "memory/goal_hive_master_duty.md",
+          "lines": "12-13",
+          "snippet": "2. 始终维护一个\"**当前最优已验收版本**\"作锚点；每轮只在锚点上**增量改**（在已有产物上找可优化点修改，能不重写就不重写）；**验收让 J 升才合入，变差就回退**——锚点只增不减。\n3. **循环到预算用尽才停**，交当前锚点版（不是\"做完\"才停）。任何时刻必须清楚自己在 `x.几`。"
+        },
+        {
+          "file": "memory/goal_hive_master_duty.md",
+          "lines": "22",
+          "snippet": "- 第 2 轮起只查\"上轮变了/没查清\"的，不重查。环境一变就重探变化的部分。"
+        }
+      ]
+    },
+    {
+      "name": "multi-perspective independent check workers with reproducible evidence",
+      "what_it_is": "In the check phase of each round the master dispatches independent critique and test subtasks to different workers (user perspective, attacker, edge cases, third-party re-check, questioning the objective itself). Each must deliver reproducible physical evidence matching the deliverable type (e.g. an end-to-end command plus raw output for code); a completion claim does not count as acceptance. The aggregated P0/P1 list becomes the changelog of the next round.",
+      "function_in_system": "Acts as a set of external, decorrelated critics in the Goal Hive loop. Surfaces different classes of defects that a single reviewer misses and feeds them directly into the next repair round. Otherwise workers' own success claims pass unchecked into the anchor version.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/goal_hive_master_duty.md",
+          "lines": "32-36",
+          "snippet": "### x.4 检查（阶段目标＝挑出尽量多问题）\n- **拆**：从**多角度派独立**的挑刺/测试子任务给**不同** worker——① 用户视角试用 ② 攻击者/反面假设 ③ 边界与 corner case（测例尽量多、全、广）④ 第三方独立复核 ⑤ **回到需求质疑目标本身**：对照 J\\* 看 Ĵ 是否做多/做偏/过度设计（如造了需求不要的能力）——校准 Ĵ，不只校准产物 y。独立才挑得出不同问题。\n- **验收线**：每个挑刺/测试子任务必须交**可复现的物理证据**，且**证据形态匹配交付形态**——代码→端到端跑通的命令+原始输出（不止单元桩测）；文稿→**全文通读**+按需渲染/视觉核对版式；数据→实跑校验。\"声明已完成\"不算验收。\n- **汇**：汇总所有问题 → 按对 J* 的伤害**排成 P0/P1** → 写 `检查报告Tx.md`。\n- **这份 P0/P1 报告就是下一轮 x.2 的 changelog**——偏差 `e = J*−y` 被具体化、带进下一轮增量修。"
+        },
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "147-149",
+          "snippet": "- Each hunter must state its lens and avoid repeating recorded attempts.\n- Each attempt must specify exact success evidence.\n- Verifiers should default to \"not proven\" unless they can reproduce or directly inspect the evidence."
+        },
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "157-169",
+          "snippet": "Control shape:\n\n1. Freeze the current target object in a concrete shared note or file reference.\n2. Launch independent critics with distinct sharp lenses: correctness, missing cases, simplicity, performance, security, user value, maintainability, originality, verification.\n3. Reduce critiques into a prioritized issue list with evidence.\n4. Launch a second script to sweep fixes or design specific remedies.\n5. Verify that each accepted improvement actually improves the target and does not break constraints.\n\nPrompt requirements:\n\n- Critics should be adversarial and specific, not balanced reviewers.\n- A critique is useful only if it names the exact target fragment, failure mode, and improvement direction.\n- The reducer must reject duplicate, vague, or unsupported criticism."
+        }
+      ]
+    },
+    {
+      "name": "instability emergency brake",
+      "what_it_is": "The master watches for instability signals (workers busy while J does not rise, many partial products but an unusable whole, process evidence replacing user value, conflicting edits on one product, master lost in details, side output polluting the core deliverable). On any signal it stops dispatching, re-reads the user requirement, checks interface freezing, cuts the weakest in-flight task, and treats a dimension with two rounds of no gain as saturated and switches to the dimension farthest from the target.",
+      "function_in_system": "Sits in the Goal Hive master's per-round control loop. Detects idle spinning and drift of the multi-agent team and steers it back. Otherwise the team keeps consuming budget on activity that no longer improves the deliverable.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/goal_hive_master_duty.md",
+          "lines": "38-42",
+          "snippet": "## 1. 失稳急刹（出现任一信号，立即按序处置）\n\n信号：worker 忙但 J 不升 / 局部产物多但整体不可用 / 过程证明取代用户价值 / 多人改同一产物冲突 / Master 被细节牵走丢全局 / 额外产出污染核心交付。\n\n处置：① 停止新派发 → ② 回读用户需求与 J* 重新对齐\"现在最重要的一件事\" → ③ 查接口是否未冻结 → ④ 砍掉与主目标最弱的在途任务 → ⑤ 某维度连续两轮 J 不升即判饱和，换离达标最远的维度 → 恢复闭环再派。"
+        }
+      ]
+    },
+    {
+      "name": "hive launch config read-back check",
+      "what_it_is": "Before launching the hive master, the launching agent must re-read goal_state.json and confirm that the objective contains all required parts and that done_prompt matches the fixed text verbatim (shut down all spawned workers, announce the end on the BBS); otherwise the master must not be started.",
+      "function_in_system": "Sits at the launch of the long-running Goal Hive. Ensures the budget wrap-up turn actually tears down the worker processes and silences the board. Otherwise workers keep running and replying after the master has ended.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/goal_hive_sop.md",
+          "lines": "44-47",
+          "snippet": "`done_prompt` 必须设置为以下固定文本（一字不改）：\n`关闭所有你拉起的worker，并在BBS发一条帖子宣告你管理的任务结束，worker除了明确追加任务外，不应再回应。`\n\n启动 master 前必须回读 `goal_state.json`，逐项确认 objective 完整、done_prompt 原文匹配，否则不得启动。"
+        }
+      ]
+    },
+    {
+      "name": "tiered memory with size-capped pointer index",
+      "what_it_is": "Long-term memory is split into L1 (global_mem_insight.txt, hard cap of 30 lines, target under 1k tokens, only scenario trigger words pointing to deeper layers plus compressed RULES), L2 (global facts) and L3 (task SOPs and scripts). L1 is injected into the system prompt and re-appended every 10 turns; L2/L3 are read on demand via file tools. The cleanup SOP prunes L1 by ROI = (error probability without the words x cost) / per-turn token cost, removing translations, content descriptions and intuitive entries. Project mode applies the same split per project: each turn injects only a pointer with line/byte counts, and the model reads project_memory.md when needed.",
+      "function_in_system": "Governs what persistent knowledge enters every prompt. Keeps the standing per-turn context cost small while all stored knowledge stays discoverable through trigger words. Otherwise memory either grows into every prompt and inflates cost per turn, or learned knowledge stays unused because the agent does not know it exists.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/memory_management_sop.md",
+          "lines": "13-14",
+          "snippet": "4.  **最小充分指针 (Minimum Sufficient Pointer)**\n    *   上层只留能定位下层的最短标识，多一词即冗余。"
+        },
+        {
+          "file": "memory/memory_management_sop.md",
+          "lines": "16-24",
+          "snippet": "## 记忆层级架构\n```\nL1: global_mem_insight.txt (极简索引层 - 严格控制 ≤30 行)  \n    ↓ 导航指向 (Pointer)  \nL2: global_mem.txt (事实库层 - 现短但会膨胀)  \n    ↓ 详细引用 (Reference)  \nL3: ../memory/ (记录库层 - 包含 .md/.py 等各类文件)  \nL4: ../memory/L4_raw_sessions/ (历史会话层 - scheduler反射自动收集，可定位过往上下文)  \n```"
+        },
+        {
+          "file": "memory/memory_management_sop.md",
+          "lines": "27-34",
+          "snippet": "### L1：全局内存索引 (global_mem_insight.txt)\n**职责**：为 L2 和 L3 提供极简导航索引，确保关键能力可被发现。\n**特征**：\n- 体积限制：≤ 30 行（硬约束），< 1k tokens（期望）。严禁填写细节（除非极高频任务）\n- 内容：两层「场景关键词→记忆定位」映射 + RULES（红线规则 + 高频犯错点）\n  - 第一层：高频场景 key→value（直接给出 sop/py/L2 section 名），自包含名称只写一词不重复翻译\n  - 第二层：低频场景仅列关键词，需要时 read L2 或 ls L3 自行定位\n  - 核心：场景触发词极重要（不索引则不知有此能力），但严禁写How-to细节"
+        },
+        {
+          "file": "memory/memory_cleanup_sop.md",
+          "lines": "3-12",
+          "snippet": "## 核心原则：存在性编码\nLLM自身是压缩器+解码器。L1只需让它**意识到某类知识存在**，它就能通过tool call自行取用深层内容。\n\n**L1本质：用最短词数表达——什么场景下有什么记忆可用（存在性）。**\n\nL1两类内容，统一ROI评估：\n- **存在性指针**：指向L2/L3知识的最短触发词\n- **行为规则**：不提醒就会犯的错（致命/高频均可，只要ROI过门槛）\n\nROI = (不放这几个词的犯错概率 × 代价) / 每轮词数成本"
+        },
+        {
+          "file": "agentmain.py",
+          "lines": "42",
+          "snippet": "    prompt += get_global_memory()"
+        },
+        {
+          "file": "ga.py",
+          "lines": "587-592",
+          "snippet": "        with open(os.path.join(script_dir, 'memory/global_mem_insight.txt'), 'r', encoding='utf-8', errors='replace') as f: insight = f.read()\n        with open(os.path.join(script_dir, f'assets/insight_fixed_structure{suffix}.txt'), 'r', encoding='utf-8') as f: structure = f.read()\n        prompt += f'cwd = {os.path.join(script_dir, \"temp\")} (./)\\n'\n        prompt += f\"\\n[Memory] (../memory)\\n\"\n        prompt += structure + '\\n../memory/global_mem_insight.txt:\\n'\n        prompt += insight + \"\\n\""
+        },
+        {
+          "file": "plugins/project_mode.py",
+          "lines": "3-6",
+          "snippet": "机制：注册 agent_before hook（agent_loop.py 中每个用户轮触发一次）。\n当项目模式激活时，把 L1 层（规则 + 记忆文件指针 + 收尾纪律）追加到最后一条 user message（str 直接拼接，多模态 list 追加 text block）。\n两层设计：L1 每轮全量注入（轻量、稳定）；L2 = project_memory.md 全文不注入，\n由模型按 L1 中的指针与线索（行数/大小）自行判断是否用 file 工具读取。"
+        },
+        {
+          "file": "plugins/project_mode.py",
+          "lines": "80-96",
+          "snippet": "def _build_injection(name):\n    \"\"\"构造追加到 user message 末尾的内容（两层设计的 L1 层）。\n\n    L1（每轮全量注入）：规范/规则/操作说明 + 记忆文件指针（含行数/大小线索）。\n    L2（按需）：project_memory.md 全文不注入，由模型自行判断是否用 file 工具去读。\n    \"\"\"\n    pdir = _project_dir(name)\n    mem_path = _mem_path(name)\n    exists, lines, nbytes = _memory_stat(name)\n    if exists and nbytes > 0:\n        mem_hint = (\n            f\"项目全量记忆在 {mem_path}（{lines} 行 / {nbytes} 字节）。\"\n            f\"本轮任务若涉及项目上下文（接续工作、查约定、避坑），先读它再动手；\"\n            f\"若与项目认知无关（闲聊、独立小事），可不读。自行判断。\"\n        )\n    else:\n        mem_hint = f\"项目记忆 {mem_path} 暂为空（本项目尚无沉淀），无需读取。\""
+        },
+        {
+          "file": "memory/project_mode_sop.md",
+          "lines": "6",
+          "snippet": "载体：`project_memory.md` + 项目私域目录。两层注入：每轮自动注入的只有 L1（规则+记忆文件指针），L2（`project_memory.md` 全文）不注入——任务涉及项目上下文时自己用 file 工具去读，无关则不读"
+        }
+      ]
+    },
+    {
+      "name": "memory mutation safety rules",
+      "what_it_is": "Memory files may only be changed with small file_patch edits; overwrite and code_run on them are forbidden, and an edit that does not apply cleanly is abandoned. Action-verified data must never be dropped during refactoring or cleanup, only compressed or moved between layers. Volatile state (timestamps, session IDs, PIDs, device info) must not be stored. Cleanup audits ghost entries whose L3 target file no longer exists. The SOP justifies this with memory errors being persistent damage that compounds every turn.",
+      "function_in_system": "Applies whenever the agent writes to its persistent memory, which feeds every future prompt. Protects the memory store from corruption, loss of verified knowledge and stale pointers. Otherwise one bad write misleads all subsequent runs.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/memory_management_sop.md",
+          "lines": "6-12",
+          "snippet": "2.  **神圣不可删改性 (Sanctity of Verified Data)**\n    *   **定义**：凡是经过行动验证的有效配置、避坑指南、关键路径，在重构（Refactoring/GC）时**严禁丢弃**。\n    *   **操作**：可以压缩文字、可以迁移层级（从 L2 移到 L3），但绝不能丢失信息的准确性和可追溯性。\n    *   记忆修改时请极度小心，尽量不要overwrite或code run。只能少量patch，改不动宁愿不改。\n3.  **禁止存储易变状态 (No Volatile State)**\n    *   **定义**：严禁存储随时间/会话高频变化的数据。\n    *   **示例**：当前时间戳、临时 Session ID、正在运行的 PID、某个具体绝对路径、连接的设备信息"
+        },
+        {
+          "file": "memory/memory_management_sop.md",
+          "lines": "39",
+          "snippet": "- 更新：L2/L3 有新增/删除时，判断频率归入对应层。修改时请极度小心，不允许overwrite或code run。只能少量patch，改不动宁愿不改。"
+        },
+        {
+          "file": "memory/memory_cleanup_sop.md",
+          "lines": "36",
+          "snippet": "4. 审计幽灵条目：L1指向的L3文件是否真实存在？不存在则按ROI决定删除或补建文件"
+        },
+        {
+          "file": "memory/memory_cleanup_sop.md",
+          "lines": "40-41",
+          "snippet": "**红线**：记忆修改是持久性伤害，错误每轮复利。L1只能patch词级别修改，禁overwrite\n产生误导应及时修正L1或记忆更名"
+        }
+      ]
+    },
+    {
+      "name": "unattended-mode permission tiers with deferred approval",
+      "what_it_is": "In autonomous mode (user away) the SOP defines three tiers: read-only probing and writes or script experiments inside cwd need no approval; modifying global memory or SOPs, installing software, external API calls and deleting non-temporary files may only be proposed in the report for later review; reading secrets, modifying the core codebase and irreversible dangerous operations are forbidden. Questions needing a decision are written into the report so the agent keeps going, and the returning user approves, modifies or rejects the proposals.",
+      "function_in_system": "Governs every action the agent takes during unattended autonomous runs triggered by reflect/autonomous.py. Limits the damage an unsupervised agent can do and prevents it from blocking on decisions. Otherwise an unattended agent either stalls waiting for input or performs risky changes nobody approved.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/autonomous_operation_sop.md",
+          "lines": "6",
+          "snippet": "授权你进行自主行动，只要不对环境造成副作用都可进行。"
+        },
+        {
+          "file": "memory/autonomous_operation_sop.md",
+          "lines": "30",
+          "snippet": "- 用户不在线，遇到需要决策的问题写入报告待审，不要卡住"
+        },
+        {
+          "file": "memory/autonomous_operation_sop.md",
+          "lines": "39-45",
+          "snippet": "## 权限边界\n- 无需批准：只读探测、cwd内写操作/脚本实验\n- 需写入报告待审：修改 global_mem / memory下SOP、安装软件、外部API调用、删除非临时文件\n- 绝对禁止：读取密钥、修改核心代码库、不可逆危险操作\n\n## 等待用户审查\n- 用户归来后审查报告，决定批准、修改或拒绝方案"
+        }
+      ]
+    },
+    {
+      "name": "independent subagent review of self-generated TODOs",
+      "what_it_is": "When no TODO exists, the autonomous agent only plans: it writes 5-7 TODOs with acceptance criteria, then must summon a subagent that receives only the TODO list and scores each item 1-10 from the memory and SOP. Self-review is forbidden, a failed summon is retried, unreviewed TODOs must not be executed, and low-scored items are removed or replaced.",
+      "function_in_system": "Sits between planning and execution in the autonomous work cycle as an external critic on self-chosen goals. Filters out low-value or poorly specified tasks before they consume unattended runs. Otherwise the agent fills its unsupervised time with shallow, repetitive work that it rates highly itself.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/autonomous_operation_sop/task_planning.md",
+          "lines": "9",
+          "snippet": "  0. update_working_checkpoint: `规划模式：产出TODO后必须经过subagent评审，不允许自评审，禁止执行任何TODO，等待下次自主行动进入执行模式`"
+        },
+        {
+          "file": "memory/autonomous_operation_sop/task_planning.md",
+          "lines": "18-21",
+          "snippet": "  6. **必须召唤subagent评审TODO**（保证可信三方）：input仅给TODO列表+\"读记忆库和本sop自行判断，逐条评分1-10并简述理由\"（不喂额外先验信息）\n  7. **召唤失败无限重试**：TODO必须经过subagent评审，不允许自评审，未经评审的TODO不可执行\n  8. 读subagent评分，低分项删除或替换\n  9. 立刻**结束**，下次行动再执行"
+        }
+      ]
+    },
+    {
+      "name": "bounded, non-repeating autonomous work units",
+      "what_it_is": "Each autonomous wake-up either only plans or executes exactly one TODO item within at most 30 turns, leaving the rest for later wake-ups. Before choosing, the agent reads the last 40 history lines, must not pick the same subtask twice in a row, and reads the history critically to identify and avoid past low-value and failure patterns; failed experiments are still reported.",
+      "function_in_system": "Scopes each unattended run triggered by the autonomous reflect watcher. Keeps runs short and cheap and prevents repeating the same work across wake-ups. Otherwise autonomous runs sprawl up to the 180-turn cap and rediscover or redo earlier tasks.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/autonomous_operation_sop.md",
+          "lines": "14",
+          "snippet": "print(get_history(40))  # 了解历史避免重复"
+        },
+        {
+          "file": "memory/autonomous_operation_sop.md",
+          "lines": "19-21",
+          "snippet": "- 有未完成条目 → 取**一条**，直接进入执行，其他条目下次执行\n- 无 TODO → 读 `autonomous_operation_sop/task_planning.md` 规划，下次执行\n- 不连续两次选相同子任务"
+        },
+        {
+          "file": "memory/autonomous_operation_sop.md",
+          "lines": "27-29",
+          "snippet": "- ≤30回合，小步快跑，边探测边实验\n- 用临时脚本验证假设；禁只读即下结论，完整验证再写报告\n- 即使失败也记录实验过程和结果，失败报告同样有价值"
+        },
+        {
+          "file": "memory/autonomous_operation_sop/task_planning.md",
+          "lines": "10-13",
+          "snippet": "  1. ⚠️ **批判性读history.txt**：99%历史任务是**低价值的**，读取目的是**识别失败模式并避免**，而非寻找模仿对象\n     - 识别低价值模式：浅层验证、无假设巡检、重复探索、泛采集、知名工具基础用法\n     - 提炼高价值线索：未跟进的发现、待实测工具、可改进产出\n     - 避免和历史重复和低价值边际效应"
+        }
+      ]
+    },
+    {
+      "name": "checklist state file with close-only-when-complete gate",
+      "what_it_is": "The checklist task list is persisted in state.json (id, text, result, timestamp). close() asserts that every task has a result before setting closed. The checklist_master watcher keeps waking the master while the state is open; when no task is open it wakes the master with probability 0.2 to plan the next batch. The master records acceptance per task with mark(id, summary) after a semantic pass/fail check and may resend, rephrase or finish a failed task itself.",
+      "function_in_system": "Sits between the Checklist/MapReduce master agent and its reflect watcher and holds the run state across wake-ups and restarts. Prevents the master from ending the run while subtasks are still open and keeps progress on disk. Otherwise a master could declare the goal done with open items or lose track of finished work between wake-ups.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "memory/checklist_helper.py",
+          "lines": "19-22",
+          "snippet": "        if self.path.exists(): self._d = json.loads(self.path.read_text(\"utf-8\"))\n        else:\n            self._d = {\"closed\": False, \"goal\": goal, \"bbs\": None, \"tasks\": []}\n            self._save()"
+        },
+        {
+          "file": "memory/checklist_helper.py",
+          "lines": "62-65",
+          "snippet": "    def mark(self, tid, result):\n        for t in self.tasks:\n            if t[\"id\"] == tid: t[\"result\"] = result; t[\"ts\"] = int(time.time()); break\n        self._save()"
+        },
+        {
+          "file": "memory/checklist_helper.py",
+          "lines": "76-78",
+          "snippet": "    def close(self):\n        assert not self.has_open, \"has open tasks\"\n        self._d[\"closed\"] = True; self._save()"
+        },
+        {
+          "file": "reflect/checklist_master.py",
+          "lines": "46-48",
+          "snippet": "    has_open = any(t[\"result\"] is None for t in tasks)\n    if new_posts and has_open: return _prompt(data, new_posts)\n    if not has_open and (not tasks or random.random() < 0.2): return _prompt(data, new_posts)"
+        },
+        {
+          "file": "memory/checklist_sop.md",
+          "lines": "67",
+          "snippet": "master会被持续唤醒直到其显式成功调用close()。"
+        },
+        {
+          "file": "memory/checklist_sop.md",
+          "lines": "88-93",
+          "snippet": "## 验收\n\nMaster 收到 worker 回帖或自己完成子任务后：\n- 检查结果，语义判断 pass/fail → `cl.mark(id, \"结果摘要\")`\n- 交付物含过程废话 → 要求重写交付物\n- 失败 → 可重发、换 prompt、或自己补"
+        }
+      ]
+    },
+    {
+      "name": "checklist master bounded dispatch and no self-execution rule",
+      "what_it_is": "In MapReduce mode the master posts at most 3 self-contained task prompts to the BBS at a time and is forbidden to execute tasks it has already dispatched; the wake-up prompt restates that the master only dispatches, polls and accepts.",
+      "function_in_system": "Governs the master side of the BBS coordination between one master and several workers. Keeps the open task pool small and each task executed by exactly one agent. Otherwise the master and a worker run the same task twice and a flood of posted tasks overloads the workers.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/checklist_sop.md",
+          "lines": "71-75",
+          "snippet": "worker无法看到add的任务，只能看到BBS！\n每条任务 prompt 须**自包含**——worker 没有 master 的上下文。\n每次最多只派发3个任务，不要一次性把所有任务贴到bbs上。\nworker足够聪明，只允许写目标和需要的信息，不要干预\n**master不允许执行已经派发出去的任务，会导致重复执行！** 没事就sleep！"
+        },
+        {
+          "file": "reflect/checklist_master.py",
+          "lines": "65",
+          "snippet": "    if bbs: lines.append(\"【禁止】你只负责派发+轮询+验收，绝不自己执行任务。\")"
+        }
+      ]
+    },
+    {
+      "name": "per-worker browser tab isolation",
+      "what_it_is": "When subtasks need web tools, the master's task prompt reminds parallel workers to open a new browser tab and use only their own tab.",
+      "function_in_system": "Applies to parallel workers sharing one browser session in Checklist MapReduce mode. Keeps concurrent web actions separated per worker. Otherwise workers navigate each other's tab and corrupt each other's page state and results.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/checklist_sop.md",
+          "lines": "97",
+          "snippet": "- 若子任务需要 web 工具，提醒并行 worker 新建 tab 并使用自己的 tab"
+        }
+      ]
+    },
+    {
+      "name": "UltraPlan subagent fan-out with per-task timeout and concurrency cap",
+      "what_it_is": "Each UltraPlan task runs agentmain.py as a subprocess with timeout=3600 s (overridable per task); a nonzero exit raises RuntimeError and marks the task and enclosing phase as failed. parallel() uses max_workers=min(3, number of tasks) by default. The SOP adds that a failed worker's output is inspected and the task retried only with reduced scope or timeout and new information.",
+      "function_in_system": "Wraps every subagent launched by an UltraPlan script. Bounds the wall-clock time of each worker and the number of concurrently running agents, and surfaces failures to the controller script. Otherwise a hung worker blocks the barrier indefinitely and an unbounded fan-out multiplies LLM cost and load.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "assets/ga_ultraplan.py",
+          "lines": "102-104",
+          "snippet": "    cmd = [sys.executable, os.path.join(root, \"agentmain.py\"), \"--func\", f.name, \"--llm_no\", str(llm_no), \"--nobg\", \"--nolog\"]\n    r = subprocess.run(cmd, cwd=root, text=True, capture_output=True, timeout=timeout)\n    if r.returncode: raise RuntimeError(f\"subagent failed: {desc}\\n{r.stdout}\\n{r.stderr}\")"
+        },
+        {
+          "file": "assets/ga_ultraplan.py",
+          "lines": "123-129",
+          "snippet": "def parallel(tasks, max_workers=None, _label=None, **data):\n    global _current\n    tasks = list(tasks); label = _label or f\"parallel: {len(tasks)} tasks\"\n    with _lock: _current = label\n    _op(label); _note(label)\n    with ThreadPoolExecutor(max_workers=max_workers or min(3, len(tasks) or 1)) as ex:\n        return list(ex.map(lambda t: _run(t, data), tasks))"
+        },
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "401",
+          "snippet": "- If a worker fails, inspect its `.out.txt` or error, update state, reduce scope or timeout, and retry with new information. Do not repeat blindly."
+        }
+      ]
+    },
+    {
+      "name": "controller re-read and explicit coverage accounting for fan-out runs",
+      "what_it_is": "UltraPlan treats script completion as evidence gathering only. The main agent must physically read the final and key intermediate outputs, reduce them into shared state and then decide the next step. Coverage bounds (sampling, top-N, timeout, skipped scope, failed tool) are recorded in the shared notes and the final answer; Sweep runs add a gap-checker against the item list and a follow-up sweep over missing items.",
+      "function_in_system": "Sits in the controller cycle between UltraPlan scripts and before the user-facing answer. Catches premature completion claims and silently omitted items in multi-worker runs. Otherwise the agent reports a task as complete because all phases finished, while parts were never covered or verified.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "17, 22",
+          "snippet": "1. **Script completion is not task completion.** All phases being done only means the currently planned program returned evidence.\n6. **No silent completeness claims.** If coverage is bounded, sampled, timed out, or intentionally skipped, say so."
+        },
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "122-126",
+          "snippet": "5. **Read outputs physically.** Read the final reducer and any important intermediate `.out.txt` files. Do not trust file names, status lines, or success messages.\n6. **Reduce into controller state.** Update the useful shared notes: what was tried, what survived verification, what remains unknown, what coverage is bounded, and what changed priority.\n7. **Decide next action.** Stop and answer, edit directly, ask the user, or launch a new UltraPlan script with a new archetype.\n\nThis is the key distinction: all phases in one script being complete only ends that script's MapReduce program. It does not prove the overall task is complete."
+        },
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "199-208",
+          "snippet": "2. Use `mapchain` for per-item work: inspect -> transform/plan -> verify.\n3. Reduce item outputs into a coverage table.\n4. Run a gap-checker against the item list and any relevant attempt/coverage notes.\n5. If gaps remain, launch another sweep over the missing set.\n\nPrompt requirements:\n\n- Each worker owns exactly one item or shard.\n- Each output must include item ID, action taken/proposed, evidence, and unresolved risk.\n- Reducers must report coverage count and omissions explicitly."
+        },
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "391",
+          "snippet": "Do not claim exhaustive coverage unless the item list, coverage notes, and reducer prove it. Do not pad with generic advice."
+        },
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "402",
+          "snippet": "- If coverage is bounded by time, sampling, top-N, timeout, excluded subsystem, or failed tool, record the bound in the relevant shared note and the final answer."
+        }
+      ]
+    },
+    {
+      "name": "tail-only handoff of worker transcripts",
+      "what_it_is": "UltraPlan workers end their output with a compact Conclusion block; downstream steps are instructed to tail the previous worker's .out.txt and read the full transcript only when it matters.",
+      "function_in_system": "Applies to every chained step and reducer in an UltraPlan run. Keeps prior workers' full transcripts out of the next worker's context. Otherwise each stage re-ingests the whole transcript noise of its predecessors and context use grows along the chain.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "96-98",
+          "snippet": "Each step receives the current value as `{item}` and `{previous}`. Initially this is the original item; after each subagent task it becomes that subagent's `.out.txt` path.\n\nWhen a later step consumes a prior `.out.txt`, instruct it to **tail** that file, not read it, unless the full transcript matters. `.out.txt` files contain the previous worker's full transcript; the useful conclusion is usually near the end."
+        },
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "354-363",
+          "snippet": "Worker outputs should end with a compact, easy-to-tail conclusion:\n\n```text\n## Conclusion\n- Item / lens:\n- Evidence inspected:\n- Finding or attempt result:\n- Confidence / failure reason:\n- What should happen next:\n```"
+        },
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "377",
+          "snippet": "Downstream prompts should usually say `Tail <previous>.out.txt` rather than `Read <previous>.out.txt` to avoid re-ingesting the full transcript noise."
+        }
+      ]
+    },
+    {
+      "name": "plain-text control data with Python validation",
+      "what_it_is": "UltraPlan scripts treat a worker's .out.txt path as the workflow value and avoid relying on worker-produced JSON. Dynamic fan-out uses a plain one-item-per-line list from controller scouting or a reducer, validated in Python before mapchain; a list that changes the workflow shape triggers a new script.",
+      "function_in_system": "Sits between reducer output and the next fan-out in UltraPlan scripts. Limits parsing to small explicit control data. Otherwise malformed LLM JSON breaks the script or drives the fan-out with a wrong item list.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "50",
+          "snippet": "A task returns the path of its subagent output file, normally `.../temp/ultra_xxx.out.txt`. Treat that path as the workflow value. Do not rely on subagents producing valid JSON unless a later Python step explicitly validates and repairs it."
+        },
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "343-350",
+          "snippet": "Avoid asking workers to return complex JSON task graphs. For dynamic fan-out:\n\n1. Prefer controller scouting to produce a plain item/control list before the script.\n2. Or have a planner/reducer write a plain text list file with one item per line.\n3. Validate the list with Python before using it for `mapchain`.\n4. If the list changes the workflow shape, stop and regenerate the next script instead of contorting the current script.\n\nOnly parse small, explicit control data. Rich reasoning belongs in `.out.txt` files and shared markdown files."
+        }
+      ]
+    },
+    {
+      "name": "irreversible operations excluded from worker prompts",
+      "what_it_is": "UltraPlan keeps irreversible operations out of worker prompts unless the user explicitly approved them, and gives workers, which have full tools, precise boundaries, allowed targets and stop conditions.",
+      "function_in_system": "Applies when the controller writes prompts for parallel subagents that act without supervision. Restricts destructive actions to user-approved cases. Otherwise an unsupervised worker may perform irreversible changes as part of an attempt.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/ultraplan_sop.md",
+          "lines": "396-397",
+          "snippet": "- Keep irreversible operations out of worker prompts unless the user explicitly approved them.\n- Subagents have full tools and physical execution ability; give precise boundaries, allowed targets, and stop conditions."
+        }
+      ]
+    },
+    {
+      "name": "session resume from transcript log with degraded summary fallback",
+      "what_it_is": "/continue reloads a past model_responses_*.txt log into backend.history as native messages; if the log cannot be parsed natively, it restores a condensed summary from text pairs and <summary> blocks. A reset first saves the current log as a snapshot file. Each session log is guarded by a lock file with a 5 s heartbeat that counts as stale after 30 s and can then be taken over; an occupied session is continued on a copy, and a failure of the lock machinery itself falls back to allowing the resume.",
+      "function_in_system": "Sits in the frontends around the agent's conversation state and its on-disk transcript. Lets a user resume work after a crash, restart or accidental clear, and keeps two processes from appending to the same log. Otherwise the task context is lost with the process and has to be rebuilt from scratch, and concurrent writers interleave and corrupt a transcript.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "frontends/continue_cmd.py",
+          "lines": "107-118",
+          "snippet": "def _parse_native_history(pairs):\n    history = []\n    for p, r in pairs:\n        try: user_msg = json.loads(p)\n        except Exception: return None\n        try: blocks = ast.literal_eval(r)\n        except Exception: return None\n        if not (isinstance(user_msg, dict) and user_msg.get('role') == 'user'): return None\n        if not isinstance(blocks, list): return None\n        history.append(user_msg)\n        history.append({'role': 'assistant', 'content': blocks})\n    return history"
+        },
+        {
+          "file": "frontends/continue_cmd.py",
+          "lines": "355-375",
+          "snippet": "def _snapshot_current_log(pid=None):\n    \"\"\"Persist current PID log as a standalone recoverable snapshot, then clear it.\"\"\"\n    path = _current_log_path(pid)\n    if not os.path.isfile(path):\n        return None\n    try:\n        with open(path, encoding='utf-8', errors='replace') as fh:\n            content = fh.read()\n    except Exception:\n        return None\n    if not _pairs(content):\n        return None\n    os.makedirs(_LOG_DIR, exist_ok=True)\n    pid = os.getpid() if pid is None else pid\n    stamp = time.strftime('%Y%m%d_%H%M%S')\n    snapshot = os.path.join(_LOG_DIR, f'model_responses_snapshot_{pid}_{stamp}_{time.time_ns() % 1_000_000_000:09d}.txt')\n    with open(snapshot, 'w', encoding='utf-8', errors='replace') as fh:\n        fh.write(content)\n    with open(path, 'w', encoding='utf-8', errors='replace'):\n        pass\n    return snapshot"
+        },
+        {
+          "file": "frontends/continue_cmd.py",
+          "lines": "405-425",
+          "snippet": "def restore(agent, path):\n    \"\"\"Restore session at path. Returns (msg, is_full).\"\"\"\n    try:\n        with open(path, encoding='utf-8', errors='replace') as fh:\n            content = fh.read()\n    except Exception as e: return f'❌ 读取失败: {e}', False\n    pairs = _pairs(content)\n    if not pairs: return f'❌ {os.path.basename(path)} 为空或格式不符', False\n    history = _parse_native_history(pairs)\n    name = os.path.basename(path)\n    if history is not None:\n        agent.abort()\n        _replace_backend_history(agent, history)\n        return f'✅ 已恢复 {len(pairs)} 轮完整对话（{name}）\\n(已写入 backend.history，可直接继续)', True\n    from chatapp_common import _restore_native_history, _restore_text_pairs\n    summary = _restore_text_pairs(content) or _restore_native_history(content)\n    if not summary: return f'❌ {name} 无法解析（非 native 且无摘要可提取）', False\n    agent.abort()\n    agent.history.extend(summary)\n    n = sum(1 for l in summary if l.startswith('[USER]: '))\n    return f'⚠️ 非 native 格式，已降级恢复 {n} 轮摘要（{name}）\\n(请输入新问题继续)', False"
+        },
+        {
+          "file": "frontends/continue_cmd.py",
+          "lines": "839-876",
+          "snippet": "def acquire_lock(log_path, agent_id=None):\n    \"\"\"尝试独占 `log_path`。成功(或锁设施故障降级)返回 True;\n    仅当被另一活进程(心跳新鲜)持有时返回 False。\"\"\"\n    try:\n        os.makedirs(_LOCK_DIR, exist_ok=True)\n        lf = _lock_path(log_path)\n        meta = {'pid': os.getpid(), 'agent_id': agent_id,\n                'log': os.path.basename(log_path),\n                'started': time.time()}\n        blob = json.dumps(meta, ensure_ascii=False)\n        try:\n            fd = os.open(lf, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)\n            with os.fdopen(fd, 'w', encoding='utf-8') as fh:\n                fh.write(blob)\n        except FileExistsError:\n            cur = _read_lock(lf)\n            if cur and cur.get('pid') != os.getpid() and _lock_fresh(lf):\n                return False                      # 被另一活进程持有\n            # 过期锁 / 本进程自己的 → 接管(覆盖)。小竞态窗口可接受。\n            try: os.remove(lf)\n            except OSError: pass\n            try:\n                fd = os.open(lf, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)\n                with os.fdopen(fd, 'w', encoding='utf-8') as fh:\n                    fh.write(blob)\n            except FileExistsError:\n                cur2 = _read_lock(lf)\n                if cur2 and cur2.get('pid') != os.getpid() and _lock_fresh(lf):\n                    return False                  # 抢锁竞态输了\n                with open(lf, 'w', encoding='utf-8') as fh:\n                    fh.write(blob)\n        with _hb_lock:\n            _held_locks.add(log_path)\n        _ensure_hb_thread()\n        return True\n    except Exception:\n        # 锁设施故障绝不阻断续接 —— 降级为\"假定空闲、放行\"。\n        return True"
+        },
+        {
+          "file": "frontends/continue_cmd.py",
+          "lines": "1017-1045",
+          "snippet": "def continue_inplace(agent, path, agent_id=None):\n    \"\"\"原地续:把 agent 的日志指回 `path` 本身,之后轮次追加到 X,延续同一会话。\n    调用方应已确认空闲(session_occupant 为 None);抢锁失败(被占)返回错误。\n    返回 (msg, ok)。\"\"\"\n    try: agent.abort()\n    except Exception: pass\n    if not acquire_lock(path, agent_id):       # 先抢到目标锁;失败则保持现状,不丢自己的锁\n        return '❌ 会话已被占用，无法原地接管', False\n    cur = getattr(agent, 'log_path', '') or ''\n    if cur and os.path.basename(cur) != os.path.basename(path):\n        release_lock(cur)                       # 目标到手,旧会话释放为空闲(同一文件则不放)\n    _retarget_log(agent, path)\n    return _load_history_into(agent, path)\n\n\ndef continue_copy(agent, path, agent_id=None):\n    \"\"\"拷贝续:铸新 logid、把 `path` 内容拷进去,在副本上续;`path` 原件不动。\n    用于\"被占用→用户选拷贝\"以及快照源。返回 (msg, ok)。\"\"\"\n    try: agent.abort()\n    except Exception: pass\n    release_current(agent)\n    newp = _new_log_path()\n    try:\n        shutil.copyfile(path, newp)\n    except Exception:\n        pass\n    acquire_lock(newp, agent_id)\n    _retarget_log(agent, newp)\n    return _load_history_into(agent, newp)"
+        }
+      ]
+    },
+    {
+      "name": "side-question isolation from main agent history",
+      "what_it_is": "/btw answers a user side question with a single tool-less raw_ask call on a lock-protected deepcopy of backend.history, in a background thread with a 120 s deadline that returns a partial answer on timeout. The main agent's history and task queue receive no writes.",
+      "function_in_system": "Runs next to a busy main agent in the chat and TUI frontends. Lets the user ask about progress while the main task keeps running and its context stays clean. Otherwise the question has to interrupt the running task or enters the main history as an extra turn that pollutes the agent's context.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "frontends/btw_cmd.py",
+          "lines": "1-7",
+          "snippet": "\"\"\"`/btw` 命令：side question — 不打断主 Agent 的临时 subagent 问答。\n\n- 持锁 deepcopy backend.history → 后台线程 backend.raw_ask 单次拉答\n- 主 agent backend.history 零写入；不入 task_queue\n- 答案 → display_queue 'done'（install 路径）或同步 return（frontend 路径）\n\n复用 backend.raw_ask + make_messages，不新建 LLM 实例。"
+        },
+        {
+          "file": "frontends/btw_cmd.py",
+          "lines": "61-64",
+          "snippet": "def _snapshot_history(backend):\n    \"\"\"Lock + deepcopy: defends against concurrent compress_history_tags mutating inner blocks.\"\"\"\n    with backend.lock:\n        return copy.deepcopy(list(backend.history))"
+        },
+        {
+          "file": "frontends/btw_cmd.py",
+          "lines": "76-87",
+          "snippet": "def _ask(agent, question, deadline):\n    \"\"\"One-shot raw_ask against current backend; never mutates backend.history.\"\"\"\n    backend = agent.llmclient.backend\n    user_msg = {\"role\": \"user\",\n                \"content\": [{\"type\": \"text\", \"text\": _wrapper().format(question=question)}]}\n    wire = _build_wire(backend, _snapshot_history(backend), user_msg)\n    text = ''\n    for chunk in backend.raw_ask(wire):\n        text += chunk\n        if time.time() > deadline:\n            return text + '\\n\\n⚠️ /btw 超时，仅返回部分回复。'\n    return text"
+        },
+        {
+          "file": "frontends/btw_cmd.py",
+          "lines": "107-115",
+          "snippet": "    started = time.time()\n    deadline = started + _TIMEOUT_SEC\n\n    def worker():\n        body = _run(agent, question, deadline)\n        display_queue.put({'done': _format(question, body, time.time() - started), 'source': 'system'})\n\n    threading.Thread(target=worker, daemon=True, name='btw-sidequest').start()\n    return None"
+        }
+      ]
+    },
+    {
+      "name": "per-session token and cache usage accounting",
+      "what_it_is": "cost_tracker monkey-patches llmcore._record_usage and print to count requests, input, output, cache-creation and cache-read tokens per agent thread across the messages, chat_completions and responses APIs, and aggregates subagent usage from temp/*/stdout.log. /cost reports these totals, the cache hit rate and the current history size against the trim threshold context_win*3.",
+      "function_in_system": "Observes every LLM call of the TUI agent and its subagents and surfaces the numbers to the user. Makes token spend, cache effectiveness and closeness to history trimming visible during a run. Otherwise cost growth, cache misses and an approaching context trim stay unnoticed until the bill or a degraded answer shows them.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "frontends/cost_tracker.py",
+          "lines": "42-52",
+          "snippet": "# GA's real context budget lives on `BaseSession.context_win` (chars). The\n# trim trigger is `context_win * 3` (see llmcore.trim_messages_history), so\n# `/cost` compares actual-history chars against that cap for consistent units.\ndef context_window_chars(backend) -> int:\n    \"\"\"`context_win * 3` — the char cap before `trim_messages_history` kicks\n    in. Reads dynamically so a `mykey.py` override propagates. Returns 0 on\n    bad/missing backend so the caller can hide the row.\"\"\"\n    try:\n        return int(getattr(backend, 'context_win', 0)) * 3\n    except (TypeError, ValueError):\n        return 0"
+        },
+        {
+          "file": "frontends/cost_tracker.py",
+          "lines": "74-82",
+          "snippet": "def scan_subagent_logs(since: float = 0.0, root: str | None = None) -> TokenStats:\n    \"\"\"Aggregate subagent tokens from `temp/<task>/stdout.log` files; pass\n    `since=tui_start_time` to scope to this run. Best-effort: bad logs skipped.\"\"\"\n    out = TokenStats()\n    if since > 0: out.started_at = since\n    pattern = os.path.join(root, _SUBAGENT_GLOB) if root else _SUBAGENT_GLOB\n    for p in glob.glob(pattern):\n        try:\n            if since and os.path.getmtime(p) < since: continue"
+        },
+        {
+          "file": "frontends/cost_tracker.py",
+          "lines": "131-148",
+          "snippet": "    def record_patched(usage, api_mode):\n        # Handles INPUT / CACHE only; OUTPUT comes via `[Output]` print_patched\n        # below (the SSE path emits it that way; double-counting was the prior bug).\n        try:\n            if usage:\n                t = get(threading.current_thread().name)\n                t.requests += 1\n                if api_mode == 'messages':\n                    inp = int(usage.get('input_tokens', 0) or 0)\n                    cc = int(usage.get('cache_creation_input_tokens', 0) or 0)\n                    cr = int(usage.get('cache_read_input_tokens', 0) or 0)\n                    t.input += inp; t.cache_create += cc; t.cache_read += cr\n                    # Non-stream `messages` skips the [Output] print, so count\n                    # output_tokens here; SSE message_start carries a 1-token\n                    # placeholder to skip.\n                    out = int(usage.get('output_tokens', 0) or 0)\n                    if out > 1: t.output += out; t.last_output = out\n                    t.last_input = inp + cc + cr"
+        },
+        {
+          "file": "frontends/tuiapp_v2.py",
+          "lines": "3587",
+          "snippet": "            import cost_tracker; cost_tracker.install()"
+        }
+      ]
+    },
+    {
+      "name": "token-optimized DOM simplification for web observations",
+      "what_it_is": "web_scan returns a multi-stage reduced page: in-browser JS extracts the main content block and drops sidebars, floating and hidden elements; optimize_html_for_tokens strips style, SVG bodies and non-whitelisted attributes and replaces long src/href values with __url__/__link__ placeholders; cutlist keeps 3 items of long repeated lists (up to 6 matching the instruction) and inserts a '[FAKE ELEMENT] N more items hidden, selector: ...' hint with sample texts; smart_truncate then cuts along the DOM tree to maxchars with '[TRUNCATED Nk chars]' markers while protecting the hint elements. tabs_only skips page content entirely.",
+      "function_in_system": "Sits in the web_scan tool before the generic tool output cap and shapes every browser observation. Keeps page observations inside the context budget while telling the model what was omitted and which selector reaches it. Otherwise raw page HTML floods the context window and blind truncation cuts away the main content or hides that list items exist.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "ga.py",
+          "lines": "117-121",
+          "snippet": "def web_scan(tabs_only=False, switch_tab_id=None, text_only=False, maxlen=35000):\n    \"\"\"获取当前页面的简化HTML内容和标签页列表。注意：简化过程会过滤边栏、浮动元素等非主体内容。\n    tabs_only: 仅返回标签页列表，不获取HTML内容（节省token）。\n    switch_tab_id: 可选参数，如果提供，则在扫描前切换到该标签页。\n    应当多用execute_js，少全量观察html\"\"\""
+        },
+        {
+          "file": "ga.py",
+          "lines": "142",
+          "snippet": "            importlib.reload(simphtml); result[\"content\"] = simphtml.get_html(driver, cutlist=True, maxchars=maxlen, text_only=text_only)"
+        },
+        {
+          "file": "simphtml.py",
+          "lines": "596-619",
+          "snippet": "def optimize_html_for_tokens(html):  \n    if type(html) is str: soup = BeautifulSoup(html, 'html.parser')  \n    else: soup = html\n    for svg in soup.find_all('svg'):\n        svg.clear(); svg.attrs = {}\n    [tag.attrs.pop('style', None) for tag in soup.find_all(True)]  \n    for tag in soup.find_all(True):  \n        if tag.has_attr('src'):  \n            if tag['src'].startswith('data:'): tag['src'] = '__img__'  \n            elif len(tag['src']) > 30: tag['src'] = '__url__'  \n        if tag.has_attr('href') and len(tag['href']) > 30: tag['href'] = '__link__'  \n        if tag.has_attr('action') and len(tag['action']) > 30: tag['action'] = '__url__'\n        for a in ('value', 'title', 'alt'):\n            if tag.has_attr(a) and isinstance(tag[a], str) and len(tag[a]) > 100: tag[a] = tag[a][:50] + ' ...'\n        for attr in list(tag.attrs.keys()):  \n            if attr not in ['id', 'class', 'name', 'src', 'href', 'alt', 'value', 'type', 'placeholder',\n                          'disabled', 'checked', 'selected', 'readonly', 'required', 'multiple',\n                          'role', 'aria-label', 'aria-expanded', 'aria-hidden', 'contenteditable',\n                          'title', 'for', 'action', 'method', 'target', 'colspan', 'rowspan']:  \n                if attr.startswith('data-v'): tag.attrs.pop(attr, None)\n                elif attr.startswith('data-') and isinstance(tag[attr], str) and len(tag[attr]) > 20:  \n                    tag[attr] = '__data__'  \n                elif not attr.startswith('data-'): tag.attrs.pop(attr, None)  \n    return soup"
+        },
+        {
+          "file": "simphtml.py",
+          "lines": "705-742",
+          "snippet": "def get_html(driver, cutlist=False, maxchars=35000, instruction=\"\", extra_js=\"\", text_only=False):\n    if cutlist: rr = driver.execute_js(js_findMainList + \"return findMainList(document.body);\").get('data', [])\n    page = get_main_block(driver, extra_js=extra_js, text_only=text_only)\n    if text_only: return page\n    soup = optimize_html_for_tokens(page)\n    for div in soup.select('div[data-tag=\"iframe\"]'):\n        div.name = 'iframe'; del div['data-tag']\n    html = str(soup)\n    if not cutlist: return html\n    lists = rr if isinstance(rr, list) else ([rr] if isinstance(rr, dict) and rr.get('selector') else [])\n    if lists: print(f\"[cutlist] Found {len(lists)} list(s): {[e.get('selector','?') if isinstance(e,dict) else '?' for e in lists]}\")\n    for entry in lists:\n        sel = entry.get('selector') if isinstance(entry, dict) else None\n        if not sel: continue\n        try: items = soup.select(sel)\n        except Exception: print(f'[cutlist] skip invalid selector: {sel}'); continue\n        if len(items) < 5: continue\n        total_len = sum(len(str(it)) for it in items)\n        avg_len = total_len / len(items)\n        print(f\"[cutlist]   '{sel}': {len(items)} items, avg {avg_len:.0f} chars, total {total_len}, if keep 3, save ~{total_len - 3 * avg_len:.0f} chars\")\n        if avg_len < 200 or (avg_len < 700 and total_len < 2500): continue\n        hit = [it for it in items if instruction and instruction.strip() and instruction in it.get_text(\" \",strip=True)]\n        keep = hit[:6] if hit else items[:3]\n        removed = [it for it in items if it not in keep]\n        sample_texts = []\n        for rm in removed[:5]:\n            txt = rm.get_text(\" \", strip=True)[:40]\n            if txt: sample_texts.append(txt)\n        hint_parts = [f'[FAKE ELEMENT] {len(removed)} more items hidden, selector: \"{sel}\"']\n        if sample_texts: hint_parts.append('Hidden items: ' + ','.join(f'\"{t}\"' for t in sample_texts))\n        hint_tag = soup.new_tag(\"div\")\n        hint_tag.string = ' '.join(hint_parts)\n        if keep: keep[-1].insert_after(hint_tag)\n        for it in removed: it.decompose()\n    ss = str(optimize_html_for_tokens(soup)) if lists else html\n    print(f\"[get_html] Result: {len(html)} -> {len(ss)} chars after cutlist ({100-len(ss)*100//len(html)}% saved)\")\n    if len(ss) > maxchars: ss = str(smart_truncate(soup, maxchars))\n    return ss"
+        },
+        {
+          "file": "simphtml.py",
+          "lines": "744-747",
+          "snippet": "def smart_truncate(soup, budget, _depth=0):\n    \"\"\"原地截断 soup 使其接近 budget 字符。\n    策略：穿透单子元素找分叉点；top3 能扛住 over 则按比例分担，否则从尾部删子元素。\"\"\"\n    CUT_THRESHOLD = 8000  # 小于此值直接去尾，大于则继续递归找分叉点"
+        }
+      ]
+    },
+    {
+      "name": "post-action DOM diff feedback for browser JS",
+      "what_it_is": "execute_js_rich snapshots the simplified page before and after running a script and returns the number of changed elements, the largest changed subtree (capped at 2000 chars), transient texts such as toasts captured by a 450 ms text monitor, new tabs or a reload flag, and the suggestion '页面无明显变化' when nothing changed.",
+      "function_in_system": "Wraps every web_execute_js tool call and feeds the observed effect of the action back to the model. Exposes clicks and scripts that had no effect or hit the wrong element, and replaces a follow-up full page scan with a compact change summary. Otherwise the model assumes a silent no-op succeeded or spends a full web_scan to find out.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "simphtml.py",
+          "lines": "672-703",
+          "snippet": "def find_changed_elements(before_html, after_html):\n    before_soup = BeautifulSoup(before_html, 'html.parser')\n    after_soup = BeautifulSoup(after_html, 'html.parser')\n    def direct_text(el):\n        return ''.join(t.strip() for t in el.find_all(string=True, recursive=False)).strip()\n    def get_sig(el):\n        attrs = {k:v for k,v in el.attrs.items() if k != 'data-track-id'}\n        return f\"{el.name}:{attrs}:{direct_text(el)}\"\n    def build_sigs(soup):\n        result = {}\n        for el in soup.find_all(True):\n            sig = get_sig(el)\n            result.setdefault(sig, []).append(el)\n        return result\n    before_sigs, after_sigs = build_sigs(before_soup), build_sigs(after_soup)\n    changed = []\n    for sig, els in after_sigs.items():\n        if sig not in before_sigs: changed.extend(els)\n        elif len(els) > len(before_sigs[sig]): changed.extend(els[:len(els) - len(before_sigs[sig])])\n    if len(changed) == 0 and str(before_soup) != str(after_soup):\n        before_els, after_els = before_soup.find_all(True), after_soup.find_all(True)\n        for i in range(min(len(before_els), len(after_els))):\n            if get_sig(before_els[i]) != get_sig(after_els[i]): changed.append(after_els[i])\n    # 变化边界: parent不在changed中的元素\n    cids = set(id(el) for el in changed)\n    boundaries = [el for el in changed if el.parent is None or id(el.parent) not in cids]\n    top = max(boundaries, key=lambda el: len(str(el))) if boundaries else None\n    result = {\"changed\": len(changed)}\n    if top:\n        h = str(top)\n        result[\"top_change\"] = h if len(h) <= 2000 else h[:2000] + '...[TRUNCATED]'\n    return result"
+        },
+        {
+          "file": "simphtml.py",
+          "lines": "820-873",
+          "snippet": "def execute_js_rich(script, driver, no_monitor=False):\n    last_html = None\n    if not no_monitor:\n        try: last_html = get_html(driver, cutlist=False, extra_js=temp_monitor_js, maxchars=9999999)\n        except: pass\n    result = None;  error_msg = None;  reloaded = False; newTabs = []\n    before_sids = set(driver.get_session_dict().keys()); response = {}\n    try:\n        print(f\"Executing: {script[:250]} ...\")\n        response = driver.execute_js(script)\n        result = response['data'] if 'data' in response else response.get('result')\n        if response.get('closed', 0) == 1: reloaded = True\n        time.sleep(1) \n    except Exception as e:\n        error = e.args[0] if e.args else str(e)\n        if isinstance(error, dict): error.pop('stack', None)\n        error_msg = str(error)\n        print(f\"Error: {error_msg}\")\n    rr = {\n        \"status\": \"failed\" if error_msg else \"success\",\n        \"js_return\": result,\n        \"tab_id\": driver.default_session_id\n    }  \n    if reloaded: rr['reloaded'] = reloaded\n    if response.get('newTabs'): rr['newTabs'] = response['newTabs']\n    else:\n        after = driver.get_session_dict()\n        new_sids = {k: v for k, v in after.items() if k not in before_sids}\n        if new_sids:\n            newTabs = [{'id': k, 'url': v} for k, v in new_sids.items()]\n            rr['newTabs'] = newTabs\n            rr['suggestion'] = \"页面已刷新，以上新标签页在执行期间连接。\"\n    if error_msg: rr['error'] = error_msg\n    if no_monitor: return rr\n    if not reloaded:\n        try: rr['transients'] = get_temp_texts(driver)\n        except: rr['transients'] = []\n    if not reloaded and len(newTabs) == 0:\n        try:\n            current_html = get_html(driver, cutlist=False, maxchars=9999999)\n            if last_html is None: raise Exception(\"no baseline\")\n            diff_data = find_changed_elements(last_html, current_html)\n            change_count = diff_data.get('changed', 0)\n            top_change = diff_data.get('top_change', '')\n            diff_summary = f\"DOM变化量: {change_count}\"\n            if top_change: diff_summary += f\"\\n最显著变化:\\n{top_change}\"\n            transients = rr.get('transients', [])\n            if change_count == 0 and not transients and len(newTabs) == 0:\n                diff_summary += \" (页面无变化)\"\n                rr['suggestion'] = \"页面无明显变化\"\n        except:\n            diff_summary = \"页面变化监控不可用\"\n        rr['diff'] = diff_summary\n    return rr"
+        }
+      ]
+    },
+    {
+      "name": "browser JS execution timeout with delivery diagnosis",
+      "what_it_is": "TMWebDriver.execute_js waits at most timeout seconds (default 15) for a result and then returns a status that distinguishes ACK received (script may still be running), no ACK (script may not have been delivered), page reloaded, and script not polled for HTTP sessions.",
+      "function_in_system": "Bounds every browser JS call issued by web_scan and web_execute_js. Turns a hanging or lost browser round-trip into a diagnosable tool result. Otherwise a dead tab or stuck script blocks the tool call indefinitely and the model cannot tell delivery failures from slow scripts.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "TMWebDriver.py",
+          "lines": "215-234",
+          "snippet": "        start_time = time.time()  \n        self.clean_sessions() \n        hasjump = acked = False\n\n        while exec_id not in self.results:  \n            time.sleep(0.2)  \n            if not acked and exec_id in self.acks:\n                acked = True; start_time = time.time()\n            if tp in ['ws', 'ext_ws']:\n                if not session.is_active(): hasjump = True\n                if hasjump and session.is_active():\n                    return {'result': f\"Session {session_id} reloaded.\", \"closed\":1}\n            if time.time() - start_time > timeout:  \n                if tp in ['ws', 'ext_ws']:\n                    if hasjump: return {'result': f\"Session {session_id} reloaded and new page is loading...\", 'closed':1}\n                    if acked: return {\"result\": f\"No response data in {timeout}s (ACK received, script may still be running)\"}\n                    return {\"result\": f\"No response data in {timeout}s (no ACK, script may not have been delivered)\"}\n                elif tp == 'http':\n                    if acked: return {\"result\": f\"Session {session_id} no response in {timeout}s (delivered but no result)\"}\n                    return {\"result\": f\"Session {session_id} no response in {timeout}s (script not polled)\"}"
+        }
+      ]
+    },
+    {
+      "name": "browser tab reconnect and session failover",
+      "what_it_is": "A tab that reconnects is resumed under its existing session id. If the target session is disconnected, execute_js waits 3 s, then switches the default session to the first active one and raises only when no active session is left.",
+      "function_in_system": "Sits in the browser driver beneath all web tools. Keeps web automation running across page reloads, navigation and dropped connections. Otherwise every reload or tab disconnect turns the next web tool call into an error for the agent.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "TMWebDriver.py",
+          "lines": "21-30",
+          "snippet": "    def reconnect(self, client, info):\n        self.info = info\n        self.type = info.get('type', 'ws')\n        if self.type in ('ws', 'ext_ws'):\n            self.ws_client = client\n            self.http_queue = None\n        elif self.type == 'http':\n            self.http_queue = client\n        self.connect_at = time.time()\n        self.disconnect_at = None"
+        },
+        {
+          "file": "TMWebDriver.py",
+          "lines": "163-176",
+          "snippet": "    def _register_client(self, session_id: str, client: WebSocket, session_info) -> None:  \n        is_new_session = session_id not in self.sessions\n\n        if is_new_session:\n            session = Session(session_id, session_info, client)\n            self.sessions[session_id] = session            \n            print(f\"New tab connected: {session.url} (Session: {session_id})\")  \n        else:\n            session = self.sessions[session_id]\n            session.reconnect(client, session_info)\n            print(f\"Tab reconnected: {session.url} (Session: {session_id})\")  \n\n        self.latest_session_id = session_id\n        if self.default_session_id is None: self.default_session_id = session_id "
+        },
+        {
+          "file": "TMWebDriver.py",
+          "lines": "191-202",
+          "snippet": "        session = self.sessions.get(session_id)\n        if not session or not session.is_active(): \n            time.sleep(3)\n            session = self.sessions.get(session_id)\n            if not session or not session.is_active(): \n                alive_sessions = [s for s in self.sessions.values() if s.is_active()]\n                if alive_sessions:\n                    session = alive_sessions[0]  \n                    print(f\"会话 {session_id} 未连接，自动切换到最新活动会话: {session.id}\")\n                    session_id = self.default_session_id = session.id\n                if not session or not session.is_active(): \n                    raise ValueError(f\"会话ID {session_id} 未连接\")  "
+        }
+      ]
+    },
+    {
+      "name": "GUI locator fallback chain",
+      "what_it_is": "The computer-use SOP fixes an ordered locator chain: win32gui window enumeration first, then the UIA control tree, then ui_detect on a ljqCtrl screenshot, and a VLM last for semantic confirmation only, with its coordinates treated as untrusted. Each step is used only when the previous one fails, and UIA is dropped for a window once it proved ineffective there. macOS maps the same chain onto ListWindows and the AX accessibility API, preferring AXPress and falling back to coordinate clicks.",
+      "function_in_system": "Governs how the agent finds and operates GUI elements during desktop automation. Moves to the next locating method when one fails and keeps the most reliable available method in use. Otherwise the agent keeps clicking on unreliable coordinates such as VLM guesses or retries a control tree that does not work for the window.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "memory/computer_use.md",
+          "lines": "6-12",
+          "snippet": "### 探测/定位四工具（按优先级降级，前者无效才用后者）\n| 工具 | 用法时机 | 能力/适用 | 限制 |\n|------|----------|-----------|------|\n| 0 win32gui 窗口枚举 | 始终先行，总是可用 | 枚举标题/类名/rect，确定目标窗口、前台状态、客户区原点 | 仅定位窗口，不进控件 |\n| 1 Python UIA（控件树）| 首选探测+操作 | 控件树可用时，探测与操作（含免坐标点击）都用 UIA | **游戏禁用**；对该窗口一旦无效则后续也不用 |\n| 2 ui_detect.py（配合ljqCtrl截图） | 1无效时才用 | 截图视觉检测控件，返回 bbox+OCR 文本 | bbox 是截图内坐标需转屏幕物理坐标 |\n| 3 vision(VLM) | 2仍不足时才用 | 仅语义理解、确认界面状态、辅助判断目标 | 不可信其坐标 |"
+        },
+        {
+          "file": "memory/computer_use.md",
+          "lines": "27",
+          "snippet": "若确定UIA可用则少用ui_detect/ljqCtrl；若UIA不可用，则后续不用UIA"
+        },
+        {
+          "file": "memory/computer_use.md",
+          "lines": "42",
+          "snippet": "- 节奏同 §2：先 ListWindows + AXElements 探测，确认控件后再操作；AXPress 优先，回退 Click(phys_cx, phys_cy)"
+        }
+      ]
+    },
+    {
+      "name": "click effect check with stop-on-no-change",
+      "what_it_is": "ljqCtrl.Click (check=True by default) compares screenshots before and after the click and prints the share of changed pixels and whether the foreground window changed; macljqCtrl.Click prints the pixel change as well. The SOP requires stopping to diagnose at 0% or near-0% change and forbids blind retries, and prescribes probing a new screen before acting and re-verifying the state right after each action.",
+      "function_in_system": "Wraps every desktop click and feeds its visible effect back to the model. Exposes clicks that hit nothing or the wrong window and stops repeated blind clicking. Otherwise the agent assumes a no-op click succeeded and builds further steps on an unchanged or wrong screen state.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "memory/ljqCtrl.py",
+          "lines": "53-68",
+          "snippet": "def Click(x, y=None, check=True):\n\tif type(x) is type(tuple()): x, y = int(x[0]), int(x[1])\n\tif check: before, fg_before = ScreenCapAt(x, y), win32gui.GetForegroundWindow()\n\tSetCursorPos( (x, y) )\n\tMouseClick()\n\tif check:\n\t\ttime.sleep(0.5)\n\t\tafter = ScreenCapAt(x, y)\n\t\tb, a = np.array(before), np.array(after)\n\t\tdiff = np.sum(np.any(b != a, axis=2))\n\t\ttotal = b.shape[0] * b.shape[1]\n\t\tfg_after = win32gui.GetForegroundWindow()\n\t\tfg_title = win32gui.GetWindowText(fg_after)\n\t\tfg_changed = fg_before != fg_after\n\t\tprint(f'[Click check] {diff}/{total} px changed ({diff/total*100:.1f}%) | fg: \"{fg_title}\" {\"⚠️CHANGED\" if fg_changed else \"\"}')\n\t\treturn after"
+        },
+        {
+          "file": "memory/macljqCtrl.py",
+          "lines": "377-398",
+          "snippet": "def Click(x, y=None, check=True, r=60):\n    \"\"\"物理坐标点击。check=True 时比较点击前后周边像素变化, 返回 (变化百分比, 截图)。\n    若变化≈0 → 可能点歪了 (同 Win 版语义)。\"\"\"\n    if y is None and isinstance(x, (tuple, list)):\n        x, y = x[0], x[1]\n    x, y = int(x), int(y)\n    before = None\n    if check:\n        try: before = np.array(ScreenCapAt(x, y, r))\n        except Exception: before = None\n    SetCursorPos((x, y)); time.sleep(0.05)\n    MouseClick()\n    if check:\n        time.sleep(0.25)\n        try:\n            after = np.array(ScreenCapAt(x, y, r))\n        except Exception:\n            return None\n        if before is not None and before.shape == after.shape:\n            diff = np.mean(np.any(before != after, axis=-1)) * 100\n            if verbose_click:\n                print(f'Click({x},{y}) pixel change: {diff:.1f}%')"
+        },
+        {
+          "file": "memory/computer_use.md",
+          "lines": "19",
+          "snippet": "ljqCtrl.Click 后会返回像素/前台变化，0% 或近 0% 变化立即停下诊断，禁止盲目重试。"
+        },
+        {
+          "file": "memory/computer_use.md",
+          "lines": "24-25",
+          "snippet": "进入新界面时，建议先只探测不操作：枚举窗口 + UIA + ljqCtrl截图 + ui_detect，读完实际输出再决定下一步\n明确一个操作后，可以在同一轮执行该动作，短暂等待，再立刻枚举窗口 + 截图/ui_detect 验证新状态；不要在未知状态下把多步决策写进大脚本"
+        }
+      ]
+    }
+  ]
+}

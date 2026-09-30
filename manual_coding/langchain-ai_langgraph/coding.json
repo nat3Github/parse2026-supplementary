@@ -1,0 +1,443 @@
+{
+  "repo": "langchain-ai/langgraph",
+  "commit": "bdb323efbb",
+  "system_type": "framework",
+  "system_type_reason": "Low-level orchestration framework for building stateful agents as graphs.",
+  "repo_overview": {
+    "summary": "Low-level orchestration framework for building stateful agents as graphs. Nodes write into typed channels and a Pregel/BSP runtime executes them in supersteps with a checkpoint after every step. The agentic loop itself lives in the prebuilt ReAct agent (create_react_agent), which alternates an LLM node and a ToolNode until the model emits no more tool calls.",
+    "components": [
+      {
+        "path": "libs/langgraph/langgraph/pregel/",
+        "purpose": "runtime engine: superstep loop (_loop.py, main.py), task planning (_algo.py), runner/executor, retry, checkpoint integration, remote graphs"
+      },
+      {
+        "path": "libs/langgraph/langgraph/graph/",
+        "purpose": "StateGraph API: nodes, edges, conditional branches, message reducer"
+      },
+      {
+        "path": "libs/langgraph/langgraph/channels/, libs/langgraph/langgraph/managed/",
+        "purpose": "channel types (LastValue, Topic, BinOp, ...) and managed values such as is_last_step"
+      },
+      {
+        "path": "libs/langgraph/langgraph/ (types.py, errors.py, func/, runtime.py, _internal/)",
+        "purpose": "RetryPolicy, CachePolicy, interrupt, Command, exception types, functional API, timeout/retry/cache helpers"
+      },
+      {
+        "path": "libs/langgraph/langgraph/stream/, libs/langgraph/langgraph/callbacks.py",
+        "purpose": "streaming output and callbacks"
+      },
+      {
+        "path": "libs/prebuilt/langgraph/prebuilt/",
+        "purpose": "prebuilt ReAct agent (chat_agent_executor.py), ToolNode with tool error handling, tool call validation, HITL interrupt schema"
+      },
+      {
+        "path": "libs/checkpoint/",
+        "purpose": "checkpointer base and in-memory implementation, serialization (incl. encryption), node result cache (memory/redis), long-term store"
+      },
+      {
+        "path": "libs/checkpoint-postgres/, libs/checkpoint-sqlite/",
+        "purpose": "database backends for checkpointer, store and cache"
+      },
+      {
+        "path": "libs/checkpoint-conformance/",
+        "purpose": "conformance test suite for checkpointer implementations"
+      },
+      {
+        "path": "libs/cli/",
+        "purpose": "langgraph CLI for building and deploying LangGraph Server via Docker"
+      },
+      {
+        "path": "libs/sdk-py/, libs/sdk-js/",
+        "purpose": "client SDK for the LangGraph Server API"
+      },
+      {
+        "path": "examples/",
+        "purpose": "tutorial notebooks (reflection, reflexion, plan-and-execute, multi-agent, RAG, extraction with retries, ...)"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "libs/prebuilt/langgraph/prebuilt/chat_agent_executor.py",
+        "lines": "835-841",
+        "snippet": "if not isinstance(last_message, AIMessage) or not last_message.tool_calls:\n    if post_model_hook is not None:\n        return \"post_model_hook\"\n    elif response_format is not None:\n        return \"generate_structured_response\"\n    else:\n        return END"
+      },
+      {
+        "file": "libs/prebuilt/langgraph/prebuilt/chat_agent_executor.py",
+        "lines": "867-872",
+        "snippet": "workflow.add_node(\n    \"agent\",\n    RunnableCallable(call_model, acall_model),\n    input_schema=input_schema,\n)\nworkflow.add_node(\"tools\", tool_node)"
+      },
+      {
+        "file": "libs/prebuilt/langgraph/prebuilt/chat_agent_executor.py",
+        "lines": "990",
+        "snippet": "workflow.add_edge(\"tools\", entrypoint)"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "should_continue (chat_agent_executor.py:831-859) routes to the 'tools' node whenever the last AIMessage carries tool_calls, so the model output determines which tools run next.",
+      "consumes_feedback": "The edge tools -> entrypoint (chat_agent_executor.py:990) returns to the agent node, where call_model reads the accumulated messages including the new ToolMessages via _get_model_input_state(state) (chat_agent_executor.py:672) for the next model call.",
+      "multi_turn_until_termination": "The agent -> tools -> agent cycle repeats until the model returns no tool_calls and the router returns END (chat_agent_executor.py:835-841), bounded by the recursion limit and the remaining-steps stop."
+    }
+  },
+  "topology": {
+    "verdict": "single-agent",
+    "evidence": [
+      {
+        "file": "libs/prebuilt/langgraph/prebuilt/chat_agent_executor.py",
+        "lines": "867-872",
+        "snippet": "workflow.add_node(\n    \"agent\",\n    RunnableCallable(call_model, acall_model),\n    input_schema=input_schema,\n)\nworkflow.add_node(\"tools\", tool_node)"
+      },
+      {
+        "file": "libs/prebuilt/langgraph/prebuilt/chat_agent_executor.py",
+        "lines": "679",
+        "snippet": "response = cast(AIMessage, static_model.invoke(model_input, config))  # type: ignore[union-attr]"
+      }
+    ],
+    "justification": "The prebuilt create_react_agent compiles one 'agent' node that calls a single model (chat_agent_executor.py:679) and one ToolNode that only executes tools (chat_agent_executor.py:867-872). This is one LLM loop calling tools. LangGraph as a framework allows composing several such agents (supervisor notebooks in examples/, agents used as subgraphs), which would count as multi-agent under our criterion; those setups live in tutorials and user code outside the coded anchor.",
+    "verdict_raw": "single-agent"
+  },
+  "resilience": [
+    {
+      "name": "node-level retry with exponential backoff and jitter",
+      "what_it_is": "RetryPolicy per node or as graph default: max_attempts=3, initial_interval=0.5s, backoff_factor=2.0, max_interval=128s, random jitter. The default retry_on predicate retries ConnectionError and HTTP 5xx and skips programming errors (ValueError, TypeError, LookupError, ...). Writes of the failed attempt are cleared before each retry and CONFIG_KEY_RESUMING signals nested subgraphs to resume from their checkpoint.",
+      "function_in_system": "Wraps every node execution inside the superstep runner (run_with_retry / arun_with_retry), so it covers LLM nodes and tool nodes alike. Absorbs transient infrastructure failures at the node boundary. Otherwise a single rate-limit or network error in one node fails the whole graph run.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/langgraph/langgraph/pregel/_retry.py",
+          "lines": "657-674",
+          "snippet": "attempts += 1\n# check if we should give up\nif attempts >= matching_policy.max_attempts:\n    raise\n# sleep before retrying\ninterval = matching_policy.initial_interval\n# Apply backoff factor based on attempt count\ninterval = min(\n    matching_policy.max_interval,\n    interval * (matching_policy.backoff_factor ** (attempts - 1)),\n)\n\n# Apply jitter if configured\nsleep_time = (\n    interval + random.uniform(0, 1) if matching_policy.jitter else interval\n)\ntime.sleep(sleep_time)"
+        },
+        {
+          "file": "libs/langgraph/langgraph/types.py",
+          "lines": "422-434",
+          "snippet": "initial_interval: float = 0.5\n\"\"\"Amount of time that must elapse before the first retry occurs. In seconds.\"\"\"\nbackoff_factor: float = 2.0\n\"\"\"Multiplier by which the interval increases after each retry.\"\"\"\nmax_interval: float = 128.0\n\"\"\"Maximum amount of time that may elapse between retries. In seconds.\"\"\"\nmax_attempts: int = 3\n\"\"\"Maximum number of attempts to make before giving up, including the first.\"\"\"\njitter: bool = True\n\"\"\"Whether to add random jitter to the interval between retries.\"\"\"\nretry_on: (\n    type[Exception] | Sequence[type[Exception]] | Callable[[Exception], bool]\n) = default_retry_on"
+        },
+        {
+          "file": "libs/langgraph/langgraph/_internal/_retry.py",
+          "lines": "5-10",
+          "snippet": "if isinstance(exc, ConnectionError):\n    return True\nif isinstance(exc, httpx.HTTPStatusError):\n    return 500 <= exc.response.status_code < 600\nif isinstance(exc, requests.HTTPError):\n    return 500 <= exc.response.status_code < 600 if exc.response else True"
+        },
+        {
+          "file": "libs/langgraph/langgraph/func/__init__.py",
+          "lines": "86-94",
+          "snippet": "def __call__(self, *args: P.args, **kwargs: P.kwargs) -> SyncAsyncFuture[T]:\n    return _call_with_options(\n        self.func,\n        args,\n        kwargs,\n        retry_policy=self.retry_policy,\n        cache_policy=self.cache_policy,\n        timeout=self.timeout,\n    )"
+        }
+      ]
+    },
+    {
+      "name": "per-node timeout with run and idle watchdogs",
+      "what_it_is": "TimeoutPolicy per node: run_timeout is a hard wall-clock cap per attempt, idle_timeout fires when the attempt shows no progress. Progress signals are channel writes, stream chunks, LangChain callbacks (LLM tokens, tool start/end) and explicit runtime.heartbeat() calls. On expiry the attempt is cancelled, its writes are discarded and NodeTimeoutError is raised, which the retry policy can pick up. Async nodes only.",
+      "function_in_system": "Runs as watchdog tasks next to each node attempt inside arun_with_retry. Catches hung LLM or tool calls that never return. Otherwise a stalled node blocks the superstep and the whole run indefinitely.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/langgraph/langgraph/pregel/_retry.py",
+          "lines": "486-502",
+          "snippet": "for watchdog in done:\n    kind = watchdogs[watchdog]\n    try:\n        await watchdog\n    except asyncio.TimeoutError as exc:\n        elapsed = time.monotonic() - start\n        scope.close()\n        task.writes.clear()\n        bg.cancel()\n        bg.add_done_callback(_drain_cancelled)\n        raise NodeTimeoutError(\n            task.name,\n            elapsed,\n            kind=kind,\n            idle_timeout=idle_timeout_s,\n            run_timeout=run_timeout_s,\n        ) from exc"
+        },
+        {
+          "file": "libs/langgraph/langgraph/types.py",
+          "lines": "465-472",
+          "snippet": "run_timeout: float | timedelta | None = None\n\"\"\"Hard wall-clock cap (in seconds) for a single node attempt.\n\nThis timeout is never refreshed by progress signals or `runtime.heartbeat()`.\n\"\"\"\n\nidle_timeout: float | timedelta | None = None\n\"\"\"Maximum time (in seconds) a single node attempt may go without observable progress.\"\"\""
+        },
+        {
+          "file": "libs/langgraph/langgraph/runtime.py",
+          "lines": "209-217",
+          "snippet": "heartbeat: Callable[[], None] = field(default=_no_op_heartbeat)\n\"\"\"Record progress for the current node's `idle_timeout`.\n\nCall this from inside long-running work that does not naturally emit\nwrites, stream chunks, child tasks, or LangChain callback events, to\nprevent the node from being treated as idle. It is also the only\nprogress signal honored under `TimeoutPolicy(refresh_on=\"heartbeat\")`.\nOutside an idle-timed attempt this is a no-op.\n\"\"\""
+        }
+      ]
+    },
+    {
+      "name": "superstep timeout",
+      "what_it_is": "Pregel.step_timeout (default None) bounds the wall-clock time of one superstep. Tasks still in flight when it expires are cancelled and a TimeoutError is raised.",
+      "function_in_system": "Applied by the runner to all tasks of a superstep in the main loop. Caps the duration of a single agent step as a whole. Otherwise one slow parallel task delays the entire step without bound.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/langgraph/langgraph/pregel/main.py",
+          "lines": "2982-2984",
+          "snippet": "for _ in runner.tick(\n    [t for t in loop.tasks.values() if not t.writes],\n    timeout=self.step_timeout,"
+        },
+        {
+          "file": "libs/langgraph/langgraph/pregel/_runner.py",
+          "lines": "691-697",
+          "snippet": "if inflight:\n    # if we got here means we timed out\n    while inflight:\n        # cancel all pending tasks\n        inflight.pop().cancel()\n    # raise timeout error\n    raise timeout_exc_cls(\"Timed out\")"
+        }
+      ]
+    },
+    {
+      "name": "recursion limit (superstep budget)",
+      "what_it_is": "Each run gets a hard maximum number of supersteps (config recursion_limit, default 10007, overridable via LANGGRAPH_DEFAULT_RECURSION_LIMIT). When the step counter passes the limit the loop status becomes out_of_steps and GraphRecursionError is raised.",
+      "function_in_system": "Checked in the loop tick before each superstep. Bounds agent-tool cycles that never reach a stop condition. Otherwise a looping agent keeps calling the LLM and tools indefinitely and burns cost.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/langgraph/langgraph/pregel/_loop.py",
+          "lines": "601-602, 1678",
+          "snippet": "if self.step > self.stop:\n    self.status = \"out_of_steps\"\n...\nself.stop = self.step + self.config[\"recursion_limit\"] + 1"
+        },
+        {
+          "file": "libs/langgraph/langgraph/pregel/main.py",
+          "lines": "3017-3026",
+          "snippet": "if loop.status == \"out_of_steps\":\n    msg = create_error_message(\n        message=(\n            f\"Recursion limit of {config['recursion_limit']} reached \"\n            \"without hitting a stop condition. You can increase the \"\n            \"limit by setting the `recursion_limit` config key.\"\n        ),\n        error_code=ErrorCode.GRAPH_RECURSION_LIMIT,\n    )\n    raise GraphRecursionError(msg)"
+        },
+        {
+          "file": "libs/langgraph/langgraph/_internal/_config.py",
+          "lines": "32",
+          "snippet": "DEFAULT_RECURSION_LIMIT = int(getenv(\"LANGGRAPH_DEFAULT_RECURSION_LIMIT\", \"10007\"))"
+        }
+      ]
+    },
+    {
+      "name": "node error-handler fallback node",
+      "what_it_is": "error_handler set per node (add_node) or as graph default (set_node_defaults). When a node raises after its retries are exhausted, the error and the source node name are persisted as writes and a dedicated handler node is scheduled in the same superstep. Handler nodes never catch their own failures. On resume after a crash the handler is rescheduled from the persisted ERROR_SOURCE_NODE marker and the failed node stays skipped.",
+      "function_in_system": "Sits in the runner's commit/scheduling path after retry. Contains a node failure by routing it to a fallback node that can recover state or degrade gracefully. Otherwise any uncaught node exception terminates the run.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/langgraph/langgraph/graph/state.py",
+          "lines": "297-301",
+          "snippet": "error_handler: Default error handler invoked when any regular node\n    raises and does not have its own `error_handler` set via\n    `add_node`. The handler is **not** invoked when an\n    error-handler node itself raises -- handler failures fail the\n    run."
+        },
+        {
+          "file": "libs/langgraph/langgraph/pregel/_runner.py",
+          "lines": "596-603",
+          "snippet": "# save error to checkpointer\ntask.writes.append((ERROR, exception))\nif self._should_route_to_error_handler(task) and not isinstance(\n    exception, GraphBubbleUp\n):\n    task.writes.append((ERROR_SOURCE_NODE, task.name))\n    self._handled_exception_ids.add(id(exception))\nself.put_writes()(task.id, task.writes)  # type: ignore[misc]"
+        },
+        {
+          "file": "libs/langgraph/langgraph/pregel/_loop.py",
+          "lines": "1550-1555, 1560-1563",
+          "snippet": "def schedule_error_handler(\n    self, failed_task: PregelExecutableTask, error: BaseException\n) -> PregelExecutableTask | None:\n    handler_node = self.nodes[failed_task.name].error_handler_node\n    if not handler_node:\n        return None\n...\n    handler_task = prepare_node_error_handler_task(\n        failed_task,\n        handler_node_name=handler_node,\n        failed_error=error,"
+        }
+      ]
+    },
+    {
+      "name": "checkpointed task writes with partial superstep resume",
+      "what_it_is": "After each task the runner persists its writes to the checkpointer as pending writes (failures as ERROR writes). On resume the writes of tasks that succeeded in the interrupted superstep are reapplied from the checkpoint, and only failed or interrupted tasks execute again. Durability modes sync/async/exit control when checkpoints are flushed.",
+      "function_in_system": "Sits at the task commit and at the loop tick on resume. Preserves completed work across crashes, errors and interrupts, so LLM and tool calls that already succeeded are skipped. Otherwise a failure in one parallel task forces the whole superstep and its model calls to rerun, or loses the run's progress entirely.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/langgraph/langgraph/pregel/_runner.py",
+          "lines": "609-613",
+          "snippet": "if not task.writes:\n    # add no writes marker\n    task.writes.append((NO_WRITES, None))\n# save task writes to checkpointer\nself.put_writes()(task.id, task.writes)  # type: ignore[misc]"
+        },
+        {
+          "file": "libs/langgraph/langgraph/pregel/_loop.py",
+          "lines": "725-738",
+          "snippet": "def _reapply_writes_to_succeeded_nodes(\n    self, tasks: Mapping[str, PregelExecutableTask]\n) -> None:\n    \"\"\"Restore successful channel writes from checkpoint to in-memory tasks.\n\n    Skips control signals (ERROR, ERROR_SOURCE_NODE, INTERRUPT, RESUME)\n    so that failed/interrupted tasks remain with empty writes and will be\n    re-executed (or routed to error handlers) by the runner.\n    \"\"\"\n    for tid, k, v in self.checkpoint_pending_writes:\n        if k in (ERROR, ERROR_SOURCE_NODE, INTERRUPT, RESUME):\n            continue\n        if task := tasks.get(tid):\n            task.writes.append((k, v))"
+        },
+        {
+          "file": "libs/langgraph/langgraph/types.py",
+          "lines": "87",
+          "snippet": "Durability = Literal[\"sync\", \"async\", \"exit\"]"
+        }
+      ]
+    },
+    {
+      "name": "node result cache with TTL",
+      "what_it_is": "CachePolicy per node or graph default: cache key from the node input (default key_func hashes the input with pickle) plus optional ttl in seconds. Before a superstep executes, the loop looks up cached writes for all tasks with a cache key and fills them in, so those tasks are skipped.",
+      "function_in_system": "Sits in the main loop between tick() and runner.tick(). Saves repeated execution of expensive nodes such as LLM calls on identical input. Otherwise every rerun pays the full cost and latency again.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/langgraph/langgraph/types.py",
+          "lines": "522-527",
+          "snippet": "key_func: KeyFuncT = default_cache_key  # type: ignore[assignment]\n\"\"\"Function to generate a cache key from the node's input.\nDefaults to hashing the input with pickle.\"\"\"\n\nttl: int | None = None\n\"\"\"Time to live for the cache entry in seconds. If `None`, the entry never expires.\"\"\""
+        },
+        {
+          "file": "libs/langgraph/langgraph/pregel/_loop.py",
+          "lines": "1527-1540",
+          "snippet": "def match_cached_writes(self) -> Sequence[PregelExecutableTask]:\n    if self.cache is None:\n        return ()\n    matched: list[PregelExecutableTask] = []\n    if cached := {\n        (t.cache_key.ns, t.cache_key.key): t\n        for t in self.tasks.values()\n        if t.cache_key and not t.writes\n    }:\n        for key, values in self.cache.get(tuple(cached)).items():\n            task = cached[key]\n            task.writes.extend(values)\n            matched.append(task)\n    return matched"
+        },
+        {
+          "file": "libs/langgraph/langgraph/pregel/main.py",
+          "lines": "2979-2981",
+          "snippet": "while loop.tick():\n    for task in loop.match_cached_writes():\n        loop.output_writes(task.id, task.writes, cached=True)"
+        }
+      ]
+    },
+    {
+      "name": "tool error fed back to model as error ToolMessage",
+      "what_it_is": "ToolNode catches exceptions raised during tool invocation and returns a ToolMessage with status='error' to the model. Pydantic argument errors are wrapped as ToolInvocationError (errors on injected arguments are filtered out). The default handler (_default_handle_tool_errors) returns only argument validation errors and re-raises everything else; handle_tool_errors=True, an exception tuple or a callable widens the caught set or customizes the message. Templates end with 'Please fix your mistakes.' / 'Please fix the error and try again.'",
+      "function_in_system": "Sits in the tools node of the ReAct loop, between tool execution and the next model call. Turns a broken tool call into an observation, so the model can correct its arguments in the next turn. Otherwise a malformed or failing tool call terminates the agent run.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/prebuilt/langgraph/prebuilt/tool_node.py",
+          "lines": "108-116",
+          "snippet": "INVALID_TOOL_NAME_ERROR_TEMPLATE = (\n    \"Error: {requested_tool} is not a valid tool, try one of [{available_tools}].\"\n)\nTOOL_CALL_ERROR_TEMPLATE = \"Error: {error}\\n Please fix your mistakes.\"\nTOOL_EXECUTION_ERROR_TEMPLATE = (\n    \"Error executing tool '{tool_name}' with kwargs {tool_kwargs} with error:\\n\"\n    \" {error}\\n\"\n    \" Please fix the error and try again.\"\n)"
+        },
+        {
+          "file": "libs/prebuilt/langgraph/prebuilt/tool_node.py",
+          "lines": "383-391",
+          "snippet": "def _default_handle_tool_errors(e: Exception) -> str:\n    \"\"\"Default error handler for tool errors.\n\n    If the tool is a tool invocation error, return its message.\n    Otherwise, raise the error.\n    \"\"\"\n    if isinstance(e, ToolInvocationError):\n        return e.message\n    raise e"
+        },
+        {
+          "file": "libs/prebuilt/langgraph/prebuilt/tool_node.py",
+          "lines": "956-966, 1001-1012",
+          "snippet": "try:\n    try:\n        response = tool.invoke(call_args, config)\n    except ValidationError as exc:\n        # Filter out errors for injected arguments\n        injected = self._injected_args.get(call[\"name\"])\n        filtered_errors = _filter_validation_errors(exc, injected)\n        # Use original call[\"args\"] without injected values for error reporting\n        raise ToolInvocationError(\n            call[\"name\"], exc, call[\"args\"], filtered_errors\n        ) from exc\n...\n    # Check if this error should be handled\n    if not self._handle_tool_errors or not isinstance(e, handled_types):\n        raise\n\n    # Error is handled - create error ToolMessage\n    content = _handle_tool_error(e, flag=self._handle_tool_errors)\n    return ToolMessage(\n        content=content,\n        name=call[\"name\"],\n        tool_call_id=call[\"id\"],\n        status=\"error\",\n    )"
+        }
+      ]
+    },
+    {
+      "name": "invalid tool name feedback",
+      "what_it_is": "Before execution, ToolNode checks the requested tool name against the registered tools. An unknown name yields an error ToolMessage listing the available tools.",
+      "function_in_system": "Sits in the tools node before invocation. Catches hallucinated tool names and tells the model which tools exist, so it can retry with a valid one. Otherwise the call fails with a lookup error and ends the run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/prebuilt/langgraph/prebuilt/tool_node.py",
+          "lines": "1268-1279",
+          "snippet": "def _validate_tool_call(self, call: ToolCall) -> ToolMessage | None:\n    requested_tool = call[\"name\"]\n    if requested_tool not in self.tools_by_name:\n        all_tool_names = list(self.tools_by_name.keys())\n        content = INVALID_TOOL_NAME_ERROR_TEMPLATE.format(\n            requested_tool=requested_tool,\n            available_tools=\", \".join(all_tool_names),\n        )\n        return ToolMessage(\n            content, name=requested_tool, tool_call_id=call[\"id\"], status=\"error\"\n        )\n    return None"
+        }
+      ]
+    },
+    {
+      "name": "remaining-steps graceful stop in ReAct agent",
+      "what_it_is": "Managed value RemainingSteps (= stop - step, derived from recursion_limit) is injected into the agent state. When fewer than 2 steps remain and the model still requests tool calls, call_model replaces the response with the fixed AIMessage 'Sorry, need more steps to process this request.', which ends the loop.",
+      "function_in_system": "Sits in the agent (LLM) node of create_react_agent, right after the model call. Converts an approaching step-budget exhaustion into a clean final answer. Otherwise the run crashes with GraphRecursionError and the caller gets no response.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/prebuilt/langgraph/prebuilt/chat_agent_executor.py",
+          "lines": "627-632",
+          "snippet": "remaining_steps = _get_state_value(state, \"remaining_steps\", None)\nif remaining_steps is not None:\n    if remaining_steps < 1 and all_tools_return_direct:\n        return True\n    elif remaining_steps < 2 and has_tool_calls:\n        return True"
+        },
+        {
+          "file": "libs/prebuilt/langgraph/prebuilt/chat_agent_executor.py",
+          "lines": "684-692",
+          "snippet": "if _are_more_steps_needed(state, response):\n    return {\n        \"messages\": [\n            AIMessage(\n                id=response.id,\n                content=\"Sorry, need more steps to process this request.\",\n            )\n        ]\n    }"
+        },
+        {
+          "file": "libs/langgraph/langgraph/managed/is_last_step.py",
+          "lines": "18-21",
+          "snippet": "class RemainingStepsManager(ManagedValue[int]):\n    @staticmethod\n    def get(scratchpad: PregelScratchpad) -> int:\n        return scratchpad.stop - scratchpad.step"
+        }
+      ]
+    },
+    {
+      "name": "tool call schema validation with re-prompt (ValidationNode)",
+      "what_it_is": "ValidationNode validates every tool call of the last AIMessage against a Pydantic schema without executing the tool. Failures return a ToolMessage with additional_kwargs is_error=True and the text 'Respond after fixing all validation errors.'; a conditional edge built by the user routes back to the model. Deprecated since v1.0.",
+      "function_in_system": "Sits as a separate node after the model in structured-output/extraction graphs. Forces the model to regenerate until its output conforms to the schema. Otherwise invalid structured output passes through to downstream consumers.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/prebuilt/langgraph/prebuilt/tool_validator.py",
+          "lines": "208-214",
+          "snippet": "except (ValidationError, ValidationErrorV1) as e:\n    return ToolMessage(\n        content=self._format_error(e, call, schema),\n        name=call[\"name\"],\n        tool_call_id=cast(str, call[\"id\"]),\n        additional_kwargs={\"is_error\": True},\n    )"
+        },
+        {
+          "file": "libs/prebuilt/langgraph/prebuilt/tool_validator.py",
+          "lines": "97-106",
+          "snippet": "def should_reprompt(state: list) -> Literal[\"model\", \"__end__\"]:\n    for msg in state[::-1]:\n        # None of the tool calls were errors\n        if msg.type == \"ai\":\n            return END\n        if msg.additional_kwargs.get(\"is_error\"):\n            return \"model\"\n    return END\n\nbuilder.add_conditional_edges(\"validation\", should_reprompt)"
+        }
+      ]
+    },
+    {
+      "name": "human-in-the-loop pause and resume (interrupt / breakpoints)",
+      "what_it_is": "Two forms: dynamic interrupt(value) inside a node raises GraphInterrupt, persists state and surfaces the value to the client, which resumes with Command(resume=...) and the node re-executes; static interrupt_before/interrupt_after on named nodes (e.g. 'tools' in create_react_agent) pause the graph around those nodes. The HumanInterrupt schema offers accept/edit/respond/ignore. Requires a checkpointer.",
+      "function_in_system": "Sits at node boundaries (static) or inside nodes (dynamic). Lets a human approve, edit or reject actions such as tool calls before they run. Otherwise the agent executes risky or wrong actions unchecked.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/langgraph/langgraph/types.py",
+          "lines": "818-824",
+          "snippet": "In a given node, the first invocation of this function raises a `GraphInterrupt`\nexception, halting execution. The provided `value` is included with the exception\nand sent to the client executing the graph.\n\nA client resuming the graph must use the [`Command`][langgraph.types.Command]\nprimitive to specify a value for the interrupt and continue execution.\nThe graph resumes from the start of the node, **re-executing** all logic."
+        },
+        {
+          "file": "libs/langgraph/langgraph/pregel/_algo.py",
+          "lines": "164-168",
+          "snippet": "# interrupt if any channel has been updated since last interrupt\nany_updates_since_prev_interrupt = any(\n    version > seen.get(chan, null_version)  # type: ignore[operator]\n    for chan, version in checkpoint[\"channel_versions\"].items()\n)"
+        },
+        {
+          "file": "libs/prebuilt/langgraph/prebuilt/chat_agent_executor.py",
+          "lines": "447-450",
+          "snippet": "interrupt_before: An optional list of node names to interrupt before.\n    Should be one of the following: `\"agent\"`, `\"tools\"`.\n\n    This is useful if you want to add a user confirmation or other interrupt before taking an action."
+        }
+      ]
+    },
+    {
+      "name": "SSE stream reconnect with Last-Event-ID resume",
+      "what_it_is": "When a streaming SSE response from LangGraph Server drops with an httpx.HTTPError and the server has sent a Location header, the SDK client reconnects via GET to that location and sends the last received event id as Last-Event-ID, so the server replays from that point. Up to 5 reconnect attempts, then TransportError('Exceeded maximum SSE reconnection attempts'). The Location is validated against the client base_url. Non-streaming run requests use the same pattern via request_reconnect (reconnect_limit=5). No backoff between attempts. Implemented identically in the async and sync clients.",
+      "function_in_system": "Sits in the client transport between caller (SDK user or RemoteGraph) and a run executing on LangGraph Server. Survives transient network disconnects during long agent runs without losing or duplicating stream events. Otherwise the client loses the output of a run that keeps executing server-side.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/sdk-py/langgraph_sdk/_async/http.py",
+          "lines": "211-214, 220-221, 264-269, 280-285",
+          "snippet": "last_event_id: str | None = None\nreconnect_path: str | None = None\nreconnect_attempts = 0\nmax_reconnect_attempts = 5\n...\n    if last_event_id is not None:\n        current_headers[\"Last-Event-ID\"] = last_event_id\n...\n    except httpx.HTTPError:\n        # httpx.TransportError inherits from HTTPError, so transient\n        # disconnects during streaming land here.\n        if reconnect_path is None:\n            raise\n        retry = True\n...\nif retry:\n    reconnect_attempts += 1\n    if reconnect_attempts > max_reconnect_attempts:\n        raise httpx.TransportError(\n            \"Exceeded maximum SSE reconnection attempts\"\n        )"
+        },
+        {
+          "file": "libs/sdk-py/langgraph_sdk/_async/http.py",
+          "lines": "167-185",
+          "snippet": "loc = r.headers.get(\"location\")\nif reconnect_limit <= 0 or not loc:\n    return await _adecode_json(r)\n_validate_reconnect_location(self.client.base_url, loc)\ntry:\n    return await _adecode_json(r)\nexcept httpx.HTTPError:\n    warnings.warn(\n        f\"Request failed, attempting reconnect to Location: {loc}\",\n        stacklevel=2,\n    )\n    await r.aclose()\n    return await self.request_reconnect(\n        loc,\n        \"GET\",\n        headers=request_headers,\n        # don't pass on_response so it's only called once\n        reconnect_limit=reconnect_limit - 1,\n    )"
+        }
+      ]
+    },
+    {
+      "name": "long-term memory store TTL with background sweeper",
+      "what_it_is": "TTLConfig on the BaseStore implementations (sqlite, postgres): default_ttl in minutes per item (or per put via ttl), refresh_on_read extends expiry on get/search, and sweep_interval_minutes starts a background thread that periodically deletes expired rows (default interval 5 minutes once started). Default: no expiry.",
+      "function_in_system": "Sits in the long-term memory store that agents read from and write to across threads. Bounds the growth of stored memories so stale items age out of retrieval results. Otherwise the store accumulates outdated memories indefinitely, which inflates storage and pollutes what the agent retrieves into its context.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/checkpoint/langgraph/store/base/__init__.py",
+          "lines": "555-556, 562-563",
+          "snippet": "default_ttl: float | None\n\"\"\"Default TTL (time-to-live) in minutes for new items.\n...\nsweep_interval_minutes: int | None\n\"\"\"Interval in minutes between TTL sweep operations."
+        },
+        {
+          "file": "libs/checkpoint-sqlite/langgraph/store/sqlite/base.py",
+          "lines": "1046, 1052-1058",
+          "snippet": "def sweep_ttl(self) -> int:\n...\n    with self._cursor() as cur:\n        cur.execute(\n            \"\"\"\n            DELETE FROM store\n            WHERE expires_at IS NOT NULL AND expires_at < CURRENT_TIMESTAMP\n            \"\"\"\n        )"
+        }
+      ]
+    },
+    {
+      "name": "cooperative drain at superstep boundary",
+      "what_it_is": "RunControl.request_drain(reason) sets a thread-safe flag. Before each superstep loop.tick() checks it, sets status 'draining' and exits the loop; the run then raises GraphDrained(reason). Per docstring the checkpoint is saved and the run can be resumed later. Every run receives a RunControl() by default and subgraphs inherit the parent's control; nothing inside libs/langgraph calls request_drain(), so the trigger comes from the caller or server (e.g. on SIGTERM).",
+      "function_in_system": "Sits at the superstep boundary in tick(). Lets a process shutdown stop the agent at a clean, checkpointed point between steps, so the run resumes later from there. Otherwise a shutdown kills the run mid-step and in-flight LLM and tool calls are lost and must be repeated.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "libs/langgraph/langgraph/runtime.py",
+          "lines": "95-100",
+          "snippet": "def request_drain(self, reason: str = \"shutdown\") -> None:\n    self._drain_reason = reason\n\n@property\ndef drain_requested(self) -> bool:\n    return self._drain_reason is not None"
+        },
+        {
+          "file": "libs/langgraph/langgraph/pregel/_loop.py",
+          "lines": "651-653",
+          "snippet": "if self.control is not None and self.control.drain_requested:\n    self.status = \"draining\"\n    return False"
+        },
+        {
+          "file": "libs/langgraph/langgraph/pregel/main.py",
+          "lines": "3027-3030",
+          "snippet": "elif loop.status == \"draining\":\n    if loop.control is None:\n        raise RuntimeError(\"Draining status requires run control\")\n    raise GraphDrained(loop.control.drain_reason or \"shutdown\")"
+        },
+        {
+          "file": "libs/langgraph/langgraph/errors.py",
+          "lines": "57-59",
+          "snippet": "This indicates the graph stopped cooperatively at a superstep boundary\nbecause `RunControl.request_drain()` was called (e.g., in response to\nSIGTERM). The checkpoint is saved and the run can be resumed later."
+        }
+      ]
+    }
+  ]
+}

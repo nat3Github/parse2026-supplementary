@@ -1,0 +1,1083 @@
+{
+  "repo": "ltjed/freephdlabor",
+  "commit": "b8a9ab1a54",
+  "system_type": "application",
+  "system_type_reason": "Runs out of the box as a fixed manager plus six research sub-agents that produce a paper; self-described framework, but the agent roster is hard-wired.",
+  "repo_overview": {
+    "summary": "Multi-agent framework on smolagents that automates the research lifecycle from idea to LaTeX paper. A ManagerAgent (CodeAgent) orchestrates six specialized sub-agents (ideation, experimentation, resource preparation, writeup, reviewer, proofreading), each with its own LLM loop, which coordinate through a shared per-run workspace directory under results/. Experiments are delegated to a vendored AI-Scientist-v2 tree-search pipeline run as a subprocess.",
+    "components": [
+      {
+        "path": "launch_multiagent.py",
+        "purpose": "entry point: redirects logs to files, registers Phoenix tracing, resolves model config (CLI > .llm_config.yaml > defaults), creates or resumes (--resume) a workspace, builds the agent system and runs manager.run(task)"
+      },
+      {
+        "path": "freephdlabor/agents/",
+        "purpose": "BaseResearchAgent (CodeAgent subclass), the ManagerAgent and six sub-agents (typocheck_agent.py exists but is not wired in utils.py); context_compaction.py holds context monitoring and compaction as a step callback"
+      },
+      {
+        "path": "freephdlabor/utils.py",
+        "purpose": "create_model, initialize_agent_system (sub-agents become managed_agents of the manager, each receives the interrupt step callback), save_agent_memory"
+      },
+      {
+        "path": "freephdlabor/llm.py, config.py, args.py",
+        "purpose": "LLM client helpers, .llm_config.yaml loading with a parameter filter wrapped around litellm.completion, CLI arguments"
+      },
+      {
+        "path": "freephdlabor/prompts/",
+        "purpose": "per-agent system prompts and instructions, research planning templates, workspace conventions"
+      },
+      {
+        "path": "freephdlabor/toolkits/",
+        "purpose": "agent tools: idea generation, novelty check, paper search, run_experiment_tool.py (subprocess wrapper around external_tools); writeup/ holds LaTeX, plotting and VLM review tools; general_tools/ holds web search, text browser, file editing, arXiv, KB/repo indexing, talk_to_user"
+      },
+      {
+        "path": "freephdlabor/interpreters/",
+        "purpose": "WorkspacePythonExecutor: executes agent-generated code inside the workspace directory with an import whitelist"
+      },
+      {
+        "path": "freephdlabor/interaction/",
+        "purpose": "socket-based interrupt channel and a step callback that injects user input into a running agent (human-in-the-loop)"
+      },
+      {
+        "path": "freephdlabor/logging/",
+        "purpose": "llm_logger.py: model wrapper that logs every LLM call"
+      },
+      {
+        "path": "freephdlabor/supervision/",
+        "purpose": "AgentSupervisionManager and validation strategies; imported nowhere outside its own package (dead code), therefore excluded from coding"
+      },
+      {
+        "path": "external_tools/run_experiment_tool/",
+        "purpose": "vendored AI-Scientist-v2 (best-first tree search over experiment code, plotting, writeup, LLM/VLM review); third-party code, coded only up to the subprocess boundary in run_experiment_tool.py"
+      },
+      {
+        "path": "freephdlabor/toolkits/ (unwired modules)",
+        "purpose": "experiment_toolkit, idea_generation_toolkit, check_idea_novelty_tool, paper_search_tool, all plotting and data-organizer tools in writeup/, kb_repo_management, text_inspector, text_web_browser, visual_qa, wolfram_tool and talk_to_user are never instantiated by any agent (dead code), therefore excluded from coding"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "freephdlabor/agents/base_research_agent.py",
+        "lines": "19, 117-122",
+        "snippet": "class BaseResearchAgent(CodeAgent):\n    ...\nsuper().__init__(\n    model=logged_model,\n    code_block_tags=\"markdown\",  # Use markdown format for better Gemini compatibility\n    planning_interval=planning_interval,  # Enable planning if specified\n    **kwargs\n)"
+      },
+      {
+        "file": "freephdlabor/agents/base_research_agent.py",
+        "lines": "131-135",
+        "snippet": "if hasattr(self, 'workspace_dir') and self.workspace_dir:\n    return WorkspacePythonExecutor(\n        workspace_dir=self.workspace_dir,\n        additional_authorized_imports=self.additional_authorized_imports\n    )"
+      },
+      {
+        "file": "launch_multiagent.py",
+        "lines": "209",
+        "snippet": "result = manager.run(task)"
+      },
+      {
+        "file": "freephdlabor/agents/context_compaction.py",
+        "lines": "321-326",
+        "snippet": "# Extract observations (often the most important for continuity)\nif hasattr(step, 'observations') and step.observations:\n    context['observations'].append({\n        'step': i,\n        'content': str(step.observations),\n        'length': len(str(step.observations))"
+      },
+      {
+        "file": "freephdlabor/prompts/manager_instructions.py",
+        "lines": "19-23",
+        "snippet": "**MANDATORY FEEDBACK ANALYSIS**: After EVERY agent completes a task, you MUST:\n1. **READ AND ANALYZE** their complete output thoroughly\n2. **IDENTIFY specific issues, scores, or failure indicators**  \n3. **MAKE INFORMED DECISIONS** about next steps based on the feedback\n4. **NEVER IGNORE** negative feedback or low scores"
+      },
+      {
+        "file": "freephdlabor/prompts/system_prompt_template.py",
+        "lines": "15",
+        "snippet": "In the end you have to return a final answer using the `final_answer` tool."
+      },
+      {
+        "file": "freephdlabor/agents/writeup_agent.py",
+        "lines": "148-149",
+        "snippet": "max_steps=150,  # Increased from default 20 to allow comprehensive paper writing\nfinal_answer_checks=[validate_success_criteria],  # CRITICAL: Enable quality gate validation"
+      },
+      {
+        "file": "freephdlabor/prompts/manager_instructions.py",
+        "lines": "80-84",
+        "snippet": "**TERMINATION CRITERIA** (ALL must be satisfied):\n- ✅ **ReviewerAgent score ≥ 6** (Accept threshold)\n- ✅ **WriteupAgent reports successful PDF generation** \n- ✅ **All experimental data properly analyzed and presented**\n- ✅ **No critical issues remain unaddressed**"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "Every agent is a BaseResearchAgent subclassing smolagents CodeAgent (base_research_agent.py:19, 117-122); each step is a Python code action written by the model and executed by WorkspacePythonExecutor (base_research_agent.py:131-135), started with manager.run(task) (launch_multiagent.py:209).",
+      "consumes_feedback": "Tool and code results are stored as observations in each ActionStep and fed into the next model call; context_compaction.py:321-326 treats them as the most important content for continuity, and the manager prompt requires reading and analyzing every sub-agent output before the next delegation (manager_instructions.py:19-23).",
+      "multi_turn_until_termination": "The loop runs until the model calls final_answer (system_prompt_template.py:15) or max_steps is reached (e.g. max_steps=150, writeup_agent.py:148); final_answer_checks gate the WriteupAgent's answer (writeup_agent.py:149), and the manager prompt defines termination criteria including a reviewer score of at least 6 (manager_instructions.py:80-84)."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent",
+    "evidence": [
+      {
+        "file": "freephdlabor/utils.py",
+        "lines": "315-323",
+        "snippet": "managed_agents = [ideation_agent, experimentation_agent, resource_preparation_agent, writeup_agent, reviewer_agent, proofreading_agent]\nmanager = ManagerAgent(\n    model=model,\n    interpreter=workspace_interpreter,\n    workspace_dir=workspace_dir,\n    managed_agents=managed_agents,\n    additional_authorized_imports=essential_imports,\n    step_callbacks=[interrupt_callback],\n)"
+      },
+      {
+        "file": "freephdlabor/utils.py",
+        "lines": "240-248",
+        "snippet": "ideation_agent = IdeationAgent(\n    model=model,\n    workspace_dir=workspace_dir,\n    name=\"ideation_agent\",\n    description=\"A specialist agent for generating, refining, and evaluating research ideas.\",\n    additional_authorized_imports=essential_imports,\n    step_callbacks=[interrupt_callback],\n    **planning_config\n)"
+      },
+      {
+        "file": "freephdlabor/agents/manager_agent.py",
+        "lines": "168-175",
+        "snippet": "super().__init__(\n    model=model,  # Pass original model, BaseResearchAgent will handle logging\n    agent_name=\"manager_agent\",\n    workspace_dir=workspace_dir,\n    tools=tools,\n    managed_agents=self.managed_agents,\n    **kwargs\n)"
+      },
+      {
+        "file": "freephdlabor/prompts/manager_instructions.py",
+        "lines": "74-78",
+        "snippet": "**ADAPTIVE DELEGATION**: You have flexibility in research workflow management:\n- **RECOMMENDED LINEAR WORKFLOW**: Ideation → Experimentation → ResourcePreparation → Writeup → Review\n- **CRITICAL**: ResourcePreparationAgent MUST be called AFTER ExperimentationAgent and BEFORE WriteupAgent\n- **MANDATORY QUALITY GATES**: Each stage must meet minimum standards before proceeding\n- **ITERATIVE REFINEMENT**: Call agents multiple times until quality gates are met"
+      }
+    ],
+    "justification": "The ManagerAgent is a CodeAgent that receives six sub-agents as managed_agents: ideation, experimentation, resource_preparation, writeup, reviewer and proofreading (utils.py:315-323, manager_agent.py:168-175). Each sub-agent is itself a BaseResearchAgent/CodeAgent with its own name, description, system prompt, tools, step callbacks and step/max_steps loop (utils.py:240-248). smolagents exposes them to the manager as callable units, and a delegated helper with its own LLM loop counts as an agent. The manager delegates by role and calls agents repeatedly until quality gates are met (manager_instructions.py:74-78), and the agents coordinate through the shared workspace. typocheck_agent.py is excluded because utils.py never wires it in.",
+    "verdict_raw": "multi-agent",
+    "subtype": "supervisor"
+  },
+  "resilience": [
+    {
+      "name": "automatic token-threshold context compaction",
+      "what_it_is": "A ContextMonitoringCallback is appended to the step_callbacks of every BaseResearchAgent. After each ActionStep it estimates the context size (characters / 4, plus 500 characters per tool, plus 3500 tokens constant overhead) and compares it against 75% of the model context limit. When the estimate exceeds the threshold, agent.memory.steps is replaced by one synthetic ActionStep holding a rule-based summary (tool call counts, top 5 observations truncated to 200 chars, last 2 reasoning outputs, last 3 errors, last 3 outputs) plus up to 3 recent steps with content. The summary is built without an LLM call.",
+      "function_in_system": "Runs as a step callback after every action step of the manager and all six sub-agents, so it bounds the prompt each agent sends on its next model call. Guards long research runs against context window overflow and ever-growing per-call cost. Otherwise a long agent run hits the provider context limit and the call fails, or the cost per step keeps rising with the history.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/agents/base_research_agent.py",
+          "lines": "64, 70-76",
+          "snippet": "enable_auto_compaction = kwargs.pop('enable_auto_compaction', True)  # Default enabled\nif enable_auto_compaction:\n    context_callback = ContextMonitoringCallback(\n        model=model,  # Use original model for compaction and context limit detection\n        token_threshold=token_threshold,  # Auto-calculated if None\n        keep_recent_steps=keep_recent_steps,\n        safety_margin=safety_margin\n    )"
+        },
+        {
+          "file": "freephdlabor/agents/context_compaction.py",
+          "lines": "185-186",
+          "snippet": "context_limit = get_model_context_limit(model)\nsafe_threshold = int(context_limit * safety_margin)"
+        },
+        {
+          "file": "freephdlabor/agents/context_compaction.py",
+          "lines": "264-266",
+          "snippet": "if current_tokens > self.max_tokens:\n    print(f\"🔄 CRITICAL: Token limit exceeded ({current_tokens:,} > {self.max_tokens:,})\")\n    return True"
+        },
+        {
+          "file": "freephdlabor/agents/context_compaction.py",
+          "lines": "647-655",
+          "snippet": "compacted_step = ActionStep(\n    step_number=0,\n    timing=Timing(start_time=time.time(), end_time=time.time()),\n    model_output=summary,  # Use model_output so it appears in to_messages()\n    is_final_answer=False\n)\n\n# Rebuild memory\nself.agent.memory.steps = [compacted_step] + steps_to_preserve"
+        },
+        {
+          "file": "freephdlabor/agents/context_compaction.py",
+          "lines": "745-746",
+          "snippet": "if self.compactor.should_compact(current_tokens):\n    self.compactor.perform_compaction(current_tokens)"
+        },
+        {
+          "file": "freephdlabor/agents/context_compaction.py",
+          "lines": "798, 802-804",
+          "snippet": "estimated_tokens = total_chars // 4\nconstant_overhead = 3500\n\nreturn estimated_tokens + constant_overhead"
+        }
+      ]
+    },
+    {
+      "name": "external conversation backup before lossy compaction",
+      "what_it_is": "Every ActionStep is serialized and appended to workspace/memory_backup/full_conversation_backup.jsonl right after it completes. Before each compaction, all ActionSteps about to be compacted are additionally written to compaction_N_backup.json. Reader functions exist (load_full_conversation, get_compaction_backups) and are called nowhere in the codebase.",
+      "function_in_system": "Complements the compaction callback: the in-context summary is lossy, and the full history is kept on disk outside the context window. The agent itself never reads these files back, so in practice the backup serves as an audit trail for humans. Otherwise the details discarded by compaction would be lost for good.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/agents/context_compaction.py",
+          "lines": "391-392",
+          "snippet": "with open(self.backup_file, 'a', encoding='utf-8') as f:\n    f.write(json.dumps(backup_entry, default=str) + '\\n')"
+        },
+        {
+          "file": "freephdlabor/agents/context_compaction.py",
+          "lines": "423-425",
+          "snippet": "compaction_file = os.path.join(self.storage_dir, f'compaction_{self.compaction_count + 1}_backup.json')\nwith open(compaction_file, 'w', encoding='utf-8') as f:\n    json.dump(compaction_backup, f, indent=2, default=str)"
+        },
+        {
+          "file": "freephdlabor/agents/context_compaction.py",
+          "lines": "616-618",
+          "snippet": "if action_steps_to_compact:\n    print(f\"   💾 Backing up {len(action_steps_to_compact)} ActionSteps before compaction...\")\n    self.backup_memory_before_compaction(action_steps_to_compact)"
+        },
+        {
+          "file": "freephdlabor/agents/context_compaction.py",
+          "lines": "733-734",
+          "snippet": "try:\n    self.compactor.backup_action_step(memory_step, self.compactor.step_count)"
+        }
+      ]
+    },
+    {
+      "name": "workspace and agent-memory resume of a previous run",
+      "what_it_is": "launch_multiagent.py --resume <dir> reuses an existing workspace directory; without --task the manager receives a continuation task telling it to analyze the existing files and progress the research. Every agent calls resume_memory() in its constructor, which rebuilds its smolagents AgentMemory (system prompt, task, planning, action and final-answer steps) from <agent>/<agent>_memory.jsonl if that file exists. Memory files are written by save_agent_memory only after manager.run() returns successfully.",
+      "function_in_system": "Sits at system start, before the manager loop begins. Lets an interrupted or finished multi-hour research run continue with the ideas, experiment results and drafts already in the workspace. After a crash the memory files are missing, so continuation then relies on the workspace files plus the continuation task. Otherwise every interruption forces a full restart, repeating all LLM and experiment cost.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "launch_multiagent.py",
+          "lines": "125-127, 141-145",
+          "snippet": "if args.resume:\n    # Resume from existing workspace\n    results_base_dir = os.path.abspath(args.resume)\n    if args.task:\n        task = args.task\n        print(f\"📋 Using task from --task argument\")\n    else:\n        task = \"Continue working on the a previous research task. Please meticulously analyze the existing files to and then plan how to call the relevant agents to further progress the research task and deliverable better research outputs.\""
+        },
+        {
+          "file": "freephdlabor/agents/base_research_agent.py",
+          "lines": "200-202",
+          "snippet": "memory_path = os.path.join(self.workspace_dir, self.back_up_agent_name, f\"{self.back_up_agent_name}_memory.jsonl\")\nif not os.path.isfile(memory_path):\n    return  # Memory file doesn't exist; skip loading"
+        },
+        {
+          "file": "freephdlabor/agents/base_research_agent.py",
+          "lines": "319-327",
+          "snippet": "new_memory = AgentMemory(\n    system_prompt=system_prompt_str if system_prompt_str is not None else current_system_prompt\n)\n\n# Add all loaded steps to the new memory\nnew_memory.steps = steps_to_load\n\n# Replace the agent's current memory with the reconstructed memory\nself.memory = new_memory"
+        },
+        {
+          "file": "freephdlabor/agents/manager_agent.py",
+          "lines": "184",
+          "snippet": "self.resume_memory()"
+        },
+        {
+          "file": "launch_multiagent.py",
+          "lines": "209, 215-217",
+          "snippet": "result = manager.run(task)\nprint(\"Saving Agents Memory...\")\nfrom freephdlabor.utils import save_agent_memory\nsave_agent_memory(manager)"
+        }
+      ]
+    },
+    {
+      "name": "periodic progress review and replanning",
+      "what_it_is": "With --enable-planning, every agent gets planning_interval=3 (configurable), so the smolagents planning step runs every 3 action steps. Custom research planning templates ask the model to list completed objectives, partial progress, obstacles encountered and new information, then write a revised plan that addresses identified obstacles within the remaining step budget.",
+      "function_in_system": "Inserted by the framework into the action loop of each agent at a fixed interval. Targets drift and getting stuck on obstacles during long multi-step research tasks by forcing a periodic explicit self-assessment. Its effect depends on the model following the template. Otherwise an agent keeps executing an outdated initial plan after an obstacle.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "freephdlabor/args.py",
+          "lines": "76-80",
+          "snippet": "parser.add_argument(\n    \"--enable-planning\",\n    action=\"store_true\",\n    help=\"Enable planning feature for research agents (creates systematic step-by-step plans)\"\n)"
+        },
+        {
+          "file": "freephdlabor/utils.py",
+          "lines": "234-235",
+          "snippet": "if enable_planning:\n    planning_config = {\"planning_interval\": planning_interval}"
+        },
+        {
+          "file": "freephdlabor/agents/base_research_agent.py",
+          "lines": "83-84",
+          "snippet": "if planning_interval is not None:\n    planning_templates = get_research_planning_templates()"
+        },
+        {
+          "file": "freephdlabor/prompts/research_planning_templates.py",
+          "lines": "81-82, 89-93",
+          "snippet": "### 1.3. Obstacles Encountered\nIdentify any technical, methodological, or resource constraints discovered.\nCreate a revised plan that:\n- Builds on completed work\n- Addresses identified obstacles\n- Incorporates new requirements\n- Optimizes remaining steps ({remaining_steps} steps remaining)"
+        }
+      ]
+    },
+    {
+      "name": "quota-aware retry with exponential backoff on agent model calls",
+      "what_it_is": "LoggingLiteLLMModel.generate wraps every agent LLM call in a retry loop: up to 5 retries with delay 9s * 2^attempt (9, 18, 36, 72, 144 s), triggered only when the exception text contains '429', 'RateLimitError', 'RESOURCE_EXHAUSTED' or 'quota'. Any other exception, or the final failed attempt, is re-raised immediately.",
+      "function_in_system": "Sits around model.generate() of the manager and all sub-agents, since BaseResearchAgent wraps every model with this logger when a workspace is set. Tools receive the raw unwrapped model (get_raw_model, 'Tools get raw model for efficiency'), so the retry covers the agents' own decision calls only. Absorbs provider rate-limit and quota errors that long multi-agent research runs predictably hit. Otherwise a single 429 aborts the agent step and can propagate up to crash the whole run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/logging/llm_logger.py",
+          "lines": "76-77",
+          "snippet": "max_retries = 5  # Balanced retry coverage without excessive delays\nbase_delay = 9  # seconds, as suggested by Gemini API"
+        },
+        {
+          "file": "freephdlabor/logging/llm_logger.py",
+          "lines": "104-109",
+          "snippet": "is_quota_error = (\n    \"429\" in str(e) or \n    \"RateLimitError\" in str(e) or\n    \"RESOURCE_EXHAUSTED\" in str(e) or\n    \"quota\" in str(e).lower()\n)"
+        },
+        {
+          "file": "freephdlabor/logging/llm_logger.py",
+          "lines": "115-117, 131-132",
+          "snippet": "if is_quota_error and attempt < max_retries:\n    # Calculate exponential backoff delay\n    delay = base_delay * (2 ** attempt)\n    time.sleep(delay)\n    continue"
+        },
+        {
+          "file": "freephdlabor/agents/base_research_agent.py",
+          "lines": "53-59",
+          "snippet": "if workspace_dir:\n    logged_model = create_agent_logging_model(\n        base_model=model,\n        agent_type=self.__class__.__name__,\n        agent_name=self.agent_name,\n        workspace_dir=workspace_dir\n    )"
+        }
+      ]
+    },
+    {
+      "name": "unbounded backoff retry in VLM helper",
+      "what_it_is": "get_response_from_vlm (and the unused text-LLM helpers in the same file) is decorated with backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError)) with no max_tries, so rate-limit and timeout errors are retried with exponential backoff indefinitely. Its only caller is VLMDocumentAnalysisTool in the writeup toolkit.",
+      "function_in_system": "Sits around the direct OpenAI vision call used by the tool that analyzes plots and PDF pages during writeup. Absorbs transient rate-limit and timeout failures of the vision API inside a tool call. Otherwise the tool call fails and the writeup agent loses the figure analysis for that step.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/llm.py",
+          "lines": "323-324",
+          "snippet": "@backoff.on_exception(backoff.expo, (openai.RateLimitError, openai.APITimeoutError))\ndef get_response_from_vlm("
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/vlm_document_analysis_tool.py",
+          "lines": "187",
+          "snippet": "response, _ = get_response_from_vlm("
+        }
+      ]
+    },
+    {
+      "name": "socket-based human interrupt and instruction injection",
+      "what_it_is": "At startup a TCP server is always started (default 127.0.0.1:5001, usable via nc) that pushes received lines into a queue. Every agent (manager and all six sub-agents) gets a step callback that polls the queue without blocking after each step. On 'interrupt', 'stop' or 'pause' the agent pauses, reads a multi-line instruction, asks whether it is a modification (m) or a new task (n), and appends it to the agent memory as a UserInstructionStep ('Additional instruction from the user: ...') or as a new TaskStep before resuming.",
+      "function_in_system": "Hooks into the step boundary of every agent loop, so a human can halt any agent mid-run and redirect it while keeping all accumulated state. The README advertises it as real-time human-in-the-loop intervention. Otherwise a run heading in the wrong direction can only be killed and restarted from scratch.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "launch_multiagent.py",
+          "lines": "67, 72",
+          "snippet": "input_queue = setup_user_input_socket(args.callback_host, args.callback_port)\ninterrupt_callback = make_user_input_step_callback(input_queue=input_queue)"
+        },
+        {
+          "file": "freephdlabor/interaction/callback_tools.py",
+          "lines": "79",
+          "snippet": "interrupt_set = set((interrupt_signals or [\"interrupt\", \"stop\", \"pause\"]))"
+        },
+        {
+          "file": "freephdlabor/interaction/callback_tools.py",
+          "lines": "114-117",
+          "snippet": "if not paused:\n    cmd = _try_get_nowait(input_queue)\n    if cmd and cmd.strip().lower() in (s.lower() for s in interrupt_set):\n        paused = True"
+        },
+        {
+          "file": "freephdlabor/interaction/callback_tools.py",
+          "lines": "140-148",
+          "snippet": "if choice == \"m\":\n    # Create and append a UserInstructionStep for modification\n    new_step = UserInstructionStep(user_instruction=instruction)\n    agent.memory.steps.append(new_step)\n    print(\"\\n✅ User modification appended to memory.\")\nelse: # choice == \"n\"\n    # Create and append a standard TaskStep for a new task\n    new_step = TaskStep(task=instruction)\n    agent.memory.steps.append(new_step)"
+        },
+        {
+          "file": "freephdlabor/interaction/user_inststep.py",
+          "lines": "15",
+          "snippet": "content = [{\"type\": \"text\", \"text\": f\"Additional instruction from the user:\\n{self.user_instruction}\"}]"
+        },
+        {
+          "file": "freephdlabor/utils.py",
+          "lines": "246",
+          "snippet": "step_callbacks=[interrupt_callback],"
+        }
+      ]
+    },
+    {
+      "name": "workspace-bound code execution with import allowlist",
+      "what_it_is": "Agent-generated Python code runs in WorkspacePythonExecutor, a LocalPythonExecutor subclass that os.chdir()s into the workspace directory before each execution and restores the original directory in a finally block. Imports are restricted to the essential_imports allowlist (stdlib, config libs, HF datasets/transformers, wandb, tqdm, archives), which smolagents' LocalPythonExecutor enforces. The chdir provides path scoping only and leaves absolute paths reachable.",
+      "function_in_system": "Wraps every code action of the manager and sub-agents. Keeps all agents writing into the shared per-run workspace they coordinate through, and the allowlist blocks unapproved modules so heavy ML work is routed through RunExperimentTool ('tool-centric agents (no direct ML library access)'). Otherwise agents scatter files relative to the launch directory and can run arbitrary libraries directly in the orchestrator process.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "launch_multiagent.py",
+          "lines": "170, 187-190",
+          "snippet": "# Essential imports for tool-centric agents (no direct ML library access)\nworkspace_executor = WorkspacePythonExecutor(\n    workspace_dir=results_base_dir,\n    additional_authorized_imports=essential_imports\n)"
+        },
+        {
+          "file": "freephdlabor/interpreters/workspace_executor.py",
+          "lines": "75, 78, 94-96",
+          "snippet": "os.chdir(self.workspace_dir)\nresult = super().__call__(code_action)\nfinally:\n    # Always restore original directory\n    os.chdir(original_dir)"
+        },
+        {
+          "file": "freephdlabor/agents/base_research_agent.py",
+          "lines": "131-135",
+          "snippet": "if hasattr(self, 'workspace_dir') and self.workspace_dir:\n    return WorkspacePythonExecutor(\n        workspace_dir=self.workspace_dir,\n        additional_authorized_imports=self.additional_authorized_imports\n    )"
+        }
+      ]
+    },
+    {
+      "name": "success-criteria gate before writeup agent termination",
+      "what_it_is": "The WriteupAgent registers validate_success_criteria as a smolagents final_answer_check. Before any final answer is accepted it checks in order: final_paper.tex exists, final_paper.pdf exists, a VLM validation of the PDF reports no error and publication_ready, and LaTeXContentVerificationTool reports all_criteria_met (required sections, >15000 content chars, at least 3 figures, citations, references.bib). Any failure raises ValueError('TERMINATION_BLOCKED: ...') carrying a concrete list of issues. The agent step budget is raised to max_steps=150 to leave room for the resulting rework. The VLM step is defective: for a PDF with analysis_focus 'pdf_validation' the tool routes to _analyze_pdf_comprehensively, whose result carries no overall_assessment key, so publication_ready always evaluates to False and the gate raises TERMINATION_BLOCKED on every attempt. The writeup agent therefore ends only through its max_steps limit.",
+      "function_in_system": "Sits at the termination point of the writeup agent loop, between the agent proposing final_answer and the answer being returned to the manager. Catches premature or false success claims: missing, corrupted or incomplete papers. The raised error is fed back so the agent keeps working on the listed issues. Otherwise the writeup agent can report completion to the manager without a valid, complete PDF.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/agents/writeup_agent.py",
+          "lines": "136-138",
+          "snippet": "def validate_success_criteria(final_answer, memory):\n    \"\"\"Validate success criteria before allowing termination.\"\"\"\n    return self._validate_writeup_success_criteria(final_answer, memory)"
+        },
+        {
+          "file": "freephdlabor/agents/writeup_agent.py",
+          "lines": "148-149",
+          "snippet": "max_steps=150,  # Increased from default 20 to allow comprehensive paper writing\nfinal_answer_checks=[validate_success_criteria],  # CRITICAL: Enable quality gate validation"
+        },
+        {
+          "file": "freephdlabor/agents/writeup_agent.py",
+          "lines": "170-171",
+          "snippet": "This method blocks termination if success criteria aren't met by raising\nan exception with detailed feedback to help the agent continue working."
+        },
+        {
+          "file": "freephdlabor/agents/writeup_agent.py",
+          "lines": "183-184, 191",
+          "snippet": "if not os.path.exists(tex_path):\n    print(\"❌ TERMINATION BLOCKED: final_paper.tex does not exist\")\n    raise ValueError(\"TERMINATION_BLOCKED: Missing final_paper.tex. Please create the complete LaTeX document first.\")"
+        },
+        {
+          "file": "freephdlabor/agents/writeup_agent.py",
+          "lines": "194, 202",
+          "snippet": "if not os.path.exists(pdf_path):\n    raise ValueError(\"TERMINATION_BLOCKED: Missing final_paper.pdf. LaTeX compilation failed. The task cannot be completed without a valid PDF.\")"
+        },
+        {
+          "file": "freephdlabor/agents/writeup_agent.py",
+          "lines": "211-215, 233",
+          "snippet": "vlm_tool = VLMDocumentAnalysisTool(model=self.model, working_dir=self.workspace_dir)\nvalidation_result_str = vlm_tool.forward(\n    file_paths=\"final_paper.pdf\",\n    analysis_focus=\"pdf_validation\"\n)\nif not overall_assessment.get(\"publication_ready\", False):"
+        },
+        {
+          "file": "freephdlabor/agents/writeup_agent.py",
+          "lines": "298-301",
+          "snippet": "all_criteria_met = verification_result.get(\"overall_assessment\", {}).get(\"all_criteria_met\", False)\n\nif all_criteria_met:\n    print(\"✅ SUCCESS CRITERIA VERIFIED - Termination allowed\")"
+        },
+        {
+          "file": "freephdlabor/agents/writeup_agent.py",
+          "lines": "366-367",
+          "snippet": "# Raise exception to prevent termination and force agent to continue\nraise ValueError(feedback_message)"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/vlm_document_analysis_tool.py",
+          "lines": "157-160",
+          "snippet": "if pdf_files:\n    if analysis_focus == \"pdf_validation\":\n        # Use PDF validation pipeline for LaTeX compilation checking\n        return self._analyze_pdf_comprehensively(pdf_files[0])"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/vlm_document_analysis_tool.py",
+          "lines": "255-264",
+          "snippet": "return json.dumps({\n    \"status\": \"success\",\n    \"analysis_type\": \"comprehensive_pdf_analysis\",\n    \"original_text_length\": len(extracted_data[\"text\"]),\n    \"images_analyzed\": len(image_analyses),\n    \"publication_issues\": publication_issues,\n    \"reconstructed_text\": final_text,\n    \"image_analyses\": image_analyses,\n    \"pdf_path\": safe_pdf_path\n}, indent=2)"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_content_verification_tool.py",
+          "lines": "441-470",
+          "snippet": "# Content length criteria\ncriteria[\"sufficient_content\"] = section_analysis[\"meets_length_requirement\"]\n\n# Section completeness\nrequired_sections = [\"abstract\", \"introduction\", \"methodology\", \"results\"]\ncriteria[\"required_sections_complete\"] = all(\n    section_analysis.get(section, {}).get(\"found\", False) \n    for section in required_sections\n)\n\n# Content quality\ncriteria[\"adequate_quality\"] = content_quality[\"overall_quality_score\"] >= 0.6\n\n# Bibliography validation\ncriteria[\"valid_bibliography\"] = content_quality.get(\"bib_file_valid\", False)\n\n# Figure quantity and quality requirements\ncriteria[\"sufficient_figures\"] = content_quality.get(\"figure_count\", 0) >= 3\n\n# Check for placeholder title\ncriteria[\"has_proper_title\"] = (\n    content_quality.get(\"has_title\", False) and \n    not content_quality.get(\"has_placeholder_title\", False)\n)\n\n# NEW: Citation coordination validation - CRITICAL for preventing [?] citations\ncriteria[\"citation_coordination_valid\"] = content_quality.get(\"citation_coordination_valid\", False)\n\n# Overall assessment\nall_criteria_met = all(criteria.values())"
+        }
+      ]
+    },
+    {
+      "name": "reviewer-score quality gate with issue-type routing",
+      "what_it_is": "A separate ReviewerAgent scores the paper. The manager system prompt forbids termination below a reviewer score of 6 and prescribes a decision matrix: presentation issues go back to WriteupAgent, experimental issues to ExperimentationAgent, conceptual issues to IdeationAgent, followed by a re-review. It also obliges the manager to analyze every sub-agent output against listed success and failure indicators before proceeding.",
+      "function_in_system": "Implements a cross-agent critic loop at the orchestration level: an independent agent evaluates the final artifact and the manager routes the failure to the pipeline stage that caused it. Targets premature termination with a weak or flawed paper, a failure the prompt names explicitly ('Issue 8 failure pattern'). Its effect depends on the manager model following the prompt. Otherwise the manager declares the task complete regardless of review outcome.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "freephdlabor/prompts/reviewer_instructions.py",
+          "lines": "16-20",
+          "snippet": "1. **VLMDocumentAnalysisTool** - AI-powered document and figure analysis\n   - Uses GPT-4V to analyze scientific figures, plots, and PDF documents\n   - **MANDATORY**: Must be used before giving your review\n   - Use when you need to analyze paper quality\n   - **MANDATORY**: Use 'analysis_focus='pdf_validation' option because you need to analyze PDF documents"
+        },
+        {
+          "file": "freephdlabor/prompts/manager_instructions.py",
+          "lines": "19-24",
+          "snippet": "**MANDATORY FEEDBACK ANALYSIS**: After EVERY agent completes a task, you MUST:\n1. **READ AND ANALYZE** their complete output thoroughly\n2. **IDENTIFY specific issues, scores, or failure indicators**  \n3. **MAKE INFORMED DECISIONS** about next steps based on the feedback\n4. **NEVER IGNORE** negative feedback or low scores"
+        },
+        {
+          "file": "freephdlabor/prompts/manager_instructions.py",
+          "lines": "29-35",
+          "snippet": "**SCORE 1-2 (Strong Reject/Reject)**: \n- **IMMEDIATE ACTION REQUIRED**: Paper has fundamental flaws\n- **Decision Process**:\n  - If issues are presentation/writing problems (missing citations, figure errors, formatting): → **Return to WriteupAgent** with specific fix instructions\n  - If issues are experimental problems (invalid results, methodology flaws): → **Return to ExperimentationAgent** to redo experiments  \n  - If issues are conceptual problems (fundamentally flawed idea): → **Return to IdeationAgent** for new/refined idea\n- **NEVER terminate** with scores 1-2 - this violates research quality standards"
+        },
+        {
+          "file": "freephdlabor/prompts/manager_instructions.py",
+          "lines": "80-84",
+          "snippet": "**TERMINATION CRITERIA** (ALL must be satisfied):\n- ✅ **ReviewerAgent score ≥ 6** (Accept threshold)\n- ✅ **WriteupAgent reports successful PDF generation** \n- ✅ **All experimental data properly analyzed and presented**\n- ✅ **No critical issues remain unaddressed**"
+        },
+        {
+          "file": "freephdlabor/prompts/manager_instructions.py",
+          "lines": "88-91",
+          "snippet": "**❌ WRONG APPROACH** (Issue 8 failure pattern):\n```\nReviewerAgent: \"Overall Score: 3 (Reject) - missing citations, incorrect figures\"\nManagerAgent: [IGNORES FEEDBACK] \"Task complete!\" [TERMINATES]"
+        },
+        {
+          "file": "freephdlabor/prompts/manager_instructions.py",
+          "lines": "107",
+          "snippet": "- **NEVER terminate with ReviewerAgent score < 6**"
+        }
+      ]
+    },
+    {
+      "name": "prompt-level iteration caps with stagnation-based escalation",
+      "what_it_is": "The manager prompt caps delegation at 3 calls per agent and 12 agent calls per project, tracked only as a 'mental count' by the model. It defines escalation when caps are hit (writeup failing 3 times with the same issues goes back to experimentation, experimentation failing 3 times goes back to ideation, all agents at the limit means terminating with the best result and an explanation of remaining issues) and stagnation indicators (scores flat after 2 iterations, recurring issues, agents unable to resolve core problems).",
+      "function_in_system": "Bounds the reviewer-driven revision loop at the orchestration level. Guards against endless writer/reviewer ping-pong and the cost and runtime it causes. The limit relies entirely on the model counting correctly. Otherwise the quality gate can keep the run cycling indefinitely.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "freephdlabor/prompts/manager_instructions.py",
+          "lines": "120-123",
+          "snippet": "**MAXIMUM ITERATION LIMITS** (Prevent endless cycles):\n- **Per Agent**: Maximum 3 iterations per agent per workflow\n- **Total Workflow**: Maximum 12 total agent calls per research project\n- **Quality vs. Efficiency**: Balance quality improvement with practical constraints"
+        },
+        {
+          "file": "freephdlabor/prompts/manager_instructions.py",
+          "lines": "130-133",
+          "snippet": "**ESCALATION STRATEGY** (When hitting limits):\n1. **If WriteupAgent hits 3 iterations with same issues**: Consider if experiments are fundamentally flawed → ExperimentationAgent\n2. **If ExperimentationAgent hits 3 iterations**: Consider if idea is infeasible → IdeationAgent  \n3. **If all agents hit limits**: Terminate with best available result and detailed explanation of remaining issues"
+        },
+        {
+          "file": "freephdlabor/prompts/manager_instructions.py",
+          "lines": "140-143",
+          "snippet": "**STAGNATION INDICATORS** (Consider termination if seeing):\n- ❌ ReviewerAgent scores not improving after 2 iterations\n- ❌ Same issues recurring despite agent claims of fixes\n- ❌ Agents reporting inability to resolve core problems"
+        }
+      ]
+    },
+    {
+      "name": "role-specific step budgets for sub-agents",
+      "what_it_is": "Sub-agents receive explicit smolagents max_steps values chosen per role: WriteupAgent max_steps=150 ('Increased from default 20'), ResourcePreparationAgent max_steps=50. All other agents keep the framework default of 20.",
+      "function_in_system": "Caps the number of LLM steps a single delegation to a sub-agent can consume, which bounds the cost and runtime per sub-agent call while granting the heavier roles more room. Otherwise a sub-agent stuck on a task keeps stepping until its context or the provider budget runs out.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/agents/writeup_agent.py",
+          "lines": "148",
+          "snippet": "max_steps=150,  # Increased from default 20 to allow comprehensive paper writing"
+        },
+        {
+          "file": "freephdlabor/agents/resource_preparation_agent.py",
+          "lines": "70",
+          "snippet": "max_steps=50,"
+        }
+      ]
+    },
+    {
+      "name": "persistent idea and experiment history in workspace files",
+      "what_it_is": "The manager prompt instructs it to overwrite working_idea.json only with a satisfactory idea and to append the current idea, an experiment results summary and a timestamp to past_ideas_and_results.md after every experiment.",
+      "function_in_system": "Externalizes the research history into shared workspace files that outlive the context window, so it survives context compaction and --resume and lets the manager avoid re-testing failed ideas. Enforced only through the prompt. Otherwise knowledge about earlier ideas and their outcomes is lost once it leaves the manager's context.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "freephdlabor/prompts/manager_instructions.py",
+          "lines": "158-167",
+          "snippet": "KEY FILE MAINTENANCE:\n1. **working_idea.json** - Current research idea\n   - When IdeationAgent returns satisfactory idea → CREATE/OVERWRITE this file\n   - If idea not satisfactory → provide feedback to IdeationAgent, don't update file\n\n2. **past_ideas_and_results.md** - History of experiments\n   - When ExperimentationAgent reports results → APPEND:\n     * Current working_idea.json content\n     * Experiment results summary\n     * Timestamp"
+        }
+      ]
+    },
+    {
+      "name": "feasibility checklist for generated research ideas",
+      "what_it_is": "The IdeationAgent prompt obliges the agent to validate every idea against the constraints of the RunExperimentTool pipeline before finalizing it: a single model across all 4 stages, each run under 1 hour on one H100 GPU, models up to 200M parameters, training subsets up to 10K samples, HuggingFace datasets only, automated metrics only, architecture frozen after Stage 1. A checklist of these items closes the instructions.",
+      "function_in_system": "Sits at the hand-off from ideation to experimentation and filters ideas the downstream experiment pipeline cannot execute. Its effect depends on the model applying the checklist. Otherwise an infeasible idea only fails after a multi-hour tree-search experiment run, wasting GPU time and LLM cost.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "freephdlabor/prompts/ideation_instructions.py",
+          "lines": "69-71",
+          "snippet": "## EXPERIMENTATIONAGENT COMPATIBILITY REQUIREMENTS (CRITICAL)\n\nYour generated ideas MUST be compatible with the ExperimentationAgent autonomous experimentation framework. All ideas will be executed through RunExperimentTool's 4-stage tree search process:"
+        },
+        {
+          "file": "freephdlabor/prompts/ideation_instructions.py",
+          "lines": "85-88",
+          "snippet": "2. **1-HOUR PER RUN MAXIMUM**: Each experimental run must complete in <1 hour on single H100 GPU\n   - Use models ≤200M parameters (GPT-2 Small/Medium, DistilBERT, etc.)\n   - Use dataset subsets ≤10K samples for training\n   - Avoid computationally expensive operations (large-scale hyperparameter sweeps)"
+        },
+        {
+          "file": "freephdlabor/prompts/ideation_instructions.py",
+          "lines": "119-127",
+          "snippet": "**RUNEXPERIMENTTOOL COMPATIBILITY VALIDATION CHECKLIST:**\nBefore finalizing any idea, verify:\n□ Single model focus throughout all 4 stages\n□ Each experimental run completes in <1 hour\n□ Uses HuggingFace datasets (can introduce 2 more in Stage 3)\n□ Has automated evaluation metrics\n□ Core architecture fixed after Stage 1\n□ No auxiliary/instrument models required\n□ Computationally feasible on single H100 GPU"
+        }
+      ]
+    },
+    {
+      "name": "tool-verified claims rule for the writeup agent",
+      "what_it_is": "The WriteupAgent prompt forbids assumptions about workspace state, file contents or tool outputs: before any such claim the agent must select and run a verification tool and report the verified result, and hedging phrases such as 'likely' or 'should be' are banned. It further requires checking that generated .tex files contain the exact numerical values provided and that figure files exist before they are referenced.",
+      "function_in_system": "Acts inside the writeup agent's reasoning steps and targets hallucinated workspace state, fabricated numbers and references to missing figures in the paper. Its effect depends on the model following the prompt; the hard check at termination is the separate success-criteria gate. Otherwise the agent reports false progress and writes invented results into the paper.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "freephdlabor/prompts/writeup_instructions.py",
+          "lines": "13-22",
+          "snippet": "## 🚨 NO ASSUMPTIONS - VERIFY EVERYTHING 🚨\n\n**ABSOLUTE RULE**: NEVER make assumptions about workspace state, file contents, or tool outputs. You have verification tools - USE THEM.\n\nBefore making ANY claim about workspace state:\n1. **IDENTIFY the assumption** you're about to make\n2. **SELECT the appropriate verification tool**\n3. **RUN the verification tool** to get factual evidence\n4. **REPORT the verified facts** instead of assumptions\n5. **NEVER use phrases like \"likely\", \"should be\", \"appears to be\"**"
+        },
+        {
+          "file": "freephdlabor/prompts/writeup_instructions.py",
+          "lines": "106-107",
+          "snippet": "- Never use generic descriptions (❌ \"good results\" → ✅ \"F1 = 0.637\")\n- Verify generated .tex files contain exact values provided, no fabricated numbers"
+        },
+        {
+          "file": "freephdlabor/prompts/writeup_instructions.py",
+          "lines": "171",
+          "snippet": "- Verify figure files exist before referencing"
+        }
+      ]
+    },
+    {
+      "name": "prompt-prescribed time budget for bibliography search",
+      "what_it_is": "The ResourcePreparationAgent prompt limits citation search to 10-15 manually chosen research concepts with at most 2 results each and a total budget of 360 seconds split evenly across concepts. It supplies example code with an elapsed-time check before each concept, a per-concept timeout argument and a try/except that skips failed searches. CitationSearchTool.forward accepts only search_query, max_results and search_source, so the per-concept timeout argument has no counterpart in the tool and only the elapsed-time check between concepts is effective. A later line of the same prompt names a 15-minute limit.",
+      "function_in_system": "Bounds the runtime and API cost of the bibliography step during resource preparation. The prompt names the observed failure it targets: hours-long execution and jobs appearing stuck for 60+ minutes due to API rate limits on hundreds of extracted keywords. Otherwise the resource preparation stage can stall the whole pipeline for hours.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "freephdlabor/prompts/resource_preparation_instructions.py",
+          "lines": "287-288",
+          "snippet": "**⏰ TIME LIMIT: Citation search MUST complete within 6 minutes (360 seconds) maximum**\n**Split evenly among search concepts**: Each concept gets 360/num_concepts seconds maximum"
+        },
+        {
+          "file": "freephdlabor/prompts/resource_preparation_instructions.py",
+          "lines": "319-337",
+          "snippet": "start_time = time.time()\nMAX_CITATION_TIME = 360  # 6 minutes maximum total\ntimeout_per_concept = MAX_CITATION_TIME / len(research_concepts)  # Split evenly\n\nfor concept in research_concepts:\n    if time.time() - start_time > MAX_CITATION_TIME:\n        print(f\"Citation search timeout reached after {MAX_CITATION_TIME/60} minutes\")\n        break\n    # Perform citation search with per-concept timeout\n    try:\n        citations = citation_search_tool(\n            search_query=concept,\n            max_results=2,\n            timeout=timeout_per_concept  # Each concept gets equal time slice\n        )\n        # Process results\n    except Exception as e:\n        print(f\"Citation search failed for '{concept}': {e}\")\n        continue"
+        },
+        {
+          "file": "freephdlabor/prompts/resource_preparation_instructions.py",
+          "lines": "389-393",
+          "snippet": "**⚠️ CITATION SEARCH WARNING**: Never attempt to process hundreds of extracted keywords in a single code block. This can lead to:\n- Hours-long execution times due to API rate limits\n- Jobs appearing \"stuck\" for 60+ minutes\n- Excessive API calls for irrelevant terms\n- Always implement the 15-minute timeout and limit to 10-15 curated research concepts."
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/citation_search_tool.py",
+          "lines": "85",
+          "snippet": "def forward(self, search_query: str, max_results: int = 10, search_source: str = \"both\") -> str:"
+        }
+      ]
+    },
+    {
+      "name": "prompt rules against code-action execution failures",
+      "what_it_is": "The shared system prompt template adds rule 9 for all agents: always close triple-quoted strings and prefer string concatenation for multiline content. The ExperimentationAgent prompt repeats these syntax requirements. The ResourcePreparationAgent prompt demands incremental processing in small single-purpose code blocks across multiple steps, since a failure anywhere in a large block forces regenerating the whole block.",
+      "function_in_system": "Targets recurring failures of the CodeAgent action format, where each step is a Python blob that must parse and run. Reduces failed steps and the tokens spent regenerating them. Its effect depends on the model following the rules. Otherwise agents lose steps and budget to syntax errors and repeated regeneration of large failing blocks.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "freephdlabor/prompts/system_prompt_template.py",
+          "lines": "143",
+          "snippet": "9. STRING SYNTAX: Always properly close triple-quoted strings with three double quotes. For multiline content, prefer string concatenation (e.g., \"Line 1\" + \" Line 2\") over triple-quoted strings to avoid syntax errors."
+        },
+        {
+          "file": "freephdlabor/prompts/experimentation_instructions.py",
+          "lines": "31-37",
+          "snippet": "CODE SYNTAX REQUIREMENTS:\n- ALWAYS properly terminate triple-quoted strings with three double quotes\n- When using f-strings with triple quotes, ensure complete closure\n- For multiline strings, use simple string concatenation instead of triple quotes\n- Example: outcome = \"Line 1\" + \" Line 2\" + \" Line 3\" (GOOD)\n- Example: outcome = f\"Line 1 Line 2\" (PROPER SYNTAX)\n- NEVER leave triple-quoted strings unclosed"
+        },
+        {
+          "file": "freephdlabor/prompts/resource_preparation_instructions.py",
+          "lines": "385-387",
+          "snippet": "## Avoid Monolithic Code Blocks\n\n**Break large operations into focused, single-purpose steps.** Attempting to process entire directory trees, generate all file descriptions, and build complete text files in one massive code block leads to syntax errors and execution failures. Instead, use incremental processing: create the directory structure first, then systematically process files in small batches across multiple tool calls. When any part of a large block fails, the entire operation must be regenerated, wasting tokens and increasing failure probability."
+        }
+      ]
+    },
+    {
+      "name": "shared-file ownership and read-before-edit rules",
+      "what_it_is": "WORKSPACE_GUIDANCE, included in every agent's system prompt, declares working_idea.json and past_ideas_and_results.md as managed exclusively by the ManagerAgent and read-only for all other agents, requires reading a file before editing it to avoid information loss, requires checking file existence before reading, and requires reporting every file created in the shared root to the ManagerAgent.",
+      "function_in_system": "Coordinates seven agents that share one workspace directory as their communication medium. Guards against agents overwriting shared state and against the manager losing track of produced artifacts. Its effect depends on the models following the prompt. Otherwise concurrent edits destroy shared research state and downstream agents miss files they depend on.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "freephdlabor/prompts/workspace_management.py",
+          "lines": "13-14",
+          "snippet": "STANDARD WORKSPACE FILES (always available):\nThese files are managed exclusively by the ManagerAgent and are READ-ONLY for all other agents:"
+        },
+        {
+          "file": "freephdlabor/prompts/workspace_management.py",
+          "lines": "30-36",
+          "snippet": "FILE ACCESS INSTRUCTIONS:\nAlways read a file first before editing it to avoid information loss.\nREADING FILES:\n- Shared files: Read directly from workspace base directory\n- Agent files: Read from your agent folder for your own files\n- Other agent files: Use full paths provided by other agents\n- Always check file existence before reading"
+        },
+        {
+          "file": "freephdlabor/prompts/workspace_management.py",
+          "lines": "57-60",
+          "snippet": "INTER-AGENT COMMUNICATION:\nWhen you create files in the SHARED ROOT DIRECTORY:\n- Always report to ManagerAgent: \"Created [filename] containing [brief description]\"\n- This ensures other agents know the file exists and its purpose"
+        }
+      ]
+    },
+    {
+      "name": "structured clarification request on missing experiment results",
+      "what_it_is": "When the ResourcePreparationAgent cannot locate the experiment results folder, its prompt instructs it to return a CLARIFICATION_NEEDED message to the manager listing searched paths, whether experiment_runs exists, found UUID directories and experiment folders, and asking for experiment_results_dir in additional_args. Missing required summary, plot or idea files are documented in structure_analysis.txt.",
+      "function_in_system": "Sits at the start of the writeup preparation stage and escalates a missing input to the manager in a diagnosable form. Its effect depends on the model following the prompt. Otherwise the writeup stage is built on a wrong or empty folder and produces a paper detached from the actual experiments.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "freephdlabor/prompts/resource_preparation_instructions.py",
+          "lines": "47",
+          "snippet": "**Verification Strategy**: After creating the symlink, verify all required files exist. If any are missing, document this in structure_analysis.txt. These files are critical for WriteupAgent to generate comprehensive papers from ExperimentationAgent experiments."
+        },
+        {
+          "file": "freephdlabor/prompts/resource_preparation_instructions.py",
+          "lines": "162-170",
+          "snippet": "3. If no experiment folder found, return error asking manager for clarification:\n```\nCLARIFICATION_NEEDED: Could not locate ExperimentationAgent experiment results folder.\nPlease specify experiment_results_dir path in additional_args.\nSearched paths: [list of searched paths]\nFound experiment_runs: [yes/no]\nFound UUID directories: [list of UUIDs if any]\nFound experiment folders: [list of experiment folders if any]\n```"
+        }
+      ]
+    },
+    {
+      "name": "idea schema validation before experiment execution",
+      "what_it_is": "RunExperimentTool parses idea_json (JSON, with ast.literal_eval as fallback), accepts a list or a single object, and checks for the required AI-Scientist-v2 fields Name, Title, Short Hypothesis, Abstract and Experiments. On missing fields it logs an error and returns a status failure JSON listing the missing fields and recommending IdeaStandardizationTool, before any experiment is started. The tool description and the ExperimentationAgent prompt make standardization via IdeaStandardizationTool a mandatory prior step.",
+      "function_in_system": "Sits at the entrance of the most expensive tool in the system, between the ExperimentationAgent's code action and the vendored experiment subprocess. A deterministic format check whose error is returned to the agent as the tool observation, so the next step can standardize the idea. Otherwise the pipeline runs for hours on an underspecified idea and falls back to generic models and synthetic data, as the error message itself states.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/run_experiment_tool.py",
+          "lines": "23-26",
+          "snippet": "\"CRITICAL PREREQUISITE: You MUST use IdeaStandardizationTool BEFORE calling this tool to convert \"\n\"the research idea to AI-Scientist-v2 format. This ensures correct model selection \"\n\"(e.g., Pythia-410M not DistilBERT) and dataset usage (e.g., C4/MMLU not synthetic data). \"\n\"The idea_json must have: Name, Title, Short Hypothesis, Abstract, Experiments fields.\""
+        },
+        {
+          "file": "freephdlabor/toolkits/run_experiment_tool.py",
+          "lines": "191-213",
+          "snippet": "# Validate that the idea is in the correct format\n# The ExperimentationAgent MUST use IdeaStandardizationTool before calling this tool\nrequired_fields = [\"Name\", \"Title\", \"Short Hypothesis\", \"Abstract\", \"Experiments\"]\nmissing_fields = [field for field in required_fields if field not in idea_data]\n\nif missing_fields:\n    error_msg = (\n        f\"Research idea is missing required AI-Scientist-v2 fields: {missing_fields}. \"\n        f\"The ExperimentationAgent MUST use IdeaStandardizationTool BEFORE calling RunExperimentTool. \"\n        f\"This ensures experiments use the correct models and datasets specified in the research idea, \"\n        f\"not generic defaults like DistilBERT and synthetic data.\"\n    )\n    import logging\n    logging.getLogger(__name__).error(f\"ERROR: {error_msg}\")\n\n    # Return clear error instead of silently using wrong conversion\n    return json.dumps({\n        \"status\": \"failure\",\n        \"summary\": \"Invalid research idea format - IdeaStandardizationTool was not used\",\n        \"error\": error_msg,\n        \"missing_fields\": missing_fields,\n        \"recommendation\": \"Use IdeaStandardizationTool to convert the idea before calling RunExperimentTool\"\n    })"
+        },
+        {
+          "file": "freephdlabor/prompts/experimentation_instructions.py",
+          "lines": "41-44",
+          "snippet": "2. **MANDATORY**: Use IdeaStandardizationTool to convert idea to RunExperimentTool format\n   - This PREVENTS experiments from using wrong models (e.g., DistilBERT instead of Pythia)\n   - This PREVENTS experiments from using synthetic data instead of real datasets\n   - NEVER skip this step - it's CRITICAL for correct experiment execution"
+        }
+      ]
+    },
+    {
+      "name": "structured failure results at the experiment subprocess boundary",
+      "what_it_is": "The vendored AI-Scientist-v2 pipeline runs via subprocess.run with check=False. Every failure path returns a status failure JSON carrying results and log directories: nonzero exit code, missing experiments directory, missing logs directory, no *-run directories, missing research_summary.json, and any exception inside the tool. The exception path adds next_steps (fall back to methodology and theoretical analysis, report the limitation) and the note 'DO NOT generate synthetic experimental results. Report the failure honestly'. subprocess.run is called with no timeout.",
+      "function_in_system": "Contains crashes of the multi-hour experiment pipeline inside the tool call, so the ExperimentationAgent loop continues and receives a diagnosable observation. The output checks also catch runs that exit cleanly and still produce no results. The embedded instruction targets the agent filling the gap with fabricated numbers. Otherwise a failed experiment either crashes the agent step or silently yields a paper based on invented results.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/run_experiment_tool.py",
+          "lines": "308-324",
+          "snippet": "process = subprocess.run(\n    cmd,\n    cwd=run_dir,\n    text=True,\n    check=False,\n    env=env\n)\n\nif process.returncode != 0:\n    return json.dumps({\n        \"status\": \"failure\",\n        \"summary\": f\"AI-Scientist-v2 script failed to execute. Python executable: {python_executable}\",\n        \"results_directory\": run_dir,\n        \"log_directory\": log_dir,\n        \"command\": \" \".join(cmd),\n        \"note\": \"Check terminal output above for error details\"\n    })"
+        },
+        {
+          "file": "freephdlabor/toolkits/run_experiment_tool.py",
+          "lines": "327-335",
+          "snippet": "experiments_path = os.path.join(run_dir, \"experiments\")\nif not os.path.isdir(experiments_path) or not os.listdir(experiments_path):\n    return json.dumps({\n        \"status\": \"failure\",\n        \"summary\": \"AI-Scientist-v2 did not produce an experiment directory.\",\n        \"results_directory\": run_dir,\n        \"log_directory\": log_dir,\n        \"note\": \"Check terminal output above for details\"\n    })"
+        },
+        {
+          "file": "freephdlabor/toolkits/run_experiment_tool.py",
+          "lines": "364-373",
+          "snippet": "summary_path = os.path.join(logs_dir, latest_run, \"research_summary.json\")\nif not os.path.exists(summary_path):\n    return json.dumps({\n        \"status\": \"failure\",\n        \"summary\": f\"research_summary.json not found in {os.path.join(logs_dir, latest_run)}\",\n        \"results_directory\": exp_dir,\n        \"log_directory\": log_dir,\n        \"latest_run\": latest_run,\n        \"note\": \"Check terminal output above for details\"\n    })"
+        },
+        {
+          "file": "freephdlabor/toolkits/run_experiment_tool.py",
+          "lines": "440-455",
+          "snippet": "except Exception as e:\n    python_executable = self._get_python_executable()\n    return json.dumps({\n        \"status\": \"failure\",\n        \"summary\": f\"An error occurred in RunExperimentTool: {str(e)}\",\n        \"results_directory\": run_dir,\n        \"python_executable_used\": python_executable,\n        \"error_type\": \"execution_failure\",\n        \"next_steps\": [\n            \"The experimental execution failed due to environment or configuration issues\",\n            \"Consider creating a detailed implementation plan instead of running experiments\",\n            \"Focus on theoretical analysis and methodology design\",\n            \"Clearly report this as a limitation in any research output\"\n        ],\n        \"important_note\": \"DO NOT generate synthetic experimental results. Report the failure honestly and focus on methodology and theoretical contributions.\"\n    })"
+        }
+      ]
+    },
+    {
+      "name": "stage-bounded experiment execution",
+      "what_it_is": "RunExperimentTool exposes an end_stage parameter (1 initial implementation, 2 baseline tuning, 3 creative research, 4 ablation studies) that is passed to the vendored pipeline as --end_stage, so only stages 1 to end_stage run. The default is 4, and values outside 1-4 are rejected with a failure JSON listing the valid stages. The ExperimentationAgent prompt describes the options.",
+      "function_in_system": "Lets the agent request a baseline or partial run instead of the full tree search, bounding GPU time and LLM cost per experiment call. No prompt directs a strategic use of it. Otherwise every call runs all four stages including ablations.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/run_experiment_tool.py",
+          "lines": "54-57",
+          "snippet": "\"end_stage\": {\n    \"type\": \"integer\",\n    \"description\": \"Final stage to run (1-4). Stage 1: initial_implementation (basic working baseline), Stage 2: baseline_tuning (hyperparameter optimization), Stage 3: creative_research (novel improvements), Stage 4: ablation_studies (systematic component analysis). Default: 4 (run all stages)\",\n    \"nullable\": True"
+        },
+        {
+          "file": "freephdlabor/toolkits/run_experiment_tool.py",
+          "lines": "136-147",
+          "snippet": "end_stage = end_stage or 4\nif end_stage not in [1, 2, 3, 4]:\n    return json.dumps({\n        \"status\": \"failure\",\n        \"summary\": f\"Invalid end_stage: {end_stage}. Must be 1, 2, 3, or 4.\",\n        \"valid_stages\": {\n            1: \"initial_implementation\", \n            2: \"baseline_tuning\",\n            3: \"creative_research\", \n            4: \"ablation_studies\"\n        }\n    })"
+        },
+        {
+          "file": "freephdlabor/toolkits/run_experiment_tool.py",
+          "lines": "275",
+          "snippet": "\"--end_stage\", str(end_stage),  # ADD THIS LINE"
+        },
+        {
+          "file": "freephdlabor/prompts/experimentation_instructions.py",
+          "lines": "17-20",
+          "snippet": "* end_stage=1: Run only initial implementation (basic working baseline)\n* end_stage=2: Run initial implementation + baseline tuning (hyperparameter optimization)\n* end_stage=3: Run stages 1-3 (initial + tuning + creative research)\n* end_stage=4: Run full workflow including ablation studies (default)"
+        }
+      ]
+    },
+    {
+      "name": "automatic citation placeholder resolution with drop on failure",
+      "what_it_is": "Before every compilation LaTeXCompilerTool scans the main file and all \\input files for [cite: ...] tokens, in up to 10 passes per file. A token whose text exactly matches an existing references.bib key becomes \\cite{key}; fuzzy matching is disabled after it produced wrong citations. Other tokens go to CitationSearchTool with up to 5 attempts and exponential backoff of 2 to 32 seconds on transient errors (500, 503, timeout, connection); a found paper is appended to references.bib and cited. Tokens still unresolved are deleted from the text. The search branch is defective: it requires the string '\"success\": true' in the tool output, CitationSearchTool.forward never returns a success key and catches all exceptions itself, so every search counts as failed, the backoff never fires, and every token that is no exact key match gets deleted. The writeup prompt announces 8 retries.",
+      "function_in_system": "Sits inside the compile tool call of the writeup agent, between LaTeX generation and pdflatex. Gives the LLM a placeholder syntax for citations it cannot key and guarantees that unresolved references degrade to removed citations. Otherwise the PDF shows [?] markers for every citation the model could not resolve.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "111-115",
+          "snippet": "# Automated citation resolution before compilation\ncitation_resolved, citation_log = self._resolve_citations_automatically(latex_file_path)\nif citation_resolved:\n    fixes_applied.extend(citation_log)\n    compilation_log.append(f\"Applied citation resolution: {', '.join(citation_log)}\")"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "288-303",
+          "snippet": "for attempt in range(max_attempts):\n    try:\n        search_result = self.citation_search_tool.forward(\n            search_query=description,\n            max_results=1,\n            search_source=\"both\"\n        )\n\n        # Parse search result\n        if search_result and '\"success\": true' in search_result.lower():\n            result_data = json.loads(search_result)\n            if result_data.get('citations'):\n                return result_data['citations'][0]\n\n        # No results found - not a transient error, return None\n        return None"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "315-321",
+          "snippet": "if is_transient and attempt < max_attempts - 1:\n    # Exponential backoff: 2, 4, 8, 16, 32 seconds\n    wait_time = 2 ** (attempt + 1)\n    print(f\"Warning: Citation search for '{description}' failed (attempt {attempt + 1}/{max_attempts}): {e}\")\n    print(f\"         Retrying in {wait_time} seconds...\")\n    time.sleep(wait_time)\n    continue"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "387-391",
+          "snippet": "else:\n    # No citation found after all retries, remove token\n    content = content[:match.start()] + content[match.end():]\n    fixes_applied.append(f\"removed citation token '{description}' (not found after retries)\")\n    changes_made = True"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "456-461",
+          "snippet": "# Exact key match only (e.g., [CITE:sanchez2011] when sanchez2011 exists)\nif description in citations:\n    return description\n\n# No fuzzy matching - let Semantic Scholar API handle descriptive queries\nreturn None"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/citation_search_tool.py",
+          "lines": "121-133",
+          "snippet": "result = {\n    \"search_query\": search_query,\n    \"search_source\": search_source,\n    \"total_results\": len(citations),\n    \"citations\": citations,\n    \"bibtex_entries\": bibtex_entries,\n    \"usage_instructions\": {\n        \"latex_integration\": \"Copy BibTeX entries to your .bib file and use \\\\cite{key} in LaTeX\",\n        \"citation_keys\": [self._extract_citation_key(bibtex) for bibtex in bibtex_entries if bibtex]\n    }\n}\n\nreturn json.dumps(result, indent=2)"
+        },
+        {
+          "file": "freephdlabor/prompts/writeup_instructions.py",
+          "lines": "128-134",
+          "snippet": "1. Write `[cite: description]` in LaTeX content when a citation is needed\n2. LaTeXCompilerTool automatically:\n   - Detects all `[cite: ...]` placeholders before compilation\n   - Searches for citations using CitationSearchTool (arXiv + Semantic Scholar)\n   - Adds found citations to references.bib\n   - Replaces `[cite: description]` with `\\\\cite{key}`\n   - If search fails after 8 retries, deletes the placeholder (intentional)"
+        }
+      ]
+    },
+    {
+      "name": "pre-compilation sanitization of LLM output artifacts",
+      "what_it_is": "Before every compilation _clean_latex_artifacts rewrites the main .tex file: it strips line-number prefixes of the form '1→' left from file-viewer output, extracts LaTeX from files that contain a JSON object with a latex_content field, replaces the unavailable neurips_2024 package with geometry and natbib, and copies missing ICML style files into the compilation directory.",
+      "function_in_system": "Runs at the start of each LaTeXCompilerTool call and repairs recurring, known output errors of the generating LLM and of the tool chain. Otherwise these artifacts break compilation and cost the agent repair steps.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "105-109",
+          "snippet": "# Clean common artifacts first\ncleaned, clean_log = self._clean_latex_artifacts(latex_file_path)\nif cleaned:\n    fixes_applied.extend(clean_log)\n    compilation_log.append(f\"Applied cleaning fixes: {', '.join(clean_log)}\")"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "853-857",
+          "snippet": "# Fix 1: Remove line numbers (e.g., \"1→\\section{Introduction}\")\nimport re\nif re.search(r'^\\s*\\d+→', content, re.MULTILINE):\n    content = re.sub(r'^\\s*\\d+→', '', content, flags=re.MULTILINE)\n    fixes.append(\"removed line numbers\")"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "859-866",
+          "snippet": "# Fix 2: Fix JSON content in tex files\nif content.strip().startswith('{') and '\"latex_content\"' in content:\n    try:\n        import json\n        json_data = json.loads(content)\n        if 'latex_content' in json_data:\n            content = json_data['latex_content']\n            fixes.append(\"extracted LaTeX from JSON\")"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "878-891",
+          "snippet": "# Fix 4: Handle ICML style package\nif '\\\\usepackage{icml2024}' in content or '\\\\usepackage[accepted]{icml2024}' in content:\n    # Ensure ICML style files are in the compilation directory\n    icml_files = ['icml2024.sty', 'icml2024.bst', 'algorithm.sty', 'algorithmic.sty', 'fancyhdr.sty']\n    source_dir = os.path.dirname(os.path.abspath(__file__))\n    compile_dir = os.path.dirname(latex_file_path)\n\n    for icml_file in icml_files:\n        source_path = os.path.join(source_dir, icml_file)\n        dest_path = os.path.join(compile_dir, icml_file)\n        if os.path.exists(source_path) and not os.path.exists(dest_path):\n            import shutil\n            shutil.copy2(source_path, dest_path)\n            fixes.append(f\"copied {icml_file} to compilation directory\")"
+        }
+      ]
+    },
+    {
+      "name": "bounded compile loop with timeouts and error-log feedback to reflection",
+      "what_it_is": "LaTeXCompilerTool runs pdflatex, bibtex and two further pdflatex passes with timeouts of 120 seconds per pdflatex pass and 60 seconds for bibtex. On failure it retries up to max_fix_iterations=3 times after a rule-based auto-fix, whose only active rule adds amsmath and amssymb on 'undefined control sequence'; the loop stops as soon as no fix applies. The final failure is returned as JSON with parsed '!' error lines and the raw_latex_log. The writeup prompt routes raw_latex_log into LaTeXReflectionTool's compilation_errors parameter, which instructs the review LLM to prioritize fixing these errors.",
+      "function_in_system": "Bounds compile time inside the writeup loop and turns a failed compilation into a targeted LLM repair step based on the exact compiler output. Otherwise a hanging pdflatex blocks the agent indefinitely, or the agent guesses at the cause of the failure.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "117-156",
+          "snippet": "# Attempt compilation with auto-fixing\nfor iteration in range(max_fix_iterations + 1):\n    compilation_log.append(f\"\\n--- Compilation Attempt {iteration + 1} ---\")\n\n    # Compile to PDF\n    compile_result = self._compile_latex_to_pdf(latex_file_path)\n    compilation_log.extend(compile_result['log'])\n\n    if compile_result['success']:\n        # Success!\n        return json.dumps({\n            \"success\": True,\n            \"pdf_path\": compile_result['pdf_path'],\n            \"fixes_applied\": fixes_applied,\n            \"compilation_log\": compilation_log,\n            \"iterations_used\": iteration + 1\n        })\n\n    # If failed and we have more iterations, try to auto-fix\n    if iteration < max_fix_iterations:\n        compilation_log.append(\"Attempting auto-fix...\")\n        fixed = self._auto_fix_common_errors(latex_file_path, compile_result['errors'])\n        if fixed:\n            fixes_applied.append(f\"iteration_{iteration + 1}_auto_fix\")\n            compilation_log.append(\"Auto-fix applied, retrying...\")\n            continue\n        else:\n            compilation_log.append(\"Auto-fix failed, stopping iterations\")\n            break\n\n# All attempts failed\nreturn json.dumps({\n    \"success\": False,\n    \"error\": \"LaTeX compilation failed after all attempts\",\n    \"pdf_path\": None,\n    \"compilation_errors\": compile_result.get('errors', []),\n    \"raw_latex_log\": compile_result.get('raw_latex_log', ''),\n    \"fixes_applied\": fixes_applied,\n    \"compilation_log\": compilation_log\n})"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "690-696",
+          "snippet": "result1 = subprocess.run(\n    [pdflatex_path, '-interaction=nonstopmode', tex_filename],\n    capture_output=True,\n    text=True,\n    timeout=120,\n    env=env\n)"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "804-812",
+          "snippet": "except subprocess.TimeoutExpired:\n    log.append(\"LaTeX compilation timed out\")\n    return {\n        \"success\": False,\n        \"pdf_path\": None,\n        \"errors\": [\"Compilation timeout\"],\n        \"log\": log,\n        \"raw_latex_log\": \"\\n\\n\".join(raw_latex_output)\n    }"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "926-935",
+          "snippet": "if 'undefined control sequence' in error_lower:\n    # Add common packages that might be missing\n    if '\\\\documentclass' in content and '\\\\usepackage{amsmath}' not in content:\n        content = content.replace(\n            '\\\\documentclass',\n            '\\\\documentclass'\n        ).replace(\n            '\\\\begin{document}',\n            '\\\\usepackage{amsmath}\\\\n\\\\usepackage{amssymb}\\\\n\\\\begin{document}'\n        )"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_reflection_tool.py",
+          "lines": "435-438",
+          "snippet": "# Add compilation errors section if provided\ncompilation_errors_section = \"\"\nif compilation_errors.strip():\n    compilation_errors_section = f\"\\n\\nCOMPILATION ERRORS TO FIX:\\n{compilation_errors}\\n\\nIMPORTANT: Prioritize fixing these compilation errors in your review and improvements.\""
+        },
+        {
+          "file": "freephdlabor/prompts/writeup_instructions.py",
+          "lines": "193-196",
+          "snippet": "**If compilation fails:**\n- Pass raw_latex_log to LaTeXReflectionTool via compilation_errors parameter to fix syntax issues\n- Fix content quality in individual section files, NOT file structure\n- Check for LaTeX formatting errors (\\\\subref, math mode, unbalanced braces)"
+        }
+      ]
+    },
+    {
+      "name": "data-preservation and topic-drift guard on LLM section rewrites",
+      "what_it_is": "LaTeXReflectionTool rewrites a section in place after an LLM review. The rewrite prompt requires preserving every numerical value exactly and commenting out removed content as '% REFLECTION_PRESERVED (date): reason' instead of deleting it. The code then validates the rewrite: at least 60% of the extracted key terms (capitalized phrases, acronyms, bold and emphasized terms) must survive and at most 3 new technical terms may appear. The rejection path is defective: on failed validation or an exception the method returns an error string, _generate_and_save_improvements only checks for None, and writes that string over the section file.",
+      "function_in_system": "Guards the iterative polishing loop of the writeup agent against hallucinated topic changes and silently altered or dropped results. Improvements are on by default (generate_improvements=true). Otherwise every reflection round can move a section further from the actual experiments or lose numbers irrecoverably.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_reflection_tool.py",
+          "lines": "543-547",
+          "snippet": "**NEVER DELETE DATA - COMMENT OUT INSTEAD**:\n1. When removing/simplifying content, ALWAYS preserve original as LaTeX comments\n2. Use format: % REFLECTION_PRESERVED (YYYY-MM-DD): Clear reason for preservation\n3. Comment out the entire original section, don't delete it\n4. This allows immediate recovery without git archaeology"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_reflection_tool.py",
+          "lines": "582-589",
+          "snippet": "**YOU MUST PRESERVE EVERY NUMERICAL VALUE EXACTLY**:\n- ✅ PRESERVE exact F1 scores (e.g., 0.637 must stay 0.637, NOT ~0.64 or \"approximately 0.6\")\n- ✅ PRESERVE exact accuracy values (e.g., 85.3% must stay 85.3%, NOT ~85% or \"about 85%\")\n- ✅ PRESERVE exact hyperparameters (e.g., learning_rate=1e-4 must stay 1e-4, NOT 0.0001)\n- ✅ PRESERVE exact model specifications (e.g., \"4 hidden states\" must stay \"4 hidden states\")\n- ✅ PRESERVE exact dataset sizes (e.g., n_train=8000 must stay n_train=8000)\n- ✅ PRESERVE exact epoch/step counts (e.g., \"trained for 10,000 steps\" stays exact)\n- ❌ NEVER round, approximate, or modify ANY numerical value"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_reflection_tool.py",
+          "lines": "650-656",
+          "snippet": "# Validate content consistency to prevent topic drift\n    if not self._validate_content_consistency(content, cleaned_content):\n        return f\"Content validation failed: Improved content changed research topic or key findings. Rejecting changes to prevent hallucination.\"\n\n    return cleaned_content\nexcept Exception as e:\n    return f\"Error generating improvements: {str(e)}\""
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_reflection_tool.py",
+          "lines": "973-994",
+          "snippet": "overlap_ratio = len(original_terms.intersection(improved_terms)) / len(original_terms)\n\n# Require at least 60% of key research terms to be preserved\nif overlap_ratio < 0.6:\n    return False\n\n# Check for introduction of completely new technical terms\nnew_terms = improved_terms - original_terms\ntechnical_patterns = [\n    r'\\b[A-Z][a-zA-Z]+(?:\\s+[A-Z][a-zA-Z]+)+\\b',  # Multi-word capitalized terms\n    r'\\b[A-Z]{2,6}\\b',  # Acronyms\n]\n\nnew_technical_terms = set()\nimproved_text = ' '.join(new_terms)\nfor pattern in technical_patterns:\n    matches = re.findall(pattern, improved_text)\n    new_technical_terms.update(matches)\n\n# If more than 3 completely new technical terms, likely hallucination\nif len(new_technical_terms) > 3:\n    return False"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_reflection_tool.py",
+          "lines": "481-492",
+          "snippet": "if improved_content is None:\n    return {\"status\": \"error\", \"file_path\": None, \"message\": \"Failed to generate improvements\"}\n\n# Resolve file path\nif self.working_dir:\n    file_path = self._safe_path(original_file_path)\nelse:\n    file_path = original_file_path\n\n# Write improved content directly to original file (in-place update)\nwith open(file_path, 'w', encoding='utf-8') as f:\n    f.write(improved_content)"
+        }
+      ]
+    },
+    {
+      "name": "deterministic static LaTeX analysis",
+      "what_it_is": "LaTeXSyntaxCheckerTool analyzes LaTeX without compiling: stack-based brace matching, begin/end environment matching, odd counts of $, \\ref without matching \\label, and commands used without their package. LaTeXReflectionTool additionally runs static structural validation on every review: duplicate section titles, paragraph pairs with Jaccard word similarity of at least 0.8, repeated sentences, multiple abstracts or titles, and unmatched environments. The writeup prompt lists the syntax checker as a required tool.",
+      "function_in_system": "Detects compilation errors and LLM repetition cheaply, before the expensive compile and LLM review cycle, and returns them as structured findings to the writeup agent. Otherwise such defects surface only as failed compilations or as duplicated content in the final paper.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_syntax_checker_tool.py",
+          "lines": "109-119",
+          "snippet": "# Basic checks (always performed)\nerrors.extend(self._check_basic_syntax(latex_content))\nwarnings.extend(self._check_basic_warnings(latex_content))\n\n# Thorough checks\nif check_level in ['thorough', 'strict']:\n    errors.extend(self._check_environments(latex_content))\n    errors.extend(self._check_math_mode(latex_content))\n    warnings.extend(self._check_citations_references(latex_content))\n    warnings.extend(self._check_packages(latex_content))\n    recommendations.extend(self._check_style_recommendations(latex_content))"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_syntax_checker_tool.py",
+          "lines": "172-187",
+          "snippet": "for line_num, line in enumerate(lines, 1):\n    # Check for unmatched braces\n    for char_pos, char in enumerate(line):\n        if char == '{':\n            brace_stack.append((line_num, char_pos))\n        elif char == '}':\n            if not brace_stack:\n                errors.append({\n                    \"type\": \"syntax_error\",\n                    \"line\": line_num,\n                    \"column\": char_pos,\n                    \"message\": \"Unmatched closing brace\",\n                    \"code\": line.strip()\n                })\n            else:\n                brace_stack.pop()"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_syntax_checker_tool.py",
+          "lines": "256-276",
+          "snippet": "for pos, cmd_type, env_name in all_commands:\n    if cmd_type == 'begin':\n        begin_stack.append((env_name, pos))\n    elif cmd_type == 'end':\n        if not begin_stack:\n            errors.append({\n                \"type\": \"environment_error\",\n                \"position\": pos,\n                \"message\": f\"\\\\end{{{env_name}}} without matching \\\\begin{{{env_name}}}\",\n                \"environment\": env_name\n            })\n        else:\n            last_begin_env, last_begin_pos = begin_stack.pop()\n            if last_begin_env != env_name:\n                errors.append({\n                    \"type\": \"environment_mismatch\",\n                    \"position\": pos,\n                    \"message\": f\"\\\\end{{{env_name}}} doesn't match \\\\begin{{{last_begin_env}}}\",\n                    \"expected\": last_begin_env,\n                    \"found\": env_name\n                })"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_reflection_tool.py",
+          "lines": "745-748",
+          "snippet": "duplicates = {title: count for title, count in section_counts.items() if count > 1}\nif duplicates:\n    for title, count in duplicates.items():\n        issues.append(f\"Duplicate section '{title}' appears {count} times\")"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_reflection_tool.py",
+          "lines": "764-768",
+          "snippet": "paragraphs = self._extract_text_paragraphs(content)\nrepeated_paragraphs = self._find_similar_paragraphs(paragraphs, threshold=0.8)\nif repeated_paragraphs:\n    for i, j, similarity in repeated_paragraphs:\n        issues.append(f\"Paragraphs {i+1} and {j+1} are {similarity:.1%} similar (likely duplicated)\")"
+        },
+        {
+          "file": "freephdlabor/prompts/writeup_instructions.py",
+          "lines": "217",
+          "snippet": "- **LaTeXSyntaxCheckerTool**: Identify and fix syntax errors before compilation"
+        }
+      ]
+    },
+    {
+      "name": "rate-limit-aware citation API access with per-source fallback",
+      "what_it_is": "CitationSearchTool waits 1 second before each arXiv request and 2 seconds before each Semantic Scholar request, uses 30-second request timeouts, and retries Semantic Scholar once after 10 seconds on HTTP 429. Any error in one source returns an empty list, so results of the other source still come through.",
+      "function_in_system": "Sits under every citation lookup of the ResourcePreparationAgent and of the compiler's placeholder resolution. Keeps the tool inside the APIs' rate limits and isolates a failing source. Otherwise a single rate-limited or unavailable API aborts the whole search.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/writeup/citation_search_tool.py",
+          "lines": "147-148",
+          "snippet": "# Add small delay to be respectful to arXiv API\ntime.sleep(1)"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/citation_search_tool.py",
+          "lines": "168-169",
+          "snippet": "# Add delay to respect rate limits (Semantic Scholar allows ~100 requests/5 minutes)\ntime.sleep(2)  # 2 second delay between requests"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/citation_search_tool.py",
+          "lines": "188-196",
+          "snippet": "if response.status_code == 429:\n    print(\"Warning: Semantic Scholar rate limit hit, waiting and retrying...\")\n    time.sleep(10)  # Wait 10 seconds before retry\n    response = requests.get(\n        self.semantic_scholar_base_url, \n        params=params, \n        headers=headers,\n        timeout=30\n    )"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/citation_search_tool.py",
+          "lines": "203-212",
+          "snippet": "except requests.exceptions.HTTPError as e:\n    if e.response.status_code == 429:\n        print(f\"Warning: Semantic Scholar rate limit exceeded. Try again later.\")\n        return []\n    else:\n        print(f\"Warning: Semantic Scholar HTTP error: {e}\")\n        return []\nexcept Exception as e:\n    print(f\"Warning: Semantic Scholar search failed: {e}\")\n    return []"
+        }
+      ]
+    },
+    {
+      "name": "workspace path confinement in file and document tools",
+      "what_it_is": "Every file-editing tool (list_dir, see_file, modify_file, create_file_with_content, search_keyword, delete_file_or_folder) and the LaTeX and VLM tools carry their own copy of _safe_path. An absolute path outside the workspace raises a PermissionError with an instruction to use a relative path; the tools catch it and return the message as the tool observation. The check covers absolute paths only and uses a string prefix test (startswith without a path separator). Relative paths are joined to the workspace and resolved with abspath without a containment check, so '../' segments leave the workspace. LaTeXCompilerTool calls _safe_path only for relative paths, and LaTeXGeneratorTool defines it without calling it. delete_file_or_folder with an empty filename deletes the whole workspace.",
+      "function_in_system": "Sits at every tool-level file access of all seven agents, the only file interface besides code actions. Keeps tool reads and writes inside the shared per-run workspace the agents coordinate through and turns an out-of-workspace path into a correctable observation. It complements the workspace-bound code execution, whose chdir scopes relative paths of code actions and leaves absolute paths open. Otherwise an agent passing an absolute path from its memory or another run reads or overwrites files outside the run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/general_tools/file_editing/file_editing_tools.py",
+          "lines": "36-57",
+          "snippet": "def _safe_path(self, path: str) -> str:\n    \"\"\"Convert path to absolute workspace path with clear error messages for agents.\"\"\"\n    if not self.working_dir:\n        return path\n\n    abs_working_dir = os.path.abspath(self.working_dir)\n\n    # Check if input path is absolute or relative\n    if os.path.isabs(path):\n        # Absolute path handling\n        abs_path = os.path.abspath(path)\n\n        # Check if within workspace\n        if abs_path.startswith(abs_working_dir):\n            return abs_path\n        else:\n            # Provide actionable error for agent\n            raise PermissionError(\n                f\"Access denied: The absolute path '{path}' is outside the workspace. \"\n                f\"Please use a relative path or an absolute path within '{abs_working_dir}'. \"\n                f\"Example: Use 'subdirectory/' instead of the full path.\"\n            )"
+        },
+        {
+          "file": "freephdlabor/toolkits/general_tools/file_editing/file_editing_tools.py",
+          "lines": "157-161",
+          "snippet": "def forward(self, filename: str, start_line: int, end_line: int, new_content: str) -> str:\n    try:\n        filepath = self._safe_path(filename)\n    except PermissionError as e:\n        return str(e)"
+        },
+        {
+          "file": "freephdlabor/toolkits/general_tools/file_editing/file_editing_tools.py",
+          "lines": "372-381",
+          "snippet": "def forward(self, filename: str) -> str:\n    if filename == \"\":\n        abs_working_dir = os.path.abspath(self.working_dir)\n        # Only delete inside the working directory\n        for root, dirs, files in os.walk(abs_working_dir, topdown=False):\n            for name in files:\n                os.remove(os.path.join(root, name))\n            for name in dirs:\n                os.rmdir(os.path.join(root, name))\n        return \"All files and folders in the working directory have been deleted.\""
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_compiler_tool.py",
+          "lines": "92-93",
+          "snippet": "if self.working_dir and not os.path.isabs(latex_file_path):\n    latex_file_path = self._safe_path(latex_file_path)"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/vlm_document_analysis_tool.py",
+          "lines": "136-144",
+          "snippet": "try:\n    resolved_path = self._safe_path(path) if self.working_dir else path\n    print(f\"Resolved Path {resolved_path}\")\n    if os.path.exists(resolved_path):\n        valid_paths.append(resolved_path)\n    else:\n        print(f\"Warning: Image path does not exist: {path}\")\nexcept PermissionError as e:\n    print(f\"Warning: Access denied to path {path}: {e}\")"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_reflection_tool.py",
+          "lines": "171",
+          "snippet": "resolved_path = self._safe_path(latex_file_path)"
+        }
+      ]
+    },
+    {
+      "name": "LLM idea standardization with rule-based fallback",
+      "what_it_is": "IdeaStandardizationTool strips line-number prefixes left by see_file output, parses the idea (taking the first element of a list), and asks the raw model to map it to the AI-Scientist-v2 schema. The response is parsed from a json code block, a bare JSON object or the whole text, and validated for the six fields Name, Title, Short Hypothesis, Abstract, Experiments, Risk Factors and Limitations (present and non-empty). On any failure a rule-based conversion maps common field names, derives a Name from the title and synthesizes default experiments and risk factors. If parsing the input itself fails, the tool returns a placeholder idea named conversion_failed that carries all fields the RunExperimentTool schema check requires.",
+      "function_in_system": "Sits in the ExperimentationAgent path directly before the idea schema validation of RunExperimentTool, which the prompt makes mandatory. Converts heterogeneous idea formats produced by the manager and ideation agent into the input format of the vendored pipeline and keeps the conversion working when the LLM output is unparsable or incomplete. Otherwise a malformed or differently structured idea stops the experiment step or reaches the pipeline without model and dataset specifications.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/idea_standardization_tool.py",
+          "lines": "94-105",
+          "snippet": "# Try LLM-based intelligent conversion\ntry:\n    standardized = self._llm_based_conversion(idea_data)\n    self.logger.info(\"LLM-based conversion successful\")\n    return json.dumps([standardized])\n\nexcept Exception as llm_error:\n    self.logger.warning(f\"LLM conversion failed: {llm_error}, using rule-based fallback\")\n    # Fallback to rule-based conversion\n    standardized = self._rule_based_conversion(idea_data)\n    self.logger.info(\"Rule-based fallback conversion completed\")\n    return json.dumps([standardized])"
+        },
+        {
+          "file": "freephdlabor/toolkits/idea_standardization_tool.py",
+          "lines": "107-118",
+          "snippet": "except Exception as e:\n    self.logger.error(f\"Idea standardization failed: {e}\")\n    self.logger.error(f\"Input type: {type(idea_json)}, Input preview: {str(idea_json)[:200]}...\")\n    return json.dumps([{\n        \"Name\": \"conversion_failed\",\n        \"Title\": \"Research Idea Conversion Failed\",\n        \"Short Hypothesis\": \"Unable to convert research idea format\",\n        \"Abstract\": f\"Conversion error: {str(e)}\",\n        \"Experiments\": [\"Manual intervention required\"],\n        \"Risk Factors and Limitations\": [\"Format conversion failed\", \"Original idea may be malformed\"],\n        \"Related Work\": \"This represents a failed format conversion attempt.\"\n    }])"
+        },
+        {
+          "file": "freephdlabor/toolkits/idea_standardization_tool.py",
+          "lines": "128-133",
+          "snippet": "for line in lines:\n    # Only remove if it's clearly a line number prefix (digits + colon at start of line)\n    # and the line contains more content after the colon\n    if re.match(r'^\\s*\\d+:', line) and len(line.split(':', 1)) > 1:\n        # Remove only the first occurrence of digits followed by colon at line start\n        cleaned_line = re.sub(r'^\\s*\\d+:', '', line, count=1)"
+        },
+        {
+          "file": "freephdlabor/toolkits/idea_standardization_tool.py",
+          "lines": "384-392",
+          "snippet": "def _validate_ai_scientist_format(self, data):\n    \"\"\"Validate that converted data has required AI-Scientist-v2 fields.\"\"\"\n    required_fields = [\"Name\", \"Title\", \"Short Hypothesis\", \"Abstract\", \"Experiments\", \"Risk Factors and Limitations\"]\n\n    for field in required_fields:\n        if field not in data:\n            raise KeyError(f\"Missing required field: {field}\")\n        if not data[field]:\n            raise ValueError(f\"Empty required field: {field}\")"
+        }
+      ]
+    },
+    {
+      "name": "workspace-grounded generation prompt in LaTeXGeneratorTool",
+      "what_it_is": "Before each section generation the tool scans paper_workspace/figures for .png files with their .txt descriptions and reads the citation keys and titles from references.bib, and inserts both lists into the system prompt. The prompt requires the exact figure filenames in \\includegraphics, citation keys from the list, a [CITE:brief_description] placeholder when no key fits, and numerical values only from the content_description passed by the agent, stating that the model has no access to experimental data files.",
+      "function_in_system": "Sits inside the tool-internal LLM call that writes the paper sections for the WriteupAgent. Restricts generated LaTeX to figures, references and results that exist in the workspace, and hands unmatched citations to the automatic placeholder resolution of LaTeXCompilerTool. Otherwise the model invents figure files, citation keys and results that break compilation or end up as fabricated claims in the paper.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_generator_tool.py",
+          "lines": "297-302",
+          "snippet": "# Scan for available figures and their descriptions\nfigures_info = self._scan_figures_directory()\nfigures_context = self._format_figures_context(figures_info)\n\n# Get available citations context\ncitations_context = self._format_citations_context()"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_generator_tool.py",
+          "lines": "310-318",
+          "snippet": "{figures_context}\n\nCRITICAL CITATION INSTRUCTIONS:\n{citations_context}\n\n- NEVER use [? ] or [?] placeholders for citations\n- ALWAYS use proper \\\\cite{{key}} format with actual citation keys from the list above\n- If you need a citation but don't find a perfect match, use the closest relevant one\n- If no relevant citations exist, use [CITE:brief_description] format for the WriteupAgent to resolve later"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_generator_tool.py",
+          "lines": "328-334",
+          "snippet": "🚨 CRITICAL DATA USAGE RULES - ABSOLUTE REQUIREMENTS 🚨:\n\n**YOU HAVE NO ACCESS TO EXPERIMENTAL DATA FILES**:\n- You CANNOT read baseline_summary.json, research_summary.json, or ablation_summary.json\n- You CANNOT access experimental result files or logs\n- You CANNOT infer or assume any numerical values\n- You MUST ONLY use data explicitly provided in the content_description parameter"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_generator_tool.py",
+          "lines": "637",
+          "snippet": "context_lines.append(\"IMPORTANT: Use these exact filenames when creating \\\\includegraphics{{figures/filename}} commands.\")"
+        },
+        {
+          "file": "freephdlabor/toolkits/writeup/latex_generator_tool.py",
+          "lines": "697-699",
+          "snippet": "context = \"Available citations (use \\\\cite{key} format):\\n\"\nfor cite_key, title in self.available_citations.items():\n    context += f\"- {cite_key}: {title}\\n\""
+        }
+      ]
+    }
+  ]
+}

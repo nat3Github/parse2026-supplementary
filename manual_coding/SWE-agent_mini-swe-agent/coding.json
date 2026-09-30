@@ -1,0 +1,675 @@
+{
+  "repo": "SWE-agent/mini-swe-agent",
+  "commit": "d0e3c19fb5",
+  "system_type": "application",
+  "system_type_reason": "Minimal software-engineering agent run via CLI/run scripts; library use is secondary.",
+  "repo_overview": {
+    "summary": "Minimal AI software engineering agent (v2.4.2) that solves GitHub issues and similar tasks through a linear message history: the LM is queried, the action it emits (bash command, via text regex or tool call) is executed in an environment, and the output is appended as the next observation. Every run script combines exactly one agent, one environment and one model class, which are loosely coupled through protocols and swappable via string-keyed factories.",
+    "components": [
+      {
+        "path": "src/minisweagent/__init__.py",
+        "purpose": "global config loading (.env) and the Agent/Model/Environment protocols that define the component interfaces"
+      },
+      {
+        "path": "src/minisweagent/exceptions.py",
+        "purpose": "InterruptAgentFlow exception hierarchy (Submitted, LimitsExceeded, TimeExceeded, UserInterruption, FormatError) used to break out of a step and inject messages into the history"
+      },
+      {
+        "path": "src/minisweagent/agents/",
+        "purpose": "agent control flow: default.py holds the run/step/query/execute_actions loop with step, cost and time limits and trajectory saving; interactive.py adds a terminal human-in-the-loop variant with confirm/human/yolo modes; utils/prompt_user.py is the input helper"
+      },
+      {
+        "path": "src/minisweagent/environments/",
+        "purpose": "action execution backends selected by a string-keyed factory: local subprocess, docker, singularity; extra/ holds bubblewrap, contree, swerex_docker and swerex_modal sandboxes for isolated or remote execution"
+      },
+      {
+        "path": "src/minisweagent/models/",
+        "purpose": "LM interfaces selected by get_model (litellm as default, plus openrouter, portkey, requesty in chat, response-API and textbased variants); GlobalModelStats tracks cost and call counts across threads with optional global limits; extra/roulette.py picks a random model per call; test_models.py provides a deterministic model for tests"
+      },
+      {
+        "path": "src/minisweagent/models/utils/",
+        "purpose": "shared model helpers: tenacity retry policy, action parsing and observation formatting for text and tool-call modes, Anthropic thinking-block reordering, prompt cache control, multimodal content expansion"
+      },
+      {
+        "path": "src/minisweagent/config/",
+        "purpose": "yaml configs and jinja prompt templates (system/instance/observation/format-error templates, limits, action regex) for the default, mini and benchmark setups"
+      },
+      {
+        "path": "src/minisweagent/run/",
+        "purpose": "entry points: hello_world.py and mini.py wire one agent, environment and model; benchmarks/ holds the SWE-bench (batch and single) and ProgramBench runners with batch progress tracking; utilities/ holds the trajectory inspector, config setup and the mini-extra CLI"
+      },
+      {
+        "path": "src/minisweagent/utils/",
+        "purpose": "logging setup and serialization helpers"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "src/minisweagent/agents/default.py",
+        "lines": "96-99",
+        "snippet": "while True:\n    try:\n        self.step()\n        self.n_consecutive_format_errors = 0  # reset on any clean step"
+      },
+      {
+        "file": "src/minisweagent/agents/default.py",
+        "lines": "120-121",
+        "snippet": "if self.messages[-1].get(\"role\") == \"exit\":\n    break"
+      },
+      {
+        "file": "src/minisweagent/agents/default.py",
+        "lines": "152-155",
+        "snippet": "def execute_actions(self, message: dict) -> list[dict]:\n    \"\"\"Execute actions in message, add observation messages, return them.\"\"\"\n    outputs = [self.env.execute(action) for action in message.get(\"extra\", {}).get(\"actions\", [])]\n    return self.add_messages(*self.model.format_observation_messages(message, outputs, self.get_template_vars()))"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "step() -> execute_actions(self.query()) (default.py:124-126) executes the actions parsed from the model's own response, so the LLM decides the next bash call.",
+      "consumes_feedback": "execute_actions appends the command outputs as observation messages to self.messages (default.py:152-155), which are sent with the next query() call (default.py:147).",
+      "multi_turn_until_termination": "while True (default.py:96) iterates until the last message has role 'exit' (default.py:120-121), produced by submission, limits or repeated format errors."
+    }
+  },
+  "topology": {
+    "verdict": "single-agent",
+    "evidence": [
+      {
+        "file": "src/minisweagent/agents/default.py",
+        "lines": "92-95",
+        "snippet": "self.add_messages(\n    self.model.format_message(role=\"system\", content=self._render_template(self.config.system_template)),\n    self.model.format_message(role=\"user\", content=self._render_template(self.config.instance_template)),\n)"
+      },
+      {
+        "file": "src/minisweagent/agents/default.py",
+        "lines": "124-126",
+        "snippet": "def step(self) -> list[dict]:\n    \"\"\"Query the LM, execute actions.\"\"\"\n    return self.execute_actions(self.query())"
+      }
+    ],
+    "justification": "One DefaultAgent instance with one system_template drives one self.model and executes actions via self.env.execute (default.py:154). The environment is a tool, so this is a single agent calling tools. InteractiveAgent subclasses DefaultAgent and adds a human participant, which keeps the topology single-agent.",
+    "verdict_raw": "single-agent"
+  },
+  "resilience": [
+    {
+      "name": "deterministic action-format validation with error feedback",
+      "what_it_is": "Every model response is checked by fixed rules before execution. Text mode: the action regex must match exactly once. Tool-call mode: at least one tool call, arguments parse as JSON, tool name is 'bash', a 'command' argument is present. A violation raises FormatError carrying the concrete error rendered through format_error_template; the run loop appends it to the history and continues with the next query.",
+      "function_in_system": "The check sits in model.query() between the API response and the returned actions (models/utils parsers); the feedback sits in the run loop around step() (default.py:100-112). It catches malformed LLM output before anything touches the environment and turns it into corrective feedback, so the next turn can produce a valid action. Otherwise a malformed response crashes the run (JSON/key errors) or executes an empty or misparsed action.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/models/utils/actions_text.py",
+          "lines": "24-27",
+          "snippet": "actions = [a.strip() for a in re.findall(action_regex, content, re.DOTALL)]\nif len(actions) != 1:\n    error_msg = f\"Expected exactly 1 action, found {len(actions)}.\"\n    raise FormatError("
+        },
+        {
+          "file": "src/minisweagent/models/utils/actions_toolcall.py",
+          "lines": "56-63",
+          "snippet": "try:\n    args = json.loads(tool_call.function.arguments)\nexcept Exception as e:\n    error_msg = f\"Error parsing tool call arguments: {e}.\"\nif tool_call.function.name != \"bash\":\n    error_msg += f\"Unknown tool '{tool_call.function.name}'.\"\nif not isinstance(args, dict) or \"command\" not in args:\n    error_msg += \"Missing 'command' argument in bash tool call.\""
+        },
+        {
+          "file": "src/minisweagent/agents/default.py",
+          "lines": "100-101, 111-112",
+          "snippet": "except FormatError as e:\n    self.n_consecutive_format_errors += 1\n...\nelse:\n    self.add_messages(*e.messages)"
+        },
+        {
+          "file": "src/minisweagent/config/default.yaml",
+          "lines": "144-156",
+          "snippet": "format_error_template: |\n  {% if finish_reason is defined and finish_reason in [\"length\", \"tool_calls\"] -%}\n  Your previous response reached the output token limit (finish_reason={{ finish_reason }}) before you produced a complete action, so it was cut off. Respond more concisely and provide exactly one action in the required format. If you need to think more, do so briefly.\n  {%- else -%}\n  Format error:\n\n  <error>\n  {{error}}\n  </error>\n\n  Here is general guidance on how to format your response:\n\n  Please always provide EXACTLY ONE action in triple backticks, found {{actions|length}} actions."
+        }
+      ]
+    },
+    {
+      "name": "consecutive format-error circuit breaker",
+      "what_it_is": "Counter of consecutive FormatErrors; when it reaches max_consecutive_format_errors (default 3, 0 disables) the run exits with status RepeatedFormatError. The counter resets after every clean step.",
+      "function_in_system": "Sits in the run loop next to the format-error feedback (default.py:99-110). Bounds the self-correction loop: a model that persistently fails the output format would otherwise loop forever and keep spending tokens. Resetting on clean steps limits it to consecutive failures.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/agents/default.py",
+          "lines": "102-110",
+          "snippet": "if 0 < self.config.max_consecutive_format_errors <= self.n_consecutive_format_errors:\n    self.add_messages(\n        *e.messages,\n        {\n            \"role\": \"exit\",\n            \"content\": \"RepeatedFormatError\",\n            \"extra\": {\"exit_status\": \"RepeatedFormatError\", \"submission\": \"\"},\n        },\n    )"
+        },
+        {
+          "file": "src/minisweagent/agents/default.py",
+          "lines": "32-33",
+          "snippet": "max_consecutive_format_errors: int = 3\n\"\"\"Exit after this many format errors in a row (0 = no limit).\"\"\""
+        }
+      ]
+    },
+    {
+      "name": "step and cost limit",
+      "what_it_is": "Before each model call, n_calls is compared against step_limit and the accumulated cost against cost_limit; reaching either raises LimitsExceeded, which ends the run with exit status LimitsExceeded. AgentConfig defaults to cost_limit=3.0 and step_limit=0 (disabled); config/default.yaml sets both to 0, config/mini.yaml sets cost_limit to 3.",
+      "function_in_system": "Sits at the start of query() (default.py:130), before the API call. Caps a runaway or non-terminating agent and bounds API spend per run. Its effect depends on the config: with default.yaml both guards are disabled.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/agents/default.py",
+          "lines": "130-137",
+          "snippet": "if 0 < self.config.step_limit <= self.n_calls or 0 < self.config.cost_limit <= self.cost:\n    raise LimitsExceeded(\n        {\n            \"role\": \"exit\",\n            \"content\": \"LimitsExceeded\",\n            \"extra\": {\"exit_status\": \"LimitsExceeded\", \"submission\": \"\"},\n        }\n    )"
+        },
+        {
+          "file": "src/minisweagent/agents/default.py",
+          "lines": "26-29",
+          "snippet": "step_limit: int = 0\n\"\"\"Maximum number of steps the agent can take.\"\"\"\ncost_limit: float = 3.0\n\"\"\"Stop agent after exceeding (!) this cost.\"\"\""
+        },
+        {
+          "file": "src/minisweagent/config/default.yaml",
+          "lines": "104-105",
+          "snippet": "step_limit: 0\ncost_limit: 0."
+        },
+        {
+          "file": "src/minisweagent/config/mini.yaml",
+          "lines": "101-102",
+          "snippet": "step_limit: 0\ncost_limit: 3."
+        },
+        {
+          "file": "src/minisweagent/config/benchmarks/swebench.yaml",
+          "lines": "112-113",
+          "snippet": "step_limit: 250\ncost_limit: 3."
+        },
+        {
+          "file": "src/minisweagent/config/benchmarks/programbench.yaml",
+          "lines": "183-184",
+          "snippet": "step_limit: 1000\ncost_limit: 0"
+        }
+      ]
+    },
+    {
+      "name": "wall-clock time limit",
+      "what_it_is": "Before each model call, elapsed seconds since agent construction are compared against wall_time_limit_seconds (default 0, disabled); reaching it raises TimeExceeded and ends the run with exit status TimeExceeded. Among the shipped configs only programbench.yaml enables it (21600 s = 6 h).",
+      "function_in_system": "Sits at the start of query() (default.py:138), after the step/cost check. Bounds total runtime, which catches hangs and slow loops that stay under the step and cost budgets. The check runs between steps, so a single long-running command is bounded by the environment timeout.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/agents/default.py",
+          "lines": "138-145",
+          "snippet": "if 0 < self.config.wall_time_limit_seconds <= int(time.time() - self._start_time):\n    raise TimeExceeded(\n        {\n            \"role\": \"exit\",\n            \"content\": \"TimeExceeded\",\n            \"extra\": {\"exit_status\": \"TimeExceeded\", \"submission\": \"\"},\n        }\n    )"
+        },
+        {
+          "file": "src/minisweagent/agents/default.py",
+          "lines": "30-31",
+          "snippet": "wall_time_limit_seconds: int = 0\n\"\"\"Stop agent after this many seconds of wall-clock time. 0 means no limit.\"\"\""
+        },
+        {
+          "file": "src/minisweagent/config/benchmarks/programbench.yaml",
+          "lines": "3-4",
+          "snippet": "agent:\n  wall_time_limit_seconds: 21600"
+        }
+      ]
+    },
+    {
+      "name": "uncaught exception recorded as exit message",
+      "what_it_is": "Any exception outside the InterruptAgentFlow hierarchy is converted into an exit message carrying the exception type as exit_status, the exception string and the full traceback; the exception is then re-raised.",
+      "function_in_system": "Sits in the last except branch of the run loop (default.py:115-117). Combined with the per-step checkpoint, it guarantees that a crashed run leaves a trajectory with a diagnosable failure reason. The re-raise keeps crash semantics for the caller, so it serves post-mortem analysis and batch bookkeeping.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/agents/default.py",
+          "lines": "115-117",
+          "snippet": "except Exception as e:\n    self.handle_uncaught_exception(e)\n    raise"
+        },
+        {
+          "file": "src/minisweagent/agents/default.py",
+          "lines": "74-86",
+          "snippet": "def handle_uncaught_exception(self, e: Exception) -> list[dict]:\n    return self.add_messages(\n        self.model.format_message(\n            role=\"exit\",\n            content=str(e),\n            extra={\n                \"exit_status\": type(e).__name__,\n                \"submission\": \"\",\n                \"exception_str\": str(e),\n                \"traceback\": traceback.format_exc(),\n            },\n        )\n    )"
+        }
+      ]
+    },
+    {
+      "name": "complete per-step trajectory persistence",
+      "what_it_is": "The full serialized agent state (messages, cost, call count, config, exit status) is written to output_path as JSON after every step, inside the loop's finally block. Every model class additionally attaches the raw API response to a FormatError (repr() fallback if serialization fails), so failed turns are part of the saved trajectory.",
+      "function_in_system": "Sits in the finally clause of the run loop (default.py:118-119), so it executes after clean steps, handled interruptions and crashes alike; the response attachment sits in model.query() (litellm_model.py:87-97). Protects against loss of progress and diagnostics when the process crashes or is killed mid-run, including exactly those turns where the model misbehaved. It serves as a persistence checkpoint for inspection and failure analysis.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/models/litellm_model.py",
+          "lines": "87-97",
+          "snippet": "# Note: all model.query() implementations must persist the response on FormatError.\ntry:\n    actions = self._parse_actions(response)\nexcept FormatError as e:\n    try:\n        e.messages[0][\"extra\"][\"response\"] = response.model_dump(mode=\"json\")\n    except Exception:\n        # model_dump failed (e.g. unserializable object); fall back to repr\n        # so the spec contract (\"response MUST be persisted\") holds unconditionally.\n        e.messages[0][\"extra\"][\"response\"] = repr(response)\n    raise"
+        },
+        {
+          "file": "src/minisweagent/agents/default.py",
+          "lines": "118-119",
+          "snippet": "finally:\n    self.save(self.config.output_path)"
+        },
+        {
+          "file": "src/minisweagent/agents/default.py",
+          "lines": "184-187",
+          "snippet": "data = self.serialize(*extra_dicts)\nif path:\n    path.parent.mkdir(parents=True, exist_ok=True)\n    path.write_text(json.dumps(data, indent=2))"
+        }
+      ]
+    },
+    {
+      "name": "human confirmation gate before action execution",
+      "what_it_is": "In mode 'confirm' (default in mini.yaml), the agent blocks before executing the model's commands and asks the user to confirm; commands matching a whitelist_actions regex skip confirmation. The user can switch modes at runtime (/y yolo, /c confirm, /u human).",
+      "function_in_system": "Sits in InteractiveAgent.execute_actions (interactive.py:130), between the model response and env.execute. A human approves or blocks each potentially harmful or wrong bash command before it touches the environment. The whitelist reduces confirmation load for known-safe commands.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "162-163",
+          "snippet": "def _should_ask_confirmation(self, action: str) -> bool:\n    return self.config.mode == \"confirm\" and not any(re.match(r, action) for r in self.config.whitelist_actions)"
+        },
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "129-132",
+          "snippet": "try:\n    self._ask_confirmation_or_interrupt(commands)\n    for action in actions:\n        outputs.append(self.env.execute(action))"
+        },
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "173-175",
+          "snippet": "match user_input := self._prompt_and_handle_slash_commands(prompt).strip():\n    case \"\" | \"/y\":\n        pass  # confirmed, do nothing"
+        }
+      ]
+    },
+    {
+      "name": "human rejection with corrective comment",
+      "what_it_is": "At the confirmation prompt, any typed text rejects the commands; they are skipped and a UserInterruption injects 'The user rejected your commands with the following message: <text>' into the history (interrupt_type UserRejection).",
+      "function_in_system": "Follows the confirmation gate (interactive.py:176-182). Turns a blocked action into natural-language feedback, so the model can revise its plan in the next turn. Otherwise the human could only allow or abort, and the model would lack the reason for the rejection.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "176-182",
+          "snippet": "case \"/u\":  # Skip execution action and get back to query\n    self._interrupt(\"Commands not executed. Switching to human mode\", itype=\"UserRejection\")\ncase _:\n    self._interrupt(\n        f\"Commands not executed. The user rejected your commands with the following message: {user_input}\",\n        itype=\"UserRejection\",\n    )"
+        },
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "40-41",
+          "snippet": "def _interrupt(self, content: str, *, itype: str = \"UserInterruption\") -> NoReturn:\n    raise UserInterruption({\"role\": \"user\", \"content\": content, \"extra\": {\"interrupt_type\": itype}})"
+        }
+      ]
+    },
+    {
+      "name": "keyboard interrupt with human comment",
+      "what_it_is": "Ctrl+C during a step (model call or command execution) is caught; the user is prompted for a comment or command, which is injected as 'Interrupted by user: <text>' (fallback 'Temporary interruption caught.') and the loop continues.",
+      "function_in_system": "Wraps the whole step in InteractiveAgent.step (interactive.py:111-122). Lets the human stop a derailing trajectory or a hanging command at any time and steer the agent, while the run and its history stay alive. Otherwise Ctrl+C would kill the process and end the run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "111-122",
+          "snippet": "try:\n    console.print(Rule())\n    return super().step()\nexcept KeyboardInterrupt:\n    interruption_message = self._prompt_and_handle_slash_commands(\n        \"\\n\\n[bold yellow]Interrupted.[/bold yellow] \"\n        \"[green]Type a comment/command[/green] (/h for available commands)\"\n        \"\\n[bold yellow]>[/bold yellow] \"\n    ).strip()\n    if not interruption_message or interruption_message in self._MODE_COMMANDS_MAPPING:\n        interruption_message = \"Temporary interruption caught.\"\n    self._interrupt(f\"Interrupted by user: {interruption_message}\")"
+        }
+      ]
+    },
+    {
+      "name": "human-extendable limits with unattended fallback",
+      "what_it_is": "When LimitsExceeded is raised, an interactive user is shown current spend and asked for a new step and cost limit, after which the query is retried. With a non-TTY stdin the exception is re-raised for a clean LimitsExceeded exit. TimeExceeded is always re-raised.",
+      "function_in_system": "Wraps DefaultAgent.query in InteractiveAgent.query (interactive.py:72-94). Turns a hard budget stop into a human decision point, so a productive run can continue past its budget. The TTY check keeps unattended runs (CI, sandbox, --yolo) from crashing on EOFError and losing the clean exit status; the TimeExceeded branch prevents an endless prompt loop.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "75-94",
+          "snippet": "except TimeExceeded:\n    # A wall-clock limit can't be lifted by raising the step/cost limits\n    # (the next query re-checks the clock and raises again), so prompting\n    # would loop forever. Always stop cleanly instead.\n    raise\nexcept LimitsExceeded:\n    if not self._stdin_is_interactive():\n        ...\n        raise\n    console.print(\n        f\"Limits exceeded. Limits: {self.config.step_limit} steps, ${self.config.cost_limit}.\\n\"\n        f\"Current spend: {self.n_calls} steps, ${self.cost:.2f}.\"\n    )\n    self.config.step_limit = int(input(\"New step limit: \"))\n    self.config.cost_limit = float(input(\"New cost limit: \"))\n    return super().query()"
+        },
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "104-107",
+          "snippet": "try:\n    return sys.stdin is not None and sys.stdin.isatty()\nexcept (ValueError, OSError):\n    return False"
+        }
+      ]
+    },
+    {
+      "name": "human confirmation of task completion",
+      "what_it_is": "With confirm_exit=True (default), a Submitted signal from the agent triggers a prompt: Enter accepts the submission, typed text is injected as a new task (interrupt_type UserNewTask), /u switches to human mode and continues.",
+      "function_in_system": "Sits at the termination point in InteractiveAgent.execute_actions (interactive.py:133-134). Guards against premature or falsely successful submission: the human can veto the agent's self-declared completion and send it back to work. The DefaultAgent ends the run on Submitted immediately.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "133-134",
+          "snippet": "except Submitted as e:\n    self._check_for_new_task_or_submit(e)"
+        },
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "146-160",
+          "snippet": "if self.config.confirm_exit:\n    ...\n    user_input = self._prompt_and_handle_slash_commands(message).strip()\n    if user_input == \"/u\":  # directly continue\n        self._interrupt(\"Switched to human mode.\")\n    elif user_input in self._MODE_COMMANDS_MAPPING:  # ask again\n        return self._check_for_new_task_or_submit(e)\n    elif user_input:\n        self._interrupt(f\"The user added a new task: {user_input}\", itype=\"UserNewTask\")\nraise e"
+        }
+      ]
+    },
+    {
+      "name": "consistent history for partially executed action batches",
+      "what_it_is": "Command outputs are collected incrementally and appended as observation messages in a finally block, so outputs of already executed actions enter the history even when the batch is interrupted by rejection, submission or an exception. The tool-call observation formatter pads every action lacking an output with a synthetic result (returncode -1, exception_info 'action was not executed').",
+      "function_in_system": "Spans InteractiveAgent.execute_actions (interactive.py:128-139) and the observation formatters in models/utils. When a multi-action response is interrupted midway, the model sees the effects of commands that already changed the environment and learns explicitly which ones were skipped. Every tool_call_id keeps a matching result, which tool-calling APIs require; an unpaired id would make the next API request fail.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/models/utils/actions_toolcall.py",
+          "lines": "87-88",
+          "snippet": "not_executed = {\"output\": \"\", \"returncode\": -1, \"exception_info\": \"action was not executed\"}\npadded_outputs = outputs + [not_executed] * (len(actions) - len(outputs))"
+        },
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "128-139",
+          "snippet": "outputs = []\ntry:\n    self._ask_confirmation_or_interrupt(commands)\n    for action in actions:\n        outputs.append(self.env.execute(action))\nexcept Submitted as e:\n    self._check_for_new_task_or_submit(e)\nfinally:\n    result = self.add_messages(\n        *self.model.format_observation_messages(message, outputs, self.get_template_vars())\n    )\nreturn result"
+        }
+      ]
+    },
+    {
+      "name": "human takeover mode",
+      "what_it_is": "In mode 'human', the model query is replaced by a user prompt; the typed command is wrapped as an action and executed in the environment, and its output enters the shared history. Switching back to /c or /y hands control back to the model.",
+      "function_in_system": "Replaces DefaultAgent.query in InteractiveAgent.query (interactive.py:60-71). Lets the human take over when the agent is stuck or heading the wrong way, fix the environment state manually, and hand back a trajectory the model can continue from.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/agents/interactive.py",
+          "lines": "60-71",
+          "snippet": "if self.config.mode == \"human\":\n    match command := self._prompt_and_handle_slash_commands(\"[bold yellow]>[/bold yellow] \"):\n        case \"/y\" | \"/c\":\n            pass\n        case _:\n            msg = {\n                \"role\": \"user\",\n                \"content\": f\"User command: \\n```bash\\n{command}\\n```\",\n                \"extra\": {\"actions\": [{\"command\": command}]},\n            }\n            self.add_messages(msg)\n            return msg"
+        }
+      ]
+    },
+    {
+      "name": "model-call retry with exponential backoff and error classification",
+      "what_it_is": "Every model call is wrapped in a tenacity retry: up to 10 attempts (MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT), exponential wait between 4 and 60 seconds, reraise after the last attempt. Each model class declares abort_exceptions that stop retrying immediately (litellm: auth, permission, not found, context window exceeded, unsupported params; OpenRouter/Requesty: auth only; Portkey: TypeError, ValueError). The HTTP-based providers map status codes onto these classes (401 to an abort-listed auth error, 429 to a retryable rate-limit error) and bound each request with a 60 second timeout.",
+      "function_in_system": "Sits around _query() inside model.query(), within a single agent step (litellm_model.py:82-84 and the equivalent lines in every provider). Absorbs transient infrastructure failures (network errors, 5xx, rate limits, hung connections) before they reach the agent loop; the classification spends retries only on errors that can resolve themselves, and the timeout turns a hanging request into a retryable error. Otherwise one network hiccup ends a possibly hours-long run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/models/utils/retry.py",
+          "lines": "19-25",
+          "snippet": "return Retrying(\n    reraise=True,\n    stop=stop_after_attempt(int(os.getenv(\"MSWEA_MODEL_RETRY_STOP_AFTER_ATTEMPT\", \"10\"))),\n    wait=wait_exponential(multiplier=1, min=4, max=60),\n    before_sleep=before_sleep_log(logger, logging.WARNING),\n    retry=retry_if_not_exception_type(tuple(abort_exceptions)),\n)"
+        },
+        {
+          "file": "src/minisweagent/models/litellm_model.py",
+          "lines": "50-57, 82-84",
+          "snippet": "abort_exceptions: list[type[Exception]] = [\n    litellm.exceptions.UnsupportedParamsError,\n    litellm.exceptions.NotFoundError,\n    litellm.exceptions.PermissionDeniedError,\n    litellm.exceptions.ContextWindowExceededError,\n    litellm.exceptions.AuthenticationError,\n    KeyboardInterrupt,\n]\n...\nfor attempt in retry(logger=logger, abort_exceptions=self.abort_exceptions):\n    with attempt:\n        response = self._query(self._prepare_messages_for_api(messages), **kwargs)"
+        },
+        {
+          "file": "src/minisweagent/models/openrouter_model.py",
+          "lines": "78-90",
+          "snippet": "response = requests.post(self._api_url, headers=headers, data=json.dumps(payload), timeout=60)\nresponse.raise_for_status()\nreturn response.json()\nexcept requests.exceptions.HTTPError as e:\n    if response.status_code == 401:\n        error_msg = \"Authentication failed. You can permanently set your API key with `mini-extra config set OPENROUTER_API_KEY YOUR_KEY`.\"\n        raise OpenRouterAuthenticationError(error_msg) from e\n    elif response.status_code == 429:\n        raise OpenRouterRateLimitError(\"Rate limit exceeded\") from e\n    else:\n        raise OpenRouterAPIError(f\"HTTP {response.status_code}: {response.text}\") from e\nexcept requests.exceptions.RequestException as e:\n    raise OpenRouterAPIError(f\"Request failed: {e}\") from e"
+        },
+        {
+          "file": "src/minisweagent/models/openrouter_model.py",
+          "lines": "56",
+          "snippet": "abort_exceptions: list[type[Exception]] = [OpenRouterAuthenticationError, KeyboardInterrupt]"
+        }
+      ]
+    },
+    {
+      "name": "truncation-aware format-error feedback",
+      "what_it_is": "Every action parser receives the API's finish_reason as a template variable; the Responses API status 'incomplete' with reason 'max_output_tokens' is mapped to 'length'. When finish_reason is 'length' (or 'tool_calls'), format_error_template renders a dedicated message telling the model its response was cut off and to answer more concisely.",
+      "function_in_system": "Sits inside the format-validation feedback path (model parsers plus format_error_template). Distinguishes an output-token truncation from a genuine format mistake, which look identical to the parser (zero or broken actions), and gives the matching correction. Otherwise the model receives generic format guidance, repeats an equally long response, gets truncated again and runs into the consecutive format-error limit.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "src/minisweagent/models/litellm_model.py",
+          "lines": "130-134",
+          "snippet": "return parse_toolcall_actions(\n    tool_calls,\n    format_error_template=self.config.format_error_template,\n    template_kwargs={\"finish_reason\": response.choices[0].finish_reason},\n)"
+        },
+        {
+          "file": "src/minisweagent/models/utils/actions_toolcall_response.py",
+          "lines": "52-55",
+          "snippet": "status = _get(response, \"status\")\nif status != \"incomplete\":\n    return status\nreturn \"length\" if _get(_get(response, \"incomplete_details\"), \"reason\") == \"max_output_tokens\" else status"
+        },
+        {
+          "file": "src/minisweagent/config/default.yaml",
+          "lines": "145-146",
+          "snippet": "{% if finish_reason is defined and finish_reason in [\"length\", \"tool_calls\"] -%}\nYour previous response reached the output token limit (finish_reason={{ finish_reason }}) before you produced a complete action, so it was cut off. Respond more concisely and provide exactly one action in the required format. If you need to think more, do so briefly."
+        }
+      ]
+    },
+    {
+      "name": "global cost and call limit across agents",
+      "what_it_is": "A process-wide GlobalModelStats singleton accumulates cost and call count of every model call under a threading lock; exceeding MSWEA_GLOBAL_COST_LIMIT or MSWEA_GLOBAL_CALL_LIMIT (default 0, disabled) raises RuntimeError.",
+      "function_in_system": "Called from every model.query() right after the API response (litellm_model.py:86). Operates one level above the per-agent step/cost limit: it caps the total spend of a batch run with many parallel agents, where each agent can stay under its own limit while the sum exceeds the budget.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/models/__init__.py",
+          "lines": "25-31",
+          "snippet": "def add(self, cost: float) -> None:\n    \"\"\"Add a model call with its cost, checking limits.\"\"\"\n    with self._lock:\n        self._cost += cost\n        self._n_calls += 1\n    if 0 < self.cost_limit < self._cost or 0 < self.call_limit < self._n_calls + 1:\n        raise RuntimeError(f\"Global cost/call limit exceeded: ${self._cost:.4f} / {self._n_calls}\")"
+        },
+        {
+          "file": "src/minisweagent/models/__init__.py",
+          "lines": "20-21",
+          "snippet": "self.cost_limit = float(os.getenv(\"MSWEA_GLOBAL_COST_LIMIT\", \"0\"))\nself.call_limit = int(os.getenv(\"MSWEA_GLOBAL_CALL_LIMIT\", \"0\"))"
+        }
+      ]
+    },
+    {
+      "name": "fail-fast on missing cost information",
+      "what_it_is": "After each model call the cost is computed (litellm cost calculator or the provider's usage field); a failed calculation or a cost of zero or below raises RuntimeError with remediation hints, unless cost_tracking is set to 'ignore_errors'. Requesty raises unconditionally.",
+      "function_in_system": "Sits in model.query() right after the API response, before the cost reaches the agent and GlobalModelStats. Keeps the budget guards effective: a silently zero cost would leave both the per-agent cost_limit and the global cost limit at zero forever, so the agent would run with unbounded spend unnoticed.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/models/litellm_model.py",
+          "lines": "108-124",
+          "snippet": "try:\n    cost = litellm.cost_calculator.completion_cost(response, model=self.config.model_name)\n    if cost <= 0.0:\n        raise ValueError(f\"Cost must be > 0.0, got {cost}\")\nexcept Exception as e:\n    cost = 0.0\n    if self.config.cost_tracking != \"ignore_errors\":\n        ...\n        logger.critical(msg)\n        raise RuntimeError(msg) from e"
+        },
+        {
+          "file": "src/minisweagent/models/requesty_model.py",
+          "lines": "124-130",
+          "snippet": "usage = response.get(\"usage\", {})\ncost = usage.get(\"cost\", 0.0)\nif cost == 0.0:\n    raise RequestyAPIError(\n        f\"No cost information available from Requesty API for model {self.config.model_name}. \"\n        \"Cost tracking is required but not provided by the API response.\"\n    )"
+        }
+      ]
+    },
+    {
+      "name": "prompt caching of the growing history",
+      "what_it_is": "Before each API call, cache-control markers are cleared from all messages and an ephemeral cache_control marker is set on the last message (mode 'default_end'). get_model enables this automatically for model names containing anthropic, claude, sonnet or opus.",
+      "function_in_system": "Sits in _prepare_messages_for_api() of the chat-completion providers (litellm_model.py:79). The linear history is resent in full on every step, so input tokens grow with each turn; the moving cache marker lets the provider reuse the already processed prefix, which cuts input cost and latency of every step after the first. It makes long runs cheaper and faster within the same budget.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/models/utils/cache_control.py",
+          "lines": "60-67",
+          "snippet": "messages = copy.deepcopy(messages)\nnew_messages = []\nfor i_entry, entry in enumerate(reversed(messages)):\n    _clear_cache_control(entry)\n    if i_entry == 0:\n        _set_cache_control(entry)\n    new_messages.append(entry)\nreturn list(reversed(new_messages))"
+        },
+        {
+          "file": "src/minisweagent/models/__init__.py",
+          "lines": "55-60",
+          "snippet": "if (\n    any(s in resolved_model_name.lower() for s in [\"anthropic\", \"sonnet\", \"opus\", \"claude\"])\n    and \"set_cache_control\" not in config\n):\n    # Select cache control for Anthropic models by default\n    config[\"set_cache_control\"] = \"default_end\""
+        }
+      ]
+    },
+    {
+      "name": "isolated sandbox execution with retried sandbox setup",
+      "what_it_is": "Agent actions run inside an isolated execution backend selected via config: a detached Docker container (commands via docker exec), a writable Singularity sandbox with --contain --cleanenv --fakeroot, a bubblewrap sandbox with read-only system paths and a private /tmp, or remote Modal/ConTree sandboxes. Building the Singularity sandbox is retried up to sandbox_build_retries (default 3) times, deleting the partial sandbox directory after each failed attempt.",
+      "function_in_system": "Sits behind env.execute(), the only path through which agent actions reach a system (default.py:154). Contains the blast radius of wrong or destructive commands (rm -rf, broken installs, leaked host environment) to a disposable sandbox, which makes unattended runs such as benchmarks safe; for these runs it takes over the protective role of the human confirmation gate. The build retry absorbs sporadic setup failures that would otherwise abort the instance before the agent starts.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/environments/docker.py",
+          "lines": "77-89",
+          "snippet": "cmd = [\n    self.config.executable,\n    \"run\",\n    \"-d\",\n    \"--name\",\n    container_name,\n    \"-w\",\n    self.config.cwd,\n    *self.config.run_args,\n    self.config.image,\n    \"sleep\",\n    self.config.container_timeout,\n]"
+        },
+        {
+          "file": "src/minisweagent/environments/singularity.py",
+          "lines": "33",
+          "snippet": "exec_args: list[str] = [\"--contain\", \"--cleanenv\", \"--fakeroot\"]"
+        },
+        {
+          "file": "src/minisweagent/environments/extra/bubblewrap.py",
+          "lines": "38-61",
+          "snippet": "wrapper_args: list[str] = [\n    \"--unshare-user-try\",\n    \"--ro-bind\",\n    \"/usr\",\n    \"/usr\",\n    ...\n    \"--tmpfs\",\n    \"/tmp\",\n    \"--proc\",\n    \"/proc\",\n    \"--dev\",\n    \"/dev\",\n    \"--new-session\","
+        },
+        {
+          "file": "src/minisweagent/environments/singularity.py",
+          "lines": "47-64",
+          "snippet": "# Building the sandbox can fail (very rarely), so we retry it\nmax_retries = self.config.sandbox_build_retries\nfor attempt in range(max_retries):\n    sandbox_dir = Path(tempfile.gettempdir()) / f\"minisweagent-{uuid.uuid4().hex[:8]}\"\n    try:\n        subprocess.run(\n            [self.config.executable, \"build\", \"--sandbox\", sandbox_dir, self.config.image],\n            check=True,\n            capture_output=True,\n        )\n        break\n    except subprocess.CalledProcessError as e:\n        shutil.rmtree(sandbox_dir, ignore_errors=True)\n        ...\n        if attempt == max_retries - 1:\n            raise"
+        },
+        {
+          "file": "src/minisweagent/config/benchmarks/programbench.yaml",
+          "lines": "191-204",
+          "snippet": "run_args:\n  - \"--rm\"\n  - \"--network\"\n  - \"none\"\n  - \"--cpus\"\n  - \"20\"\n  - \"--memory\"\n  - \"60g\"\n  - \"--memory-swap\"\n  - \"60g\"\n  - \"--user\"\n  - \"agent\"\n  - \"--cap-drop\"\n  - \"SYS_PTRACE\""
+        }
+      ]
+    },
+    {
+      "name": "bounded execution time and resource cleanup",
+      "what_it_is": "Two levels of bounds on execution resources. Per command: every environment passes a timeout (default 30 s, ConTree 100 s); LocalEnvironment starts each command in its own session and kills the whole process group on timeout. Per sandbox: Docker containers run 'sleep 2h' (container_timeout) with --rm, Modal sandboxes have runtime and deployment timeouts (3600 s), and cleanup()/__del__ stop or force-remove containers and delete sandbox and working directories.",
+      "function_in_system": "The command timeout sits inside env.execute() for every action; the lifetime bounds and cleanup sit at environment construction and teardown. A hanging command (server, interactive prompt, endless loop) ends after the timeout, and killing the process group leaves no orphaned child processes behind. Containers and sandboxes of crashed or killed runs expire on their own, which keeps large batch runs from accumulating leaked compute and cost.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/environments/local.py",
+          "lines": "84-91",
+          "snippet": "    start_new_session=os.name == \"posix\",\n)\ntry:\n    stdout, _ = process.communicate(timeout=timeout)\nexcept subprocess.TimeoutExpired:\n    os.killpg(process.pid, signal.SIGKILL) if os.name == \"posix\" else process.kill()\n    stdout, _ = process.communicate()\n    raise subprocess.TimeoutExpired(command, timeout, output=stdout)"
+        },
+        {
+          "file": "src/minisweagent/environments/docker.py",
+          "lines": "30-35",
+          "snippet": "run_args: list[str] = [\"--rm\"]\n\"\"\"Additional arguments to pass to the docker/container executable.\nDefault is [\"--rm\"], which removes the container after it exits.\n\"\"\"\ncontainer_timeout: str = \"2h\"\n\"\"\"Max duration to keep container running. Uses the same format as the sleep command.\"\"\""
+        },
+        {
+          "file": "src/minisweagent/environments/docker.py",
+          "lines": "153-161",
+          "snippet": "def cleanup(self):\n    \"\"\"Stop and remove the Docker container.\"\"\"\n    if getattr(self, \"container_id\", None) is not None:  # if init fails early, container_id might not be set\n        cmd = f\"(timeout 60 {self.config.executable} stop {self.container_id} || {self.config.executable} rm -f {self.container_id}) >/dev/null 2>&1 &\"\n        subprocess.Popen(cmd, shell=True)\n\ndef __del__(self):\n    \"\"\"Cleanup container when object is destroyed.\"\"\"\n    self.cleanup()"
+        },
+        {
+          "file": "src/minisweagent/environments/extra/swerex_modal.py",
+          "lines": "27-30",
+          "snippet": "runtime_timeout: float = 3600.0\n\"\"\"The runtime timeout (how long the Modal sandbox can stay alive).\"\"\"\ndeployment_timeout: float = 3600.0\n\"\"\"The deployment timeout.\"\"\""
+        },
+        {
+          "file": "src/minisweagent/config/benchmarks/swebench_modal.yaml",
+          "lines": "30-32",
+          "snippet": "startup_timeout: 600.0  # 10 min to allow image building on first run\nruntime_timeout: 1800.0  # 30 minutes max per instance\ndeployment_timeout: 1800.0"
+        },
+        {
+          "file": "src/minisweagent/config/benchmarks/programbench.yaml",
+          "lines": "187-188",
+          "snippet": "timeout: 180\ncontainer_timeout: \"7h\""
+        }
+      ]
+    },
+    {
+      "name": "stateless per-action subshell",
+      "what_it_is": "Every action is executed as a fresh process (subprocess with shell=True locally, a new 'docker exec ... bash -lc' or 'bash -c' call in the sandboxes); working directory and environment are set explicitly per call, and no shell session persists between actions. The prompt tells the model that directory and variable changes do not persist.",
+      "function_in_system": "Sits in env.execute() for every action. A broken shell state (stuck cd, clobbered variables, a hung interactive session, a crashed shell) is confined to the single action that caused it; the next action starts from a clean, known state. It also removes the need for session-recovery logic that a persistent shell requires.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/environments/local.py",
+          "lines": "74-83",
+          "snippet": "process = subprocess.Popen(\n    command,\n    shell=True,\n    text=True,\n    cwd=cwd,\n    env=env,\n    encoding=\"utf-8\",\n    errors=\"replace\",\n    stdout=subprocess.PIPE,\n    stderr=subprocess.STDOUT,"
+        },
+        {
+          "file": "src/minisweagent/environments/docker.py",
+          "lines": "107, 113",
+          "snippet": "cmd = [self.config.executable, \"exec\", \"-w\", cwd]\n...\ncmd.extend([self.container_id, *self.config.interpreter, command])"
+        },
+        {
+          "file": "src/minisweagent/config/default.yaml",
+          "lines": "39-40",
+          "snippet": "3. Directory or environment variable changes are not persistent. Every action is executed in a new subshell.\n   However, you can prefix any action with `MY_ENV_VAR=MY_VALUE cd /path/to/working/dir && ...` or write/load environment variables from files"
+        }
+      ]
+    },
+    {
+      "name": "head/tail truncation of long observations",
+      "what_it_is": "The observation_template renders command outputs of 10000 characters or more as the first and last 5000 characters, the number of elided characters, and a warning with concrete alternatives (head/tail/sed, more selective grep/find, redirect to a file and search it). Shorter outputs pass through unchanged.",
+      "function_in_system": "Sits in format_observation_messages(), where every command output becomes a history message. The linear history is resent on every step, so one huge output would inflate the cost of all later steps and can overflow the context window. The cap bounds per-observation context, and the warning steers the model toward targeted commands in the next turn.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "src/minisweagent/config/default.yaml",
+          "lines": "119-141",
+          "snippet": "{% if output.output | length < 10000 -%}\n<output>\n{{ output.output -}}\n</output>\n{%- else -%}\n<warning>\nThe output of your last command was too long.\nPlease try a different command that produces less output.\nIf you're looking at a file you can try use head, tail or sed to view a smaller number of lines selectively.\nIf you're using grep or find and it produced too much output, you can use a more selective search pattern.\nIf you really need to see something from the full command's output, you can redirect output to a file and then search in that file.\n</warning>\n{%- set elided_chars = output.output | length - 10000 -%}\n<output_head>\n{{ output.output[:5000] }}\n</output_head>\n<elided_chars>\n{{ elided_chars }} characters elided\n</elided_chars>\n<output_tail>\n{{ output.output[-5000:] }}\n</output_tail>\n{%- endif -%}"
+        },
+        {
+          "file": "src/minisweagent/config/mini.yaml",
+          "lines": "119-125",
+          "snippet": "{%- else -%}\n{\n  \"returncode\": {{ output.returncode }},\n  \"output_head\": {{ output.output[:5000] | tojson }},\n  \"output_tail\": {{ output.output[-5000:] | tojson }},\n  \"elided_chars\": {{ output.output | length - 10000 }},\n  \"warning\": \"Output too long.\""
+        }
+      ]
+    },
+    {
+      "name": "non-interactive execution environment",
+      "what_it_is": "Every shipped config sets environment variables that disable pagers and progress bars (PAGER=cat, MANPAGER=cat, LESS=-R, PIP_PROGRESS_BAR=off, TQDM_DISABLE=1) for all executed commands; the SWE-bench prompt additionally instructs the model to use non-interactive flags and avoid interactive tools such as vi or nano.",
+      "function_in_system": "Applied by the environment to every action via its env config. Commands that would open a pager or wait for keyboard input block until the command timeout and return nothing useful; progress bars flood the observation with redraw noise. Together the settings and the prompt rule keep each action a one-shot, non-blocking call with clean output.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "src/minisweagent/config/benchmarks/swebench.yaml",
+          "lines": "119-124",
+          "snippet": "env:\n  PAGER: cat\n  MANPAGER: cat\n  LESS: -R\n  PIP_PROGRESS_BAR: \"off\"\n  TQDM_DISABLE: \"1\""
+        },
+        {
+          "file": "src/minisweagent/config/benchmarks/swebench.yaml",
+          "lines": "69-70",
+          "snippet": "- Always use non-interactive flags (-y, -f) for commands\n- Avoid interactive tools like vi, nano, or any that require user input"
+        }
+      ]
+    },
+    {
+      "name": "prompted reproduce-and-verify workflow",
+      "what_it_is": "The instance templates prescribe a workflow: write a script that reproduces the issue, fix the code, rerun the script to verify the fix, test edge cases. The SWE-bench template adds a pre-submission check: inspect patch.txt for unintended changes and verify again after any later modification. The workflow is prompt-only; no code enforces or checks it.",
+      "function_in_system": "Shapes the agent's own action sequence inside the loop. Turns the environment into an execution-based self-check: the agent grounds its judgment of success in observed program behavior before it submits, which targets wrong or incomplete fixes and polluted patches. Its effectiveness depends entirely on model compliance.",
+      "activation": "default_on",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "src/minisweagent/config/benchmarks/swebench.yaml",
+          "lines": "30-36",
+          "snippet": "## Recommended Workflow\n\n1. Analyze the codebase by finding and reading relevant files\n2. Create a script to reproduce the issue\n3. Edit the source code to resolve the issue\n4. Verify your fix works by running your script again\n5. Test edge cases to ensure your fix is robust"
+        },
+        {
+          "file": "src/minisweagent/config/benchmarks/swebench.yaml",
+          "lines": "94-95, 108",
+          "snippet": "Step 2: Verify your patch\nInspect patch.txt to confirm it only contains your intended changes and headers show `--- a/` and `+++ b/` paths.\n...\n- If you modify patch.txt after verifying, you SHOULD verify again before submitting."
+        }
+      ]
+    },
+    {
+      "name": "resumable batch runs",
+      "what_it_is": "On restart, the batch runners skip instances that already have a result (an entry in preds.json for SWE-bench, a submission.tar.gz for ProgramBench) unless --redo-existing is set. Before an instance is (re)started, its stale preds entry and trajectory file are deleted.",
+      "function_in_system": "Sits in the batch entry points before instances are dispatched to workers (swebench.py:229-232) and at the start of process_instance (swebench.py:131-133). Turns the persisted per-instance results into recovery: a crashed, killed or cancelled batch continues where it stopped, so finished instances cost no second round of compute and API spend. Deleting stale state first keeps a half-finished earlier attempt from mixing with the new one.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/run/benchmarks/swebench.py",
+          "lines": "229-232",
+          "snippet": "if not redo_existing and (output_path / \"preds.json\").exists():\n    existing_instances = list(json.loads((output_path / \"preds.json\").read_text()).keys())\n    logger.info(f\"Skipping {len(existing_instances)} existing instances\")\n    instances = [instance for instance in instances if instance[\"instance_id\"] not in existing_instances]"
+        },
+        {
+          "file": "src/minisweagent/run/benchmarks/swebench.py",
+          "lines": "131-133",
+          "snippet": "# avoid inconsistent state if something here fails and there's leftover previous files\nremove_from_preds_file(output_dir / \"preds.json\", instance_id)\n(instance_dir / f\"{instance_id}.traj.json\").unlink(missing_ok=True)"
+        },
+        {
+          "file": "src/minisweagent/run/benchmarks/programbench.py",
+          "lines": "146-150",
+          "snippet": "if not redo_existing:\n    existing = {i[\"instance_id\"] for i in instances if (output_path / i[\"instance_id\"] / \"submission.tar.gz\").exists()}\n    if existing:\n        logger.info(f\"Skipping {len(existing)} existing instances\")\n        instances = [i for i in instances if i[\"instance_id\"] not in existing]"
+        }
+      ]
+    },
+    {
+      "name": "graceful batch cancellation",
+      "what_it_is": "A first Ctrl+C during a batch run cancels all queued futures while running instances finish and save their results; a second Ctrl+C exits immediately.",
+      "function_in_system": "Wraps the worker pool in the batch entry points (swebench.py:264-271, programbench.py:182-189). A user abort keeps the work of in-flight instances, whose trajectories and predictions get written in their finally blocks, and leaves a consistent output directory that the resume logic can continue from.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/minisweagent/run/benchmarks/swebench.py",
+          "lines": "264-271",
+          "snippet": "try:\n    process_futures(futures)\nexcept KeyboardInterrupt:\n    logger.info(\"Cancelling all pending jobs. Press ^C again to exit immediately.\")\n    for future in futures:\n        if not future.running() and not future.done():\n            future.cancel()\n    process_futures(futures)"
+        }
+      ]
+    }
+  ]
+}

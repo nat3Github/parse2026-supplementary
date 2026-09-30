@@ -1,0 +1,456 @@
+{
+  "repo": "bubbuild/bub",
+  "commit": "a2b638865a",
+  "system_type": "framework",
+  "system_type_reason": "Hook-first runtime for building agents; every turn stage is a replaceable pluggy hook.",
+  "repo_overview": {
+    "summary": "Small hook-first Python runtime for agents in shared environments like CLI and Telegram group chats. Every turn stage (resolve_session, load_state, build_prompt, run_model, save_state, render_outbound, dispatch_outbound) is a pluggy hook with replaceable builtin implementations. Context is rebuilt from an append-only tape of records, and model calls go through any-llm-sdk with native tool calling.",
+    "components": [
+      {
+        "path": "src/bub/framework.py, src/bub/hookspecs.py, src/bub/hook_runtime.py",
+        "purpose": "core runtime: BubFramework runs the turn pipeline over pluggy hooks, plugin loading, outbound routing"
+      },
+      {
+        "path": "src/bub/tape.py",
+        "purpose": "append-only tape primitives: TapeEntry, TapeStore protocols, query and message building from records"
+      },
+      {
+        "path": "src/bub/turn_admission.py",
+        "purpose": "admission of inbound messages while a turn is running (process, drop, follow_up, steer) and steering buffer"
+      },
+      {
+        "path": "src/bub/tools.py, src/bub/skills.py",
+        "purpose": "tool registry and invocation primitives, Agent Skills (SKILL.md) discovery"
+      },
+      {
+        "path": "src/bub/envelope.py, src/bub/types.py, src/bub/runtime.py, src/bub/configure.py, src/bub/inquirer.py, src/bub/utils.py",
+        "purpose": "message envelope types, error kinds, config and onboarding helpers"
+      },
+      {
+        "path": "src/bub/builtin/",
+        "purpose": "default hook implementations: agent loop with auto-handoff (agent.py), LLM calls and streaming (model_runner.py), builtin tools, shell_manager, tape store and fork store, settings, CLI commands"
+      },
+      {
+        "path": "src/bub/channels/",
+        "purpose": "channel adapters (CLI, Telegram), channel manager, message handler"
+      },
+      {
+        "path": "src/skills/",
+        "purpose": "bundled skills (gh, telegram, skill-creator) as SKILL.md plus helper scripts"
+      },
+      {
+        "path": "tests/, website/",
+        "purpose": "test suite and documentation site"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "src/bub/builtin/model_runner.py",
+        "lines": "106-115",
+        "snippet": "tool_calls = output.tool_calls\nif tool_calls:\n    tool_map = {tool_item.name: tool_item for tool_item in tools}\n    serialized_tool_calls = [tool_call.model_dump(exclude_none=True) for tool_call in tool_calls]\n    tool_invocations = [tool_invocation_from_native(tool_call, tool_map) for tool_call in tool_calls]\n    yield StreamEvent(\"tool_call\", {\"tool_calls\": serialized_tool_calls})\n    context = ToolContext(tape=tape, run_id=run_id, state=tape.context.state)\n    execution = await ToolExecutor().execute_async(\n        tool_invocations,\n        context=context,"
+      },
+      {
+        "file": "src/bub/builtin/model_runner.py",
+        "lines": "124",
+        "snippet": "tool_results=execution.tool_results,"
+      },
+      {
+        "file": "src/bub/builtin/agent.py",
+        "lines": "205, 233",
+        "snippet": "for step in range(1, self.settings.max_steps + 1):\n...\n                        should_continue = bool(event.data.get(\"tool_calls\") or event.data.get(\"tool_results\"))"
+      },
+      {
+        "file": "src/bub/builtin/agent.py",
+        "lines": "276, 286-288, 299",
+        "snippet": "if not should_continue:\n...\n                return\n\n            next_prompt = self._continue_prompt(tape)\n...\n        raise RuntimeError(f\"max_steps_reached={self.settings.max_steps}\")"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "ModelRunner.run extracts the native tool calls from the model response and executes them via ToolExecutor().execute_async (model_runner.py:106-115); the LLM chooses which tool runs with which arguments.",
+      "consumes_feedback": "record_chat writes tool_calls and tool_results to the tape (model_runner.py:124); the next step rebuilds its messages from the tape via build_messages and continues with _continue_prompt (agent.py:288).",
+      "multi_turn_until_termination": "The step loop (agent.py:205) continues while the step produced tool calls or results (agent.py:233) and ends on a text-only answer (agent.py:276-286) or at max_steps (agent.py:299)."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent",
+    "evidence": [
+      {
+        "file": "src/bub/builtin/tools.py",
+        "lines": "345-364",
+        "snippet": "async def run_subagent(param: SubAgentInput, *, context: ToolContext) -> str:\n    \"\"\"Run a task with sub-agent using specific model and session.\"\"\"\n    agent = _get_agent(context)\n    ...\n    elif param.session == \"temp\":\n        subagent_session = f\"temp/{uuid.uuid4().hex[:8]}\"\n    ...\n    allowed_tools = resolve_tool_names(param.allowed_tools or None, exclude={\"subagent\"})\n    output = \"\"\n    async for event in await agent.run_stream(\n        session_id=subagent_session,\n        prompt=param.prompt,\n        state=state,\n        model=param.model,\n        allowed_tools=allowed_tools,\n        allowed_skills=param.allowed_skills,\n    ):"
+      }
+    ],
+    "justification": "One main Agent drives the step loop (agent.py:205). The model can call the subagent tool (builtin/tools.py:345-364), which starts a separate full agent loop via agent.run_stream with its own session and tape, optionally a different model and a restricted tool and skill set; only the sub-agent's text output returns to the parent. This is an orchestrator spawning dynamic sub-agents. Sub-agents share the same Agent class and system prompt, and there is no further peer communication between agents.",
+    "verdict_raw": "multi-agent (subagents)"
+  },
+  "resilience": [
+    {
+      "name": "automatic context handoff on context-window overflow",
+      "what_it_is": "A model-call exception whose message matches a context-length regex (context length/window, maximum context, token limit, prompt too long) triggers tape.handoff(name='auto_handoff/context_overflow'), which appends a new anchor to the tape; the step is then re-run with the original prompt. Limited to MAX_AUTO_HANDOFF_RETRIES = 1 per loop. Because the default TapeContext selects only entries after the last anchor, the rebuilt message list drops the whole prior history.",
+      "function_in_system": "Sits in the step loop around _run_once (agent.py:234-259), catching errors raised by the model call. Recovers from context-window overflow by truncating the context at a fresh anchor and retrying the step. Otherwise an overflowing session fails every further turn with the same context-length error.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/bub/builtin/agent.py",
+          "lines": "234-259",
+          "snippet": "except Exception as exc:\n    error_message = f\"{exc!s}\"\n    elapsed_ms = int((time.monotonic() - start) * 1000)\n    if auto_handoff_remaining > 0 and is_context_length_error(error_message):\n        auto_handoff_remaining -= 1\n        ...\n        await tape.handoff(\n            name=\"auto_handoff/context_overflow\",\n            state={\"reason\": \"context_length_exceeded\", \"error\": error_message},\n        )\n        ...\n        next_prompt = prompt\n        continue"
+        },
+        {
+          "file": "src/bub/builtin/agent.py",
+          "lines": "39",
+          "snippet": "MAX_AUTO_HANDOFF_RETRIES = 1"
+        },
+        {
+          "file": "src/bub/builtin/model_runner.py",
+          "lines": "31-34, 366-368",
+          "snippet": "CONTEXT_LENGTH_PATTERNS = re.compile(\n    r\"context.{0,20}(?:length|window)|maximum.{0,20}context|token.{0,10}limit|prompt.{0,10}too long|tokens? > \\d+ maximum\",\n    re.IGNORECASE,\n)\n...\ndef is_context_length_error(error_msg: str) -> bool:\n    \"\"\"Check whether an error message indicates a context-length / prompt-too-long failure.\"\"\"\n    return bool(CONTEXT_LENGTH_PATTERNS.search(error_msg))"
+        },
+        {
+          "file": "src/bub/builtin/tape.py",
+          "lines": "125-137",
+          "snippet": "async def handoff(\n    self,\n    *,\n    name: str,\n    state: dict[str, Any] | None = None,\n    **meta: Any,\n) -> list[TapeEntry]:\n    tape_name = self.name\n    entry = TapeEntry.anchor(name, state=state, **meta)\n    event = TapeEntry.event(\"handoff\", {\"name\": name, \"state\": state or {}}, **meta)\n    await self.store.append(tape_name, entry)\n    await self.store.append(tape_name, event)\n    return [entry, event]"
+        },
+        {
+          "file": "src/bub/tape.py",
+          "lines": "161",
+          "snippet": "anchor: AnchorSelector = LAST_ANCHOR"
+        }
+      ]
+    },
+    {
+      "name": "multi-model fallback chain",
+      "what_it_is": "completion_response iterates over the primary model followed by the configured fallback_models (possibly across providers, each with its own AnyLLM client). Any exception moves on to the next candidate; if all fail, the first error is re-raised. The chain only applies when the session uses the default model. There is no same-model retry and no backoff.",
+      "function_in_system": "Sits around the single LLM call inside ModelRunner.run, below the step loop. Absorbs provider or model outages by switching to another model. Otherwise one unavailable provider fails the step and the turn.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "src/bub/builtin/model_runner.py",
+          "lines": "62-76",
+          "snippet": "for index, (candidate, llm) in enumerate(clients):\n    try:\n        return await llm.acompletion(\n            model=candidate.model_id,\n            messages=completion_messages,\n            tools=tool_payloads,\n            max_tokens=self.settings.max_tokens,\n            stream=llm.SUPPORTS_COMPLETION_STREAMING,\n        )\n    except Exception as exc:\n        if completion_error is None:\n            completion_error = exc\n        if index == len(clients) - 1:\n            raise completion_error from None\n        logger.warning(\"model candidate failed; trying fallback model={} error={}\", candidate.name, exc)"
+        },
+        {
+          "file": "src/bub/builtin/settings.py",
+          "lines": "56, 88-90",
+          "snippet": "fallback_models: list[str] | None = None\n...\ncandidate_names = [model]\nif model == self.model:\n    candidate_names.extend(self.fallback_models or [])"
+        }
+      ]
+    },
+    {
+      "name": "loop step limit",
+      "what_it_is": "The agent loop runs at most max_steps tool-use iterations (default 50, BUB_MAX_STEPS) and raises RuntimeError('max_steps_reached=...') when the limit is hit.",
+      "function_in_system": "Bounds the step loop in _stream_events_with_auto_handoff. Stops runaway tool-call loops and the cost they accumulate. Otherwise a model that keeps calling tools runs indefinitely.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "src/bub/builtin/settings.py",
+          "lines": "59",
+          "snippet": "max_steps: int = 50"
+        },
+        {
+          "file": "src/bub/builtin/agent.py",
+          "lines": "205, 299",
+          "snippet": "for step in range(1, self.settings.max_steps + 1):\n...\n        raise RuntimeError(f\"max_steps_reached={self.settings.max_steps}\")"
+        }
+      ]
+    },
+    {
+      "name": "model call timeout",
+      "what_it_is": "asyncio.timeout(model_timeout_seconds) wraps the completion request and the consumption of the streamed response; on expiry a TimeoutError aborts the step. Default is None (no limit), set via BUB_MODEL_TIMEOUT_SECONDS.",
+      "function_in_system": "Sits around the model call in ModelRunner.run. Bounds the time a single step can wait on the provider. Otherwise a hanging provider or stalled stream blocks the turn indefinitely.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "src/bub/builtin/model_runner.py",
+          "lines": "101-102",
+          "snippet": "async with asyncio.timeout(self.settings.model_timeout_seconds):\n    completion = await self.completion_response(model=model, messages=messages, tools=tools)"
+        },
+        {
+          "file": "src/bub/builtin/settings.py",
+          "lines": "61",
+          "snippet": "model_timeout_seconds: int | None = None"
+        }
+      ]
+    },
+    {
+      "name": "per-step execution log on the append-only tape",
+      "what_it_is": "Every loop step appends loop.step events with status (ok, continue, error, auto_handoff), error text, elapsed_ms and timestamp to the append-only tape; record_chat stores tool calls, tool results, errors and token usage of each model call as tape entries.",
+      "function_in_system": "Runs alongside every step of the agent loop. Makes failures, recoveries and cost of each step visible and replayable from the tape, which the docs present as the verifiable execution history behind handoffs. Otherwise errors and token spend of a turn stay invisible after the fact.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/bub/builtin/agent.py",
+          "lines": "276-286",
+          "snippet": "if not should_continue:\n    await tape.append_event(\n        \"loop.step\",\n        {\n            \"step\": step,\n            \"elapsed_ms\": elapsed_ms,\n            \"status\": \"ok\",\n            \"date\": datetime.now(UTC).isoformat(),\n        },\n    )\n    return"
+        },
+        {
+          "file": "src/bub/builtin/tape.py",
+          "lines": "166-168, 175-176",
+          "snippet": "await self.store.append(tape_name, TapeEntry.tool_result(tool_results, **meta))\n...\n    await self.store.append(tape_name, TapeEntry.error(error, **meta))\n...\nresolved_usage = usage or self._extract_usage(response)\nif resolved_usage is not None:"
+        }
+      ]
+    },
+    {
+      "name": "tool errors returned to the model as structured results",
+      "what_it_is": "ToolExecutor runs all tool calls of a step via asyncio.gather(return_exceptions=True). Argument validation failures (pydantic validate_call) become BubError(INVALID_INPUT) with the validation errors, any other tool exception becomes BubError(TOOL) with repr(exc); each BubError is appended as result.as_dict() to the tool results, which are recorded on the tape.",
+      "function_in_system": "Sits between the model's tool calls and the next step (model_runner.py:113-124). Because tool_results is non-empty, the loop continues and the model sees the error in its next context, which enables self-correction. Otherwise one failing or badly-argued tool call aborts the whole turn, including the parallel calls of the same step.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/bub/tools.py",
+          "lines": "173-186",
+          "snippet": "gathered = await asyncio.gather(\n    *(self._handle_tool_response_async(tool_obj, tool_args, context) for tool_obj, tool_args in invocations),\n    return_exceptions=True,\n)\nfor result in gathered:\n    if isinstance(result, BubError):\n        error = result\n        results.append(result.as_dict())\n    elif isinstance(result, BaseException):\n        raise result\n    else:\n        results.append(result)\n\nreturn ToolExecution(tool_results=results, error=error)"
+        },
+        {
+          "file": "src/bub/tools.py",
+          "lines": "220-231",
+          "snippet": "except ValidationError as exc:\n    raise BubError(\n        ErrorKind.INVALID_INPUT,\n        f\"Tool '{tool_name}' argument validation failed.\",\n        details={\"errors\": json.loads(exc.json())},\n    ) from exc\nexcept Exception as exc:\n    raise BubError(\n        ErrorKind.TOOL,\n        f\"Tool '{tool_name}' execution failed.\",\n        details={\"error\": repr(exc)},\n    ) from exc"
+        },
+        {
+          "file": "src/bub/builtin/agent.py",
+          "lines": "233",
+          "snippet": "should_continue = bool(event.data.get(\"tool_calls\") or event.data.get(\"tool_results\"))"
+        }
+      ]
+    },
+    {
+      "name": "shell command timeout with terminate-then-kill escalation",
+      "what_it_is": "The bash tool waits at most timeout_seconds (default 30, adjustable by the model per call); on expiry the process gets SIGTERM, then SIGKILL if it has not exited within 3 seconds, and the tool returns 'command timed out after N seconds and was terminated' as a normal result. web.fetch uses an analogous 10-second request timeout.",
+      "function_in_system": "Sits inside tool execution within a step. Bounds the time a hanging command can block the loop, cleans up the process and reports the timeout to the model so it can react. Otherwise a hanging command stalls the turn indefinitely and leaves orphan processes.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/bub/builtin/tools.py",
+          "lines": "21, 181-188",
+          "snippet": "DEFAULT_COMMAND_TIMEOUT_SECONDS = 30\n...\n    async with asyncio.timeout(timeout_seconds):\n        shell = await shell_manager.wait_closed(shell.shell_id)\nexcept asyncio.CancelledError:\n    await shell_manager.terminate(shell.shell_id)\n    raise\nexcept TimeoutError:\n    await shell_manager.terminate(shell.shell_id)\n    return f\"command timed out after {timeout_seconds} seconds and was terminated\""
+        },
+        {
+          "file": "src/bub/builtin/shell_manager.py",
+          "lines": "77-83",
+          "snippet": "shell.process.terminate()\ntry:\n    async with asyncio.timeout(3):\n        await shell.process.wait()\nexcept TimeoutError:\n    shell.process.kill()\n    await shell.process.wait()"
+        },
+        {
+          "file": "src/bub/builtin/tools.py",
+          "lines": "337",
+          "snippet": "aiohttp.ClientSession(headers=headers, timeout=aiohttp.ClientTimeout(total=timeout)) as session,"
+        }
+      ]
+    },
+    {
+      "name": "background shell execution with paginated output polling",
+      "what_it_is": "With background=true the bash tool returns a shell_id immediately; stdout and stderr are drained into a buffer, and the model fetches output incrementally via bash.output (offset/limit, next_offset) or stops the process via bash.kill.",
+      "function_in_system": "Sits in tool execution. Long-running processes (servers, builds) keep running outside the step and the 30-second timeout, and paginated reads keep large outputs from flooding the context. Otherwise long commands either block the loop or get killed by the timeout, and full outputs land in the context at once.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/bub/builtin/tools.py",
+          "lines": "178-179",
+          "snippet": "if background:\n    return f\"started: {shell.shell_id}\""
+        },
+        {
+          "file": "src/bub/builtin/tools.py",
+          "lines": "194-205",
+          "snippet": "async def bash_output(shell_id: str, offset: int = 0, limit: int | None = None) -> str:\n    \"\"\"Read buffered output from a background shell, with optional offset/limit for incremental polling.\"\"\"\n    shell = shell_manager.get(shell_id)\n    ...\n    start = max(0, min(offset, len(output)))\n    end = len(output) if limit is None else min(len(output), start + max(0, limit))"
+        }
+      ]
+    },
+    {
+      "name": "context isolation via sub-agents in temporary sessions",
+      "what_it_is": "The subagent tool runs a full agent loop in a session temp/<uuid> by default; tapes of temp/ sessions are forked and never merged back into the parent store. Tools can be restricted, and the subagent tool itself is always excluded for the child. Only the child's text output (with errors inlined as [Error: ...]) returns to the parent.",
+      "function_in_system": "Sits at the tool level of the parent loop. Offloads subtasks so their intermediate steps and tool outputs stay out of the parent's context, and the self-exclusion bounds sub-agent recursion to depth one. Otherwise every exploratory step of a subtask consumes the parent's context window, and sub-agents could spawn sub-agents without limit.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/bub/builtin/tools.py",
+          "lines": "351-352, 356",
+          "snippet": "elif param.session == \"temp\":\n    subagent_session = f\"temp/{uuid.uuid4().hex[:8]}\"\n...\nallowed_tools = resolve_tool_names(param.allowed_tools or None, exclude={\"subagent\"})"
+        },
+        {
+          "file": "src/bub/builtin/agent.py",
+          "lines": "101, 104",
+          "snippet": "merge_back = not session_id.startswith(\"temp/\")\n...\ntape = await stack.enter_async_context(tape.fork_tape(merge_back=merge_back))"
+        }
+      ]
+    },
+    {
+      "name": "model-initiated context handoff and tape retrieval",
+      "what_it_is": "Tools let the model manage its own context: tape.handoff writes an anchor with a summary state (cutting the rebuilt context at that point), tape.reset clears the tape and, with archive=True, first writes a timestamped JSONL backup whose path is recorded in the new session/start anchor, tape.search retrieves older entries by query and date range, using substring plus rapidfuzz fuzzy matching (WRatio >= 80) with deduplication and a default limit of 20, and tape.info reports entries_since_last_anchor and last_token_usage. The default context builder renders each anchor with its state as an assistant message, so the handoff summary survives as the first message of the rebuilt context. The default system prompt contains a context_contract that instructs the model to use tape.info and tape.handoff when the context grows long.",
+      "function_in_system": "Available at every step as tools. Lets the agent compact its context at phase boundaries and pull back specific past information on demand. It is the manual counterpart to the automatic overflow handoff. Otherwise context grows until it overflows, and information behind an anchor is lost to the agent.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "src/bub/builtin/tools.py",
+          "lines": "312-316",
+          "snippet": "@tool(context=True, name=\"tape.handoff\")\nasync def tape_handoff(name: str = \"handoff\", summary: str = \"\", *, context: ToolContext) -> str:\n    \"\"\"Add a handoff anchor to the current tape.\"\"\"\n    await context.tape.handoff(name=name, state={\"summary\": summary})\n    return f\"anchor added: {name}\""
+        },
+        {
+          "file": "src/bub/builtin/tools.py",
+          "lines": "286-290",
+          "snippet": "@tool(context=True, name=\"tape.search\", model=SearchInput)\nasync def tape_search(param: SearchInput, *, context: ToolContext) -> str:\n    \"\"\"Search for entries in the current tape that match the query. Returns a list of matching entries.\"\"\"\n    query = context.tape.query().query(param.query).kinds(*param.kinds).limit(param.limit)"
+        },
+        {
+          "file": "src/bub/builtin/tools.py",
+          "lines": "305-306",
+          "snippet": "@tool(context=True, name=\"tape.reset\")\nasync def tape_reset(archive: bool = False, *, context: ToolContext) -> str:"
+        },
+        {
+          "file": "src/bub/builtin/tape.py",
+          "lines": "196-215",
+          "snippet": "async def _archive(self) -> Path:\n    tape_name = self.name\n    stamp = datetime.now(UTC).strftime(\"%Y%m%dT%H%M%SZ\")\n    self.archive_path.mkdir(parents=True, exist_ok=True)\n    archive_path = self.archive_path / f\"{tape_name}.jsonl.{stamp}.bak\"\n    ...\nasync def reset(self, *, archive: bool = False) -> str:\n    archive_path: Path | None = None\n    if archive:\n        archive_path = await self._archive()\n    await self.store.reset(self.name)\n    state = {\"owner\": \"human\"}\n    if archive_path is not None:\n        state[\"archived\"] = str(archive_path)\n    await self.handoff(name=\"session/start\", state=state)"
+        },
+        {
+          "file": "src/bub/builtin/store.py",
+          "lines": "107-113, 129, 166-171",
+          "snippet": "def fetch_all(self, query: TapeQuery) -> Iterable[TapeEntry]:\n    if not query._query:\n        result: Iterable[TapeEntry] = super().fetch_all(query)\n        return result\n    unlimited_query = replace(query, _limit=None)\n    entries: Iterable[TapeEntry] = super().fetch_all(unlimited_query)\n    return self._filter_entries(list(entries), query._query, query._limit or 20)\n...\nif normalized_query in payload_text or self._is_fuzzy_match(normalized_query, payload_text):\n...\nbest_match = process.extractOne(\n    query_phrase,\n    candidates,\n    scorer=fuzz.WRatio,\n    score_cutoff=MIN_FUZZY_SCORE,\n)"
+        },
+        {
+          "file": "src/bub/builtin/context.py",
+          "lines": "36-39",
+          "snippet": "def _append_anchor_entry(messages: list[dict[str, Any]], entry: TapeEntry) -> None:\n    payload = entry.payload\n    content = f\"[Anchor created: {payload.get('name')}]: {json.dumps(payload.get('state'), ensure_ascii=False)}\"\n    messages.append({\"role\": \"assistant\", \"content\": content})"
+        },
+        {
+          "file": "src/bub/builtin/hook_impl.py",
+          "lines": "53-55",
+          "snippet": "<context_contract>\nExcessively long context may cause model call failures. In this case, you MAY use tape.info to retrieve the token usage and you SHOULD use tape.handoff tool to shorten the retrieved history.\n</context_contract>"
+        }
+      ]
+    },
+    {
+      "name": "inbound message debounce and batching",
+      "what_it_is": "For channels with needs_debounce (Telegram), BufferedMessageHandler collects messages per session until debounce_seconds (default 1.0) of quiet after an active message, capped by max_wait_seconds (default 10.0), and merges them via ChannelMessage.from_batch into one turn. Non-active messages (not addressed to the bot) outside active_time_window (default 60 s) are ignored; comma commands bypass the buffer.",
+      "function_in_system": "Sits in front of turn admission in the ChannelManager, before any agent turn starts. Turns a burst of short chat messages into one turn, which saves LLM calls and prevents overload (the settings describe it as 'to prevent overload'). Otherwise every chat line starts its own costly turn with an incomplete request.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "src/bub/channels/handler.py",
+          "lines": "35, 48-55, 62, 67",
+          "snippet": "message = ChannelMessage.from_batch(self._pending_messages)\n...\nif not message.is_active and (\n    self._last_active_time is None or now - self._last_active_time > self.active_time_window\n):\n    self._last_active_time = None\n    logger.info(\n        \"session.message received ignored session_id={}, content={}\", message.session_id, message.content\n    )\n    return\n...\n    self._reset_timer(self.debounce_seconds)\n...\n    self._reset_timer(self.max_wait_seconds)"
+        },
+        {
+          "file": "src/bub/channels/manager.py",
+          "lines": "30-31, 72-73",
+          "snippet": "debounce_seconds: float = Field(\n    default=1.0,\n...\nif self._channels[channel].needs_debounce:\n    handler = BufferedMessageHandler("
+        },
+        {
+          "file": "src/bub/channels/telegram.py",
+          "lines": "165-166",
+          "snippet": "def needs_debounce(self) -> bool:\n    return True"
+        },
+        {
+          "file": "src/bub/channels/telegram.py",
+          "lines": "80-92, 259",
+          "snippet": "# Group chat: only process when explicitly addressed to the bot.\nif message.chat.type in self.GROUP_CHAT_TYPES:\n    bot = message.get_bot()\n    bot_id = bot.id\n    bot_username = (bot.username or \"\").lower()\n\n    mentions_bot = self._mentions_bot(message, bot_id, bot_username)\n    reply_to_bot = self._is_reply_to_bot(message, bot_id)\n\n    if msg_type != \"text\" and not getattr(message, \"caption\", None):\n        return reply_to_bot\n\n    return mentions_bot or reply_to_bot\n...\nis_active = MESSAGE_FILTER.filter(message) is not False"
+        }
+      ]
+    },
+    {
+      "name": "on_error observer hooks per pipeline stage",
+      "what_it_is": "Failures in the pipeline stages turn, run_model, resolve_session and admit_message, as well as error events from the agent stream, are dispatched via notify_error(stage=...) to all registered on_error plugin hooks; exceptions raised by the observers themselves are caught and logged so they cannot break the turn.",
+      "function_in_system": "Wraps the turn pipeline in framework.process_inbound and the ChannelManager. Surfaces turn failures to plugins (alerting, user notification) without changing the turn itself. The built-in on_error implementation sends the stage and error text as an error message back to the originating channel, so the user learns that the turn failed. Otherwise failures stay in the local log, the user waits for a reply that never arrives, and a faulty observer could crash error handling.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/bub/hook_runtime.py",
+          "lines": "74-89",
+          "snippet": "async def notify_error(self, *, stage: str, error: Exception, message: Envelope | None) -> None:\n    \"\"\"Call on_error hooks, swallowing observer failures.\"\"\"\n\n    for impl in self._iter_hookimpls(\"on_error\"):\n        call_kwargs = self._kwargs_for_impl(impl, {\"stage\": stage, \"error\": error, \"message\": message})\n        try:\n            value = impl.function(**call_kwargs)\n            if inspect.isawaitable(value):\n                await value\n        except Exception:\n            logger.opt(exception=True).warning(\n                \"hook.on_error_failed stage={} adapter={}\",\n                stage,\n                impl.plugin_name or \"<unknown>\",\n            )"
+        },
+        {
+          "file": "src/bub/framework.py",
+          "lines": "143-146",
+          "snippet": "except Exception as exc:\n    logger.exception(\"Error processing inbound message\")\n    await self._hook_runtime.notify_error(stage=\"turn\", error=exc, message=inbound)\n    raise"
+        },
+        {
+          "file": "src/bub/framework.py",
+          "lines": "192",
+          "snippet": "await self._hook_runtime.notify_error(stage=\"run_model\", error=BubError(**data), message=inbound)"
+        },
+        {
+          "file": "src/bub/builtin/hook_impl.py",
+          "lines": "277-287",
+          "snippet": "@hookimpl\nasync def on_error(self, stage: str, error: Exception, message: Envelope | None) -> None:\n    if message is not None:\n        outbound = ChannelMessage(\n            session_id=field_of(message, \"session_id\", \"unknown\"),\n            channel=field_of(message, \"channel\", \"default\"),\n            chat_id=field_of(message, \"chat_id\", \"default\"),\n            content=f\"An error occurred at stage '{stage}': {error}\",\n            kind=\"error\",\n        )\n        await self.framework._hook_runtime.call_many(\"dispatch_outbound\", message=outbound)"
+        }
+      ]
+    },
+    {
+      "name": "Telegram access allowlists for users and chats",
+      "what_it_is": "allow_users and allow_chats (comma-separated IDs or usernames, set via config or BUB_TELEGRAM_* env) gate every inbound Telegram message. Messages from chats outside allow_chats are dropped silently; senders outside allow_users receive 'Access denied.' and no turn is created. An empty setting means no restriction.",
+      "function_in_system": "Sits at the Telegram channel entry, before debounce, turn admission and the agent loop. Restricts who can trigger model calls and tool execution, including the bash tool, on the operator's instance. Otherwise anyone who finds the bot can start turns at the operator's expense and have shell commands run in the workspace.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "src/bub/channels/telegram.py",
+          "lines": "30-35",
+          "snippet": "allow_users: str | None = Field(\n    default=None, description=\"Comma-separated list of allowed Telegram user IDs, or empty for no restriction.\"\n)\nallow_chats: str | None = Field(\n    default=None, description=\"Comma-separated list of allowed Telegram chat IDs, or empty for no restriction.\"\n)"
+        },
+        {
+          "file": "src/bub/channels/telegram.py",
+          "lines": "229-239",
+          "snippet": "chat_id = str(update.message.chat_id)\nif self._allow_chats and chat_id not in self._allow_chats:\n    return\nuser = update.effective_user\nsender_tokens = {str(user.id)}\nif user.username:\n    sender_tokens.add(user.username)\nif self._allow_users and sender_tokens.isdisjoint(self._allow_users):\n    await update.message.reply_text(\"Access denied.\")\n    return\nawait self._on_receive(await self._build_message(update.message))"
+        }
+      ]
+    },
+    {
+      "name": "on-demand skill expansion (progressive disclosure)",
+      "what_it_is": "The system prompt lists every discovered skill as a single '- name: description' line. render_skills_prompt appends the location and full SKILL.md body only for skills referenced as $name in the prompt (HINT_RE); any other skill body is loaded on demand through the skill(name) tool.",
+      "function_in_system": "Runs in the system-prompt construction of every step. Keeps the per-skill prompt cost to one line and brings skill bodies into context only when a skill is actually needed. The docs separate the description the agent reads when listing skills from the body it loads when a skill is expanded. Otherwise the full text of every installed skill is sent with every model call, which costs thousands of tokens per step as the number of skills grows.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "src/bub/skills.py",
+          "lines": "192-205",
+          "snippet": "def render_skills_prompt(skills: list[SkillMetadata], expanded_skills: Collection[str] = ()) -> str:\n    if not skills:\n        return \"\"\n    lines = [\"<available_skills>\"]\n    for skill in skills:\n        line = f\"- {skill.name}: {skill.description}\"\n        if skill.name in expanded_skills:\n            line += f\"\\n  Location: {skill.location}\"\n            body = skill.body()\n            if body:\n                line += f\"\\n{body}\"\n        lines.append(line)\n    lines.append(\"</available_skills>\")\n    return \"\\n\".join(lines)"
+        },
+        {
+          "file": "src/bub/builtin/agent.py",
+          "lines": "38, 307-308",
+          "snippet": "HINT_RE = re.compile(r\"\\$([A-Za-z0-9_.-]+)\")\n...\nexpanded_skills = set(HINT_RE.findall(prompt)) & set(skill_index.keys())\nreturn render_skills_prompt(list(skill_index.values()), expanded_skills=expanded_skills)"
+        },
+        {
+          "file": "src/bub/builtin/tools.py",
+          "lines": "255-257",
+          "snippet": "@tool(context=True, name=\"skill\")\ndef skill_describe(name: str, *, context: ToolContext) -> str:\n    \"\"\"Load the skill content by name. Return the location and skill content.\"\"\""
+        },
+        {
+          "file": "website/src/content/docs/docs/build/skills.mdx",
+          "lines": "28-32",
+          "snippet": "name: my-skill\ndescription: One sentence the agent reads when listing available skills.\n---\n\nBody content the agent loads when this skill is expanded."
+        }
+      ]
+    },
+    {
+      "name": "proactive failure reporting policy in the Telegram skill",
+      "what_it_is": "The Active Response Policy of the built-in telegram skill instructs the agent to send an immediate acknowledgment, progress updates via message edits, and, when execution is blocked or fails, an immediate problem report with cause, impact and next action.",
+      "function_in_system": "Acts through the agent's outbound messages while a Telegram turn runs. Surfaces failures that happen inside the turn to the user, complementing the on_error hooks that cover pipeline failures. Otherwise the Telegram user waits for a reply to a task that has already failed, because the agent's direct reply is discarded for Telegram messages (output_channel=\"null\").",
+      "activation": "default_on",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "src/skills/telegram/SKILL.md",
+          "lines": "77-92",
+          "snippet": "## Active Response Policy\n\nWhen this skill is in scope, prefer proactive and timely Telegram updates:\n\n- Send an immediate acknowledgment for newly assigned tasks\n- Send progress updates for long-running operations using message edits\n- Send completion notifications when work finishes\n- Send important status or failure notifications without waiting for follow-up prompts\n- If execution is blocked or fails, send a problem report immediately with cause, impact, and next action\n\nRecommended pattern:\n\n1. Send a short acknowledgment reply\n2. Continue processing\n3. If blocked, edit or send an issue update immediately\n4. Edit the acknowledgment message with final result when possible"
+        },
+        {
+          "file": "src/bub/channels/telegram.py",
+          "lines": "268",
+          "snippet": "output_channel=\"null\",  # disable outbound for telegram messages"
+        }
+      ]
+    }
+  ]
+}

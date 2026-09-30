@@ -1,0 +1,1233 @@
+{
+  "repo": "LvcidPsyche/auto-browser",
+  "commit": "0a1c9484ef",
+  "system_type": "application",
+  "system_type_reason": "Deployable browser control-plane service with its own built-in agent loop for MCP clients and operators.",
+  "repo_overview": {
+    "summary": "MCP-native browser control plane: a FastAPI controller manages Playwright browser sessions (screenshots, DOM summaries, OCR, actions) for external MCP clients and REST callers. It also ships a built-in agent loop (OpenAI/Claude/Gemini adapters) that observes the page, lets the LLM pick one browser action, executes it and repeats until done, human takeover or max_steps. Around this sits operator infrastructure: approvals, noVNC human takeover, audit and Witness receipts, PII scrubbing, per-session container isolation.",
+    "components": [
+      {
+        "path": "controller/app/orchestrator.py, agent_jobs.py, routes/agent.py",
+        "purpose": "agent control flow: observe/decide/execute step and multi-step run loop, persistent job queue with checkpoints, resume and cancel"
+      },
+      {
+        "path": "controller/app/providers/",
+        "purpose": "LLM adapters (Claude, OpenAI, Gemini) and shared base: prompt building, decision parsing, provider API errors"
+      },
+      {
+        "path": "controller/app/browser_manager.py, browser/services/",
+        "purpose": "session lifecycle, action execution, observation, human takeover, approvals, auth profiles, diagnostics, bot-challenge detection"
+      },
+      {
+        "path": "controller/app/actions/, action_errors.py, vision_target.py",
+        "purpose": "action execution pipeline, action error classes, vision-based target resolution"
+      },
+      {
+        "path": "controller/app/approvals.py, runtime_policy.py, compliance.py, rate_limits.py, pii_scrub.py",
+        "purpose": "governance: approval gates, runtime policy, compliance presets, request rate limits, PII scrubbing"
+      },
+      {
+        "path": "controller/app/audit.py, witness.py, events.py, metrics.py",
+        "purpose": "audit trail, hash-chained Witness receipts, event bus, metrics"
+      },
+      {
+        "path": "controller/app/tool_gateway/, mcp_transport.py, mcp_stdio.py, tool_inputs.py",
+        "purpose": "MCP server, tool registry and tool packs (curated/full profiles), tool input validation"
+      },
+      {
+        "path": "controller/app/harness/",
+        "purpose": "convergence harness: runs task contracts, records traces, verifies completion, drift monitor, induces staged skill candidates"
+      },
+      {
+        "path": "controller/app/workflow/, cron_service.py",
+        "purpose": "deterministic DAG workflow engine with per-step retry, scheduled jobs"
+      },
+      {
+        "path": "controller/app/mesh/",
+        "purpose": "signed capability delegation (tool/session/workflow) to peer auto-browser nodes"
+      },
+      {
+        "path": "controller/app/session_isolation.py, session_store.py, session_tunnel.py, maintenance.py, readiness.py",
+        "purpose": "per-session browser containers, session persistence, orphan cleanup, readiness checks"
+      },
+      {
+        "path": "controller/app/stealth/, proxy_personas.py, memory_manager.py, browser/dom_pruner.py",
+        "purpose": "fingerprint and humanizer, proxy personas, session memory injected into the goal, DOM pruning"
+      },
+      {
+        "path": "browser-node/, reverse-ssh/",
+        "purpose": "browser container image with noVNC, reverse SSH tunnel"
+      },
+      {
+        "path": "client/, integrations/langchain/, packaging/",
+        "purpose": "Python SDK, MCP stdio bridge, LangChain/CrewAI adapters"
+      },
+      {
+        "path": "evals/, benchmarks/, scripts/, controller/tests/",
+        "purpose": "fixture evals, benchmark adapters, smoke/doctor scripts, tests"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "controller/app/orchestrator.py",
+        "lines": "124-137",
+        "snippet": "for index in range(max_steps):\n    step_result = await self.step(\n        session_id=session_id,\n        provider_name=provider_name,\n        goal=goal,\n        observation_limit=observation_limit,\n        context_hints=context_hints,\n        upload_approved=upload_approved,\n        approval_id=approval_id,\n        provider_model=provider_model,\n        workflow_profile=workflow_profile,\n        previous_steps=steps,\n    )\n    steps.append(step_result)"
+      },
+      {
+        "file": "controller/app/orchestrator.py",
+        "lines": "43-54",
+        "snippet": "observation = await self.manager.observe(session_id, limit=observation_limit)\nprompt_history = self._summarize_previous_steps(previous_steps or [])\n\ntry:\n    provider_decision = await adapter.decide(\n        goal=effective_goal,\n        observation=observation,\n        context_hints=effective_context_hints,\n        previous_steps=prompt_history,\n        model_override=provider_model,\n    )\n    result = await self._execute_decision("
+      },
+      {
+        "file": "controller/app/orchestrator.py",
+        "lines": "166-168",
+        "snippet": "if step_result.status in {\"done\", \"takeover\", \"approval_required\", \"error\"}:\n    final_status = step_result.status\n    break"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "step() passes the LLM decision from adapter.decide() to _execute_decision(), which runs the chosen browser action via manager.execute_decision (orchestrator.py:47-62, 224-228).",
+      "consumes_feedback": "Each step observes the current page state (orchestrator.py:43) and receives a summary of prior step results and errors as previous_steps (orchestrator.py:44, 135).",
+      "multi_turn_until_termination": "run() iterates up to max_steps and stops on done, takeover, approval_required or error (orchestrator.py:124, 166-168)."
+    }
+  },
+  "topology": {
+    "verdict": "single-agent",
+    "evidence": [
+      {
+        "file": "controller/app/orchestrator.py",
+        "lines": "37, 47",
+        "snippet": "adapter = self.registry.get(provider_name)\n...\nprovider_decision = await adapter.decide("
+      }
+    ],
+    "justification": "One BrowserOrchestrator drives one provider adapter per run and executes browser actions as tools (orchestrator.py:37-62). mesh/delegation.py routes tool, session and workflow capabilities to peer nodes (delegation.py:314-342) and runs no LLM loop of its own. curator_llm.py describes a Skills Curator sub-agent but is imported nowhere in controller/app. The convergence harness reuses the same orchestrator.run (harness/iterate.py:298-299).",
+    "verdict_raw": "single-agent"
+  },
+  "resilience": [
+    {
+      "name": "low-progress loop guard with human takeover",
+      "what_it_is": "After each step, the last 3 steps are checked: if all are 'acted', all are low-progress (verification.verified is False, or url, title and text_excerpt are unchanged before/after) and share one identical action signature (action, element_id, selector, url, text, key, deltas, wait_ms), the orchestrator calls request_human_takeover and ends the run with status 'takeover'.",
+      "function_in_system": "Sits in orchestrator.run after every step. Detects the agent repeating the same ineffective browser action and hands the live session to a human operator. Otherwise the agent burns its whole step budget on an identical no-op action.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/orchestrator.py",
+          "lines": "141-143, 164-165",
+          "snippet": "if self._should_trigger_loop_takeover(steps):\n    takeover_reason = \"Agent loop guard triggered after repeated low-progress actions\"\n    execution = await self.manager.request_human_takeover(session_id, reason=takeover_reason)\n...\n    final_status = \"takeover\"\n    break"
+        },
+        {
+          "file": "controller/app/orchestrator.py",
+          "lines": "281-290",
+          "snippet": "def _should_trigger_loop_takeover(cls, steps: list[AgentStepResult]) -> bool:\n    window = steps[-3:]\n    if len(window) < 3:\n        return False\n    if any(step.status != \"acted\" for step in window):\n        return False\n    if any(not cls._is_low_progress_step(step) for step in window):\n        return False\n    signatures = {cls._action_signature(step) for step in window}\n    return len(signatures) == 1"
+        },
+        {
+          "file": "controller/app/orchestrator.py",
+          "lines": "308-322",
+          "snippet": "def _is_low_progress_step(step: AgentStepResult) -> bool:\n    execution = step.execution if isinstance(step.execution, dict) else {}\n    verification = execution.get(\"verification\") if isinstance(execution, dict) else {}\n    if isinstance(verification, dict) and verification.get(\"verified\") is False:\n        return True\n\n    before = execution.get(\"before\") if isinstance(execution, dict) else {}\n    after = execution.get(\"after\") if isinstance(execution, dict) else {}\n    if not isinstance(before, dict) or not isinstance(after, dict):\n        return False\n    return (\n        before.get(\"url\") == after.get(\"url\")\n        and before.get(\"title\") == after.get(\"title\")\n        and before.get(\"text_excerpt\") == after.get(\"text_excerpt\")\n    )"
+        },
+        {
+          "file": "controller/app/actions/pipeline.py",
+          "lines": "232",
+          "snippet": "verification = manager._action_verification(context.action_name, context.target, witness_state.before, after)"
+        },
+        {
+          "file": "controller/app/browser_manager.py",
+          "lines": "1001-1020",
+          "snippet": "verified = bool(signals)\nif action_name == \"navigate\":\n    verified = \"url_changed\" in signals or \"title_changed\" in signals\nelif action_name in {\"go_back\", \"go_forward\"}:\n    verified = \"url_changed\" in signals or \"title_changed\" in signals\nelif action_name in {\n    \"click\",\n    \"press\",\n    \"scroll\",\n}:\n    verified = bool(\n        {\n            \"url_changed\",\n            \"title_changed\",\n            \"active_element_changed\",\n            \"text_excerpt_changed\",\n            \"accessibility_focus_changed\",\n        }\n        & set(signals)\n    )"
+        }
+      ]
+    },
+    {
+      "name": "per-run step budget",
+      "what_it_is": "The agent loop runs at most max_steps iterations; max_steps defaults to 6 and is schema-bounded to 1..20. Reaching it ends the run with status 'max_steps_reached'.",
+      "function_in_system": "Bounds orchestrator.run, the outer agent loop. Caps LLM calls, cost and wall time per run. Otherwise a run that never emits 'done' continues indefinitely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/orchestrator.py",
+          "lines": "124, 169-170",
+          "snippet": "for index in range(max_steps):\n...\n    if index == max_steps - 1:\n        final_status = \"max_steps_reached\""
+        },
+        {
+          "file": "controller/app/models.py",
+          "lines": "392-393",
+          "snippet": "class AgentRunRequest(AgentStepRequest):\n    max_steps: int = Field(default=6, ge=1, le=20)"
+        }
+      ]
+    },
+    {
+      "name": "bounded summarized step history in prompt",
+      "what_it_is": "Only the last 6 prior steps are passed to the model, each reduced to status, action, reason, url, title and error.",
+      "function_in_system": "Built in orchestrator.step before adapter.decide. Keeps prompt size constant per step while still feeding back recent errors and outcomes. Otherwise the full observation/execution payload of every step accumulates in the prompt and grows cost and context per turn.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/orchestrator.py",
+          "lines": "263-278",
+          "snippet": "def _summarize_previous_steps(steps: list[AgentStepResult]) -> list[dict[str, Any]]:\n    summary: list[dict[str, Any]] = []\n    for item in steps[-6:]:\n        execution = item.execution or {}\n        after = execution.get(\"after\") if isinstance(execution, dict) else None\n        summary.append(\n            {\n                \"status\": item.status,\n                \"action\": item.decision.get(\"action\"),\n                \"reason\": item.decision.get(\"reason\"),\n                \"url\": (after or {}).get(\"url\") or item.observation.get(\"url\"),\n                \"title\": (after or {}).get(\"title\") or item.observation.get(\"title\"),\n                \"error\": item.error,\n            }\n        )\n    return summary"
+        }
+      ]
+    },
+    {
+      "name": "governed profile approval gate for write actions",
+      "what_it_is": "With workflow_profile='governed', every browser action decided by the agent passes require_governed_approval before execution; a missing approval raises ApprovalRequiredError, the step gets status 'approval_required' and the run stops.",
+      "function_in_system": "Sits in _execute_decision between the LLM decision and manager.execute_decision. Puts a human approval in front of state-changing browser actions. Otherwise a wrong or harmful model decision (posting, payment, account change) executes directly on the live site.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/orchestrator.py",
+          "lines": "218-223",
+          "snippet": "if workflow_profile == \"governed\":\n    await self.manager.require_governed_approval(\n        session_id,\n        decision,\n        approval_id=approval_id,\n    )"
+        },
+        {
+          "file": "controller/app/orchestrator.py",
+          "lines": "63-69",
+          "snippet": "except ApprovalRequiredError as exc:\n    result = AgentStepResult(\n        provider=provider_name,\n        model=model_name,\n        goal=goal,\n        workflow_profile=workflow_profile,\n        status=\"approval_required\","
+        },
+        {
+          "file": "controller/app/models.py",
+          "lines": "379-385",
+          "snippet": "workflow_profile: WorkflowProfile = Field(\n    default=\"fast\",\n    description=(\n        \"fast preserves direct execution; governed requires approval before write-sensitive \"\n        \"agent actions and adds conservative review guidance plus richer audit context.\"\n    ),\n)"
+        },
+        {
+          "file": "controller/app/browser/services/actions.py",
+          "lines": "618-626",
+          "snippet": "@staticmethod\ndef governed_approval_kind_for_decision(decision: BrowserActionDecision) -> ApprovalKind | None:\n    if decision.risk_category == \"read\":\n        return None\n    if decision.action == \"upload\" or decision.risk_category == \"upload\":\n        return \"upload\"\n    if decision.risk_category in {\"post\", \"payment\", \"account_change\", \"destructive\"}:\n        return decision.risk_category\n    return \"write\""
+        }
+      ]
+    },
+    {
+      "name": "governed profile conservative-action prompt hint",
+      "what_it_is": "With workflow_profile='governed', a hint is appended to the context: prefer read actions, write only when the target is unambiguous, and request human takeover for login, MFA, posting, payment, account changes, destructive actions, sensitive data or uncertainty.",
+      "function_in_system": "Injected into context_hints before adapter.decide. Steers the model toward self-escalation to a human in risky situations. Otherwise the model acts on risky or ambiguous targets on its own judgment.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "controller/app/orchestrator.py",
+          "lines": "249-257",
+          "snippet": "def _context_hints_for_profile(context_hints: str | None, workflow_profile: WorkflowProfile) -> str | None:\n    if workflow_profile == \"fast\":\n        return context_hints\n    governed_hint = (\n        \"Workflow profile: governed. Prefer inspect/read actions before mutating state. \"\n        \"Use normal write actions only when the target is unambiguous and confidence is high. \"\n        \"For login, MFA, posting, payment, account changes, destructive actions, sensitive data, \"\n        \"or uncertainty, request human takeover instead of proceeding.\"\n    )"
+        }
+      ]
+    },
+    {
+      "name": "step failure containment as structured error status",
+      "what_it_is": "Any exception inside a step (ProviderAPIError, httpx.HTTPStatusError, other) is converted into an AgentStepResult with status 'error' and an error_code (provider status, 503 if retryable, 502 otherwise), logged to agent_steps.jsonl; run() then ends with final status 'error'.",
+      "function_in_system": "Wraps decide and execute in orchestrator.step. Turns provider or execution failures into a recorded terminal state that the job layer marks resumable. Otherwise a provider outage crashes the run and loses the step history.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/orchestrator.py",
+          "lines": "78-99",
+          "snippet": "except Exception as exc:\n    if isinstance(exc, ProviderAPIError):\n        error_code: int | None = exc.status_code or (503 if exc.retryable else 502)\n    elif isinstance(exc, httpx.HTTPStatusError):\n        error_code = exc.response.status_code\n    else:\n        error_code = None\n    error_message = \"Provider request failed\" if error_code else \"Agent step failed\"\n    result = AgentStepResult(\n        provider=provider_name,\n        model=model_name,\n        goal=goal,\n        workflow_profile=workflow_profile,\n        status=\"error\",\n        observation=observation,\n        decision={},\n        execution=None,\n        usage=None,\n        raw_text=None,\n        error=error_message,\n        error_code=error_code,\n    )"
+        },
+        {
+          "file": "controller/app/orchestrator.py",
+          "lines": "166-168",
+          "snippet": "if step_result.status in {\"done\", \"takeover\", \"approval_required\", \"error\"}:\n    final_status = step_result.status\n    break"
+        }
+      ]
+    },
+    {
+      "name": "job step checkpointing and resume with resume context",
+      "what_it_is": "Background agent_run jobs persist a checkpoint per step to a JSON job file. On controller restart, running jobs are marked 'interrupted' and queued jobs are re-enqueued. resume_job restarts failed, interrupted, max_steps_reached, approval_required or error runs with the remaining step budget and injects a resume context (last 6 checkpoints plus an instruction to avoid repeating completed actions) into context_hints.",
+      "function_in_system": "Wraps orchestrator.run in the job queue via the on_step callback. Preserves progress across crashes, restarts and early terminations so a run continues from the current browser state. Otherwise every interruption discards the run and the agent repeats completed actions from scratch.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/agent_jobs.py",
+          "lines": "414-415, 428",
+          "snippet": "async def checkpoint_step(step_index: int, step_result: AgentStepResult) -> None:\n    await self.store.append_checkpoint(record.id, self._checkpoint_from_step(step_index, step_result))\n...\n    on_step=checkpoint_step,"
+        },
+        {
+          "file": "controller/app/agent_jobs.py",
+          "lines": "106-111",
+          "snippet": "async def mark_running_interrupted(self) -> None:\n    for record in await self.list():\n        if record.status == \"running\":\n            record.status = \"interrupted\"\n            record.error = \"agent_job_interrupted_on_restart\"\n            await self.update(record)"
+        },
+        {
+          "file": "controller/app/agent_jobs.py",
+          "lines": "293-300",
+          "snippet": "payload = AgentRunRequest.model_validate(source.request)\ncompleted_steps = len(source.checkpoints)\nremaining_steps = max(1, payload.max_steps - completed_steps)\npayload.max_steps = max_steps or remaining_steps\npayload.context_hints = self._merge_context_hints(\n    payload.context_hints,\n    self._resume_context(source),\n)"
+        },
+        {
+          "file": "controller/app/agent_jobs.py",
+          "lines": "462-469",
+          "snippet": "def _is_resumable(record: AgentJobRecord) -> bool:\n    if record.kind != \"agent_run\":\n        return False\n    if record.status in {\"interrupted\", \"failed\"}:\n        return True\n    if record.status != \"completed\" or not isinstance(record.result, dict):\n        return False\n    return record.result.get(\"status\") in {\"max_steps_reached\", \"approval_required\", \"error\"}"
+        },
+        {
+          "file": "controller/app/agent_jobs.py",
+          "lines": "501-505",
+          "snippet": "return (\n    f\"Resuming background agent job {record.id} after {len(record.checkpoints)} completed step(s). \"\n    f\"Latest checkpoint: status={latest.status}, action={latest.action or 'unknown'}, \"\n    f\"url={latest.url or 'unknown'}. Continue from the current browser state; do not repeat completed \"\n    \"actions unless the page state requires it.\\nCompleted checkpoints:\\n\""
+        }
+      ]
+    },
+    {
+      "name": "bounded job queue with backpressure",
+      "what_it_is": "The agent job queue holds at most 100 jobs; when full, the new job is marked 'failed' with 'Job queue is full' and the caller gets a 'try again later' error.",
+      "function_in_system": "Sits at job enqueue in front of the agent workers. Rejects excess agent runs early and visibly. Otherwise unbounded queued runs pile up and overload the controller and browser sessions.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/agent_jobs.py",
+          "lines": "238",
+          "snippet": "self.queue: asyncio.Queue[str] = asyncio.Queue(maxsize=100)"
+        },
+        {
+          "file": "controller/app/agent_jobs.py",
+          "lines": "356-362",
+          "snippet": "try:\n    self.queue.put_nowait(record.id)\nexcept asyncio.QueueFull:\n    record.status = \"failed\"\n    record.error = \"Job queue is full (max 100 queued jobs)\"\n    await self.store.update(record)\n    raise RuntimeError(\"Job queue is at capacity. Try again later.\")"
+        }
+      ]
+    },
+    {
+      "name": "model-call retry with exponential backoff",
+      "what_it_is": "Provider HTTP calls are retried on timeout, network error, HTTP 429 or 5xx with backoff MODEL_RETRY_BACKOFF_SECONDS * 2^(attempt-1) (default 1s), up to MODEL_MAX_RETRIES + 1 attempts (default 3). Other 4xx fail immediately. Final failure raises ProviderAPIError with a retryable flag. The OpenAI host-bridge transport uses the same scheme.",
+      "function_in_system": "Wraps every adapter.decide model request inside one agent step. Absorbs transient provider and network failures before they reach the orchestrator. Otherwise one rate-limit or network hiccup turns the step into 'error' and ends the run.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/providers/base.py",
+          "lines": "123-142",
+          "snippet": "max_attempts = max(1, self.settings.model_max_retries + 1)\nasync with httpx.AsyncClient(timeout=timeout or self.settings.model_request_timeout_seconds) as client:\n    for attempt in range(1, max_attempts + 1):\n        try:\n            response = await client.post(url, headers=headers, json=payload)\n        except (httpx.TimeoutException, httpx.NetworkError) as exc:\n            if attempt < max_attempts:\n                await asyncio.sleep(self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1)))\n                continue\n            raise ProviderAPIError(\n                provider=self.provider,\n                message=\"provider network request failed\",\n                status_code=None,\n                retryable=True,\n            ) from exc\n\n        if response.status_code == 429 or response.status_code >= 500:\n            if attempt < max_attempts:\n                await asyncio.sleep(self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1)))\n                continue"
+        },
+        {
+          "file": "controller/app/config.py",
+          "lines": "238-239",
+          "snippet": "model_max_retries: int = Field(2, alias=\"MODEL_MAX_RETRIES\")\nmodel_retry_backoff_seconds: float = Field(1.0, alias=\"MODEL_RETRY_BACKOFF_SECONDS\")"
+        },
+        {
+          "file": "controller/app/providers/openai_adapter.py",
+          "lines": "307-313",
+          "snippet": "retryable_status = response.status_code == 429 or response.status_code >= 500\nif response.status_code >= 400:\n    if retryable_status and attempt < max_attempts:\n        await asyncio.sleep(\n            self.settings.model_retry_backoff_seconds * (2 ** (attempt - 1))\n        )\n        continue"
+        }
+      ]
+    },
+    {
+      "name": "model-call timeout with CLI process kill",
+      "what_it_is": "HTTP model requests and CLI model invocations are bounded by MODEL_REQUEST_TIMEOUT_SECONDS (default 60s). A CLI call exceeding it is killed and raises a retryable ProviderAPIError.",
+      "function_in_system": "Bounds the decide call inside each agent step. Converts a hanging provider or stuck CLI subprocess into a recorded step error. Otherwise a single hung call blocks the step, the job worker and the session indefinitely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/providers/base.py",
+          "lines": "411-423",
+          "snippet": "try:\n    stdout_bytes, stderr_bytes = await asyncio.wait_for(\n        process.communicate(input_text.encode(\"utf-8\") if input_text is not None else None),\n        timeout=self.settings.model_request_timeout_seconds,\n    )\nexcept asyncio.TimeoutError as exc:\n    process.kill()\n    await process.communicate()\n    raise ProviderAPIError(\n        provider=self.provider,\n        message=f\"CLI command timed out after {self.settings.model_request_timeout_seconds:.0f}s\",\n        retryable=True,\n    ) from exc"
+        },
+        {
+          "file": "controller/app/config.py",
+          "lines": "237",
+          "snippet": "model_request_timeout_seconds: float = Field(60.0, alias=\"MODEL_REQUEST_TIMEOUT_SECONDS\")"
+        }
+      ]
+    },
+    {
+      "name": "forced structured output with decision schema validation",
+      "what_it_is": "Every provider path constrains the model to the BrowserActionDecision JSON schema (OpenAI forced strict function tool, Claude forced tool_choice, Gemini responseJsonSchema, CLI --json-schema/--output-schema). The result is validated by Pydantic with extra='forbid', field length limits and per-action requirements (click needs a target, type needs text, navigate needs a valid http(s) URL). Invalid output raises and the step ends with status 'error'; the error is logged and the run stops.",
+      "function_in_system": "Sits between the model response and _execute_decision. Guarantees that only a well-formed, complete single action reaches the browser. Otherwise malformed or incomplete model output executes as a wrong or undefined browser action.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/providers/openai_adapter.py",
+          "lines": "133-144, 157-160",
+          "snippet": "\"tools\": [\n    {\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"browser_action\",\n            \"description\": \"Select the single best next browser action.\",\n            \"parameters\": self.action_schema,\n            \"strict\": True,\n        },\n    }\n],\n\"tool_choice\": {\"type\": \"function\", \"function\": {\"name\": \"browser_action\"}},\n...\nif not tool_calls:\n    raise RuntimeError(\"OpenAI did not return a tool call for browser_action\")\narguments = tool_calls[0][\"function\"][\"arguments\"]\ndecision = BrowserActionDecision.model_validate_json(arguments)"
+        },
+        {
+          "file": "controller/app/providers/gemini_adapter.py",
+          "lines": "88-92",
+          "snippet": "\"generationConfig\": {\n    \"temperature\": 0,\n    \"responseMimeType\": \"application/json\",\n    \"responseJsonSchema\": self.action_schema,\n},"
+        },
+        {
+          "file": "controller/app/models.py",
+          "lines": "306-307, 346-350, 363-366",
+          "snippet": "class BrowserActionDecision(StrictInputModel):\n    model_config = ConfigDict(extra=\"forbid\", str_strip_whitespace=True)\n...\n        has_click_target = bool(self.element_id or self.selector or (self.x is not None and self.y is not None))\n        has_locator_target = bool(self.element_id or self.selector)\n\n        if self.action in {\"click\", \"hover\"} and not has_click_target:\n            raise ValueError(f\"{self.action} requires element_id, selector, or x+y coordinates\")\n...\n        if self.action == \"navigate\":\n            if not self.url:\n                raise ValueError(\"navigate requires url\")\n            self.url = validate_url(self.url, field_name=\"url\", allowed_schemes=HTTP_URL_SCHEMES)"
+        }
+      ]
+    },
+    {
+      "name": "tolerant decision parsing of CLI output",
+      "what_it_is": "parse_decision_text tries three stages: direct schema validation of the text, recursive search for a valid decision object inside parsed JSON wrappers, and a scan of the raw text for embedded JSON objects via raw_decode.",
+      "function_in_system": "Applied to CLI and host-bridge model output before execution. Recovers a valid decision from wrapper JSON or surrounding text emitted by agent CLIs. Otherwise output noise from the CLI fails the step although a valid decision is present.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/providers/base.py",
+          "lines": "441-468",
+          "snippet": "try:\n    return BrowserActionDecision.model_validate_json(text)\nexcept Exception:\n    pass\n\ntry:\n    payload = json.loads(text)\nexcept Exception:\n    payload = None\n\nif payload is not None:\n    decision = self._find_decision_candidate(payload)\n    if decision is not None:\n        return decision\n\ndecoder = json.JSONDecoder()\nfor index, char in enumerate(text):\n    if char != \"{\":\n        continue\n    try:\n        candidate, _ = decoder.raw_decode(text[index:])\n    except Exception:\n        continue\n    decision = self._find_decision_candidate(candidate)\n    if decision is not None:\n        return decision\n\nraise RuntimeError(f\"{self.provider} CLI did not return a valid BrowserActionDecision JSON object\")"
+        }
+      ]
+    },
+    {
+      "name": "prompt rules for risk labeling and self-escalation",
+      "what_it_is": "The base planner prompt instructs the model to never invent URLs, elements or file paths, to always set a risk_category (read, write, upload, post, payment, account_change, destructive) and to return request_human_takeover for login, MFA, CAPTCHA, payments, sending/posting or uncertainty.",
+      "function_in_system": "Part of every decide prompt in all workflow profiles. Makes the model classify the risk of each action and hand risky steps to a human. Otherwise hallucinated targets and risky actions reach the executor unlabeled. The label drives the approval gates (see risk-category approval gate).",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "controller/app/providers/base.py",
+          "lines": "213-224",
+          "snippet": "\"Choose exactly one next browser action.\\n\"\n\"Rules:\\n\"\n\"- Use only the current observation. element_id values are observation-scoped.\\n\"\n\"- Prefer element_id over selector. Use coordinates only for click when no reliable locator exists.\\n\"\n\"- Never invent URLs, elements, or file paths.\\n\"\n\"- Always set risk_category. Use read for navigate/hover/scroll/wait/reload/go_back/go_forward/done, write for normal click/type/press/select_option, upload for file uploads.\\n\"\n\"- If an action would post/send/publish content, set risk_category=post.\\n\"\n\"- If an action would submit a payment/order, set risk_category=payment.\\n\"\n\"- If an action would change profile/settings/security/billing/account state, set risk_category=account_change.\\n\"\n\"- If an action would delete/remove/cancel/close something, set risk_category=destructive.\\n\"\n\"- If the goal is already complete, return action=done.\\n\"\n\"- If the next step involves login, MFA, CAPTCHA, payments, sending/posting, or you are uncertain, return action=request_human_takeover.\\n\""
+        },
+        {
+          "file": "controller/app/browser/services/actions.py",
+          "lines": "614-615",
+          "snippet": "if decision.risk_category in {\"post\", \"payment\", \"account_change\", \"destructive\"}:\n    return decision.risk_category"
+        }
+      ]
+    },
+    {
+      "name": "compact observation in prompt",
+      "what_it_is": "compact_observation passes only a fixed field subset of the page observation to the model (url, title, text excerpt, DOM/accessibility outline, OCR, errors, tabs); interactables are reduced to id, label, role, tag, type, disabled, href, bbox and selector hint. The number of interactables is bounded by observation_limit (default 40, max 100).",
+      "function_in_system": "Built for every decide prompt. Keeps the per-step prompt small and focused on actionable page state. Otherwise the raw observation payload inflates token cost and context per step.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/providers/base.py",
+          "lines": "168-183",
+          "snippet": "def compact_observation(observation: dict[str, Any]) -> dict[str, Any]:\n    interactables = []\n    for item in observation.get(\"interactables\", []):\n        interactables.append(\n            {\n                \"element_id\": item.get(\"element_id\"),\n                \"label\": item.get(\"label\"),\n                \"role\": item.get(\"role\"),\n                \"tag\": item.get(\"tag\"),\n                \"type\": item.get(\"type\"),\n                \"disabled\": item.get(\"disabled\"),\n                \"href\": item.get(\"href\"),\n                \"bbox\": item.get(\"bbox\"),\n                \"selector_hint\": item.get(\"selector_hint\"),\n            }\n        )"
+        },
+        {
+          "file": "controller/app/models.py",
+          "lines": "386",
+          "snippet": "observation_limit: int = Field(default=40, ge=1, le=100)"
+        },
+        {
+          "file": "controller/app/browser/services/observation.py",
+          "lines": "17",
+          "snippet": "ACCESSIBILITY_NODE_LIMIT = 30"
+        },
+        {
+          "file": "controller/app/browser/services/observation.py",
+          "lines": "94-96",
+          "snippet": "effective_limit = min(limit * 2, 200) if preset == \"rich\" else limit\ninteractables = await session.page.evaluate(INTERACTABLES_SCRIPT, effective_limit)\ntext_limit = 4000 if preset == \"rich\" else 2000"
+        },
+        {
+          "file": "controller/app/browser/services/observation.py",
+          "lines": "113-115",
+          "snippet": "\"console_messages\": session.console_messages[-10:],\n\"page_errors\": session.page_errors[-10:],\n\"request_failures\": session.request_failures[-10:],"
+        }
+      ]
+    },
+    {
+      "name": "tool-less sandboxed CLI planner",
+      "what_it_is": "When a provider runs via its agent CLI, the CLI is started with its own capabilities switched off: codex with agents, MCP servers, multi_agent, apps and web search disabled, --ephemeral, in a temp directory; claude with --tools \"\", --permission-mode plan, --no-session-persistence; gemini with --approval-mode plan.",
+      "function_in_system": "Applies to the decide call on the CLI auth path. Restricts the embedded agent CLI to returning one decision, and all browser effects go through the controller's governed executor. Otherwise the planner CLI acts on the host (files, shell, web, MCP tools) outside approvals and audit.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/providers/openai_adapter.py",
+          "lines": "193-200, 208-214",
+          "snippet": "config_overrides = [\n    \"project_doc_fallback_filenames=[]\",\n    \"agents={}\",\n    \"mcp_servers={}\",\n    \"features.multi_agent=false\",\n    \"features.apps=false\",\n    'web_search=\"disabled\"',\n]\n...\n    [\n        \"exec\",\n        \"--skip-git-repo-check\",\n        \"--dangerously-bypass-approvals-and-sandbox\",\n        \"--cd\",\n        tempdir,\n        \"--ephemeral\","
+        },
+        {
+          "file": "controller/app/providers/claude_adapter.py",
+          "lines": "150-162",
+          "snippet": "command = [\n    self.settings.claude_cli_path,\n    \"--print\",\n    \"--output-format\",\n    \"json\",\n    \"--json-schema\",\n    json.dumps(self.action_schema, ensure_ascii=False),\n    \"--permission-mode\",\n    \"plan\",\n    \"--tools\",\n    \"\",\n    \"--no-session-persistence\",\n    prompt,"
+        },
+        {
+          "file": "controller/app/providers/gemini_adapter.py",
+          "lines": "135-143",
+          "snippet": "command = [\n    self.settings.gemini_cli_path,\n    \"--prompt\",\n    prompt,\n    \"--output-format\",\n    \"json\",\n    \"--approval-mode\",\n    \"plan\",\n]"
+        }
+      ]
+    },
+    {
+      "name": "risk-category approval gate for high-risk actions",
+      "what_it_is": "execute_decision always calls require_decision_approval. approval_kind_for_decision maps risk_category post, payment, account_change and destructive, plus every upload (REQUIRE_APPROVAL_FOR_UPLOADS, default True), to an approval kind. If no approved approval_id matches, a pending approval is created or reused, an optional webhook is dispatched and ApprovalRequiredError is raised. An approval is bound to its session, its kind and the exact decision (all fields except reason and confidence), expires APPROVAL_TTL_MINUTES (default 15) after the decision and is single-use: mark_executed sets 'executed' and further transitions are refused. An identical pending request is reused.",
+      "function_in_system": "Sits in the executor between the model decision and the Playwright operation, in every workflow profile. The step ends with status 'approval_required' and the run stops until a human approves. The trigger is the risk_category the model assigns itself (see prompt rules for risk labeling). Otherwise payments, posts, account changes and deletions decided by the model execute directly on the live site.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/browser/services/actions.py",
+          "lines": "251-255",
+          "snippet": "approval = await self.manager._require_decision_approval(\n    session_id,\n    decision,\n    approval_id=approval_id,\n)"
+        },
+        {
+          "file": "controller/app/browser/services/actions.py",
+          "lines": "611-616",
+          "snippet": "def approval_kind_for_decision(self, decision: BrowserActionDecision) -> ApprovalKind | None:\n    if decision.action == \"upload\":\n        return \"upload\" if self.manager.settings.require_approval_for_uploads else None\n    if decision.risk_category in {\"post\", \"payment\", \"account_change\", \"destructive\"}:\n        return decision.risk_category\n    return None"
+        },
+        {
+          "file": "controller/app/browser/services/actions.py",
+          "lines": "343-358, 389",
+          "snippet": "if approval_id:\n    return await self.manager.approvals.require_approved(\n        approval_id=approval_id,\n        session_id=session_id,\n        kind=kind,\n        action=decision,\n    )\n\nsession = await self.manager.get_session(session_id)\napproval = await self.manager.approvals.create_or_reuse_pending(\n    session_id=session_id,\n    kind=kind,\n    reason=fallback_reason or decision.reason,\n    action=decision,\n    observation=await self.manager._approval_observation(session),\n)\nraise ApprovalRequiredError(approval)"
+        },
+        {
+          "file": "controller/app/config.py",
+          "lines": "172",
+          "snippet": "require_approval_for_uploads: bool = Field(True, alias=\"REQUIRE_APPROVAL_FOR_UPLOADS\")"
+        },
+        {
+          "file": "controller/app/approvals.py",
+          "lines": "277-295",
+          "snippet": "async def require_approved(\n    self,\n    *,\n    approval_id: str,\n    session_id: str,\n    kind: ApprovalKind,\n    action: BrowserActionDecision,\n) -> ApprovalRecord:\n    approval = await self.get(approval_id)\n    if approval.session_id != session_id:\n        raise PermissionError(f\"approval {approval_id} does not belong to session {session_id}\")\n    if approval.kind != kind:\n        raise PermissionError(f\"approval {approval_id} does not cover {kind}\")\n    if approval.status != \"approved\":\n        raise PermissionError(f\"approval {approval_id} is not approved\")\n    self._ensure_not_expired(approval)\n    if not self._actions_match(approval.action, action):\n        raise PermissionError(f\"approval {approval_id} does not match the requested action\")\n    return approval"
+        },
+        {
+          "file": "controller/app/approvals.py",
+          "lines": "338-340",
+          "snippet": "def _actions_match(left: BrowserActionDecision, right: BrowserActionDecision) -> bool:\n    excluded = {\"reason\", \"confidence\"}\n    return left.model_dump(exclude=excluded) == right.model_dump(exclude=excluded)"
+        },
+        {
+          "file": "controller/app/approvals.py",
+          "lines": "342-347",
+          "snippet": "def _ensure_not_expired(self, approval: ApprovalRecord) -> None:\n    if approval.approved_expires_at is None:\n        return\n    expires_at = self._parse_timestamp(approval.approved_expires_at)\n    if expires_at <= datetime.now(UTC):\n        raise PermissionError(f\"approval {approval.id} has expired\")"
+        },
+        {
+          "file": "controller/app/approvals.py",
+          "lines": "264-275",
+          "snippet": "async def mark_executed(self, approval_id: str) -> ApprovalRecord:\n    async with self._lock:\n        approval = await self.get(approval_id)\n        if approval.status != \"approved\":\n            raise PermissionError(f\"approval {approval_id} is not approved\")\n        self._ensure_not_expired(approval)\n        now = utc_now()\n        approval.status = \"executed\"\n        approval.updated_at = now\n        approval.executed_at = now\n        await self._persist(approval)\n        return approval"
+        },
+        {
+          "file": "controller/app/approvals.py",
+          "lines": "238-241",
+          "snippet": "async with self._lock:\n    existing = await self._find_matching_pending(session_id=session_id, kind=kind, action=action)\n    if existing is not None:\n        return existing"
+        },
+        {
+          "file": "controller/app/config.py",
+          "lines": "173",
+          "snippet": "approval_ttl_minutes: int = Field(15, alias=\"APPROVAL_TTL_MINUTES\")"
+        }
+      ]
+    },
+    {
+      "name": "bot-challenge detection with automatic human takeover",
+      "what_it_is": "After every action and after navigate, a substring match checks URL, title, the first 500 characters of body text and iframe sources against 14 signals (Cloudflare challenge, captcha, recaptcha, hcaptcha, arkose, 'verify you are human', ...). A hit requests a human takeover and raises BrowserActionError code 'captcha_detected' with retryable=False.",
+      "function_in_system": "Sits in the action pipeline right after the operation. Detects anti-bot walls the agent cannot pass and hands the session to a human via noVNC; the step ends with status 'error' and the run stops. Otherwise the agent keeps acting on the challenge page, burning steps and risking a block of the account or IP.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/browser/services/bot_challenge.py",
+          "lines": "8-23",
+          "snippet": "BOT_CHALLENGE_SIGNALS = (\n    \"challenge.cloudflare.com\",\n    \"challenges.cloudflare.com\",\n    \"/cdn-cgi/challenge-platform/\",\n    \"captcha\",\n    \"recaptcha\",\n    \"hcaptcha\",\n    \"arkose\",\n    \"unusual activity\",\n    \"suspicious activity\",\n    \"verify you're human\",\n    \"verify you are human\",\n    \"security check\",\n    \"access denied\",\n    \"bot detected\",\n)"
+        },
+        {
+          "file": "controller/app/browser/services/bot_challenge.py",
+          "lines": "47-56",
+          "snippet": "combined = f\"{url} {title} {body_text} {' '.join(iframe_sources)}\"\nfor signal in BOT_CHALLENGE_SIGNALS:\n    if signal in combined:\n        return {\n            \"bot_challenge_detected\": True,\n            \"signal\": signal,\n            \"url\": session.page.url,\n            \"title\": title,\n            \"iframes\": iframe_sources[:10],\n        }"
+        },
+        {
+          "file": "controller/app/actions/pipeline.py",
+          "lines": "106-115",
+          "snippet": "challenge = await manager._check_bot_challenge(session)\nif challenge is not None:\n    await manager.request_human_takeover(session.id, reason=f\"Bot challenge detected: {challenge['signal']}\")\n    raise BrowserActionError(\n        f\"Bot challenge detected: {challenge['signal']}\",\n        action=context.action_name,\n        code=\"captcha_detected\",\n        retryable=False,\n        details=challenge,\n    )"
+        },
+        {
+          "file": "controller/app/browser/services/actions.py",
+          "lines": "44-51",
+          "snippet": "challenge = await self.manager._check_bot_challenge(session)\nif challenge:\n    logger.warning(\"bot challenge detected after navigation: %s\", challenge)\n    try:\n        await self.manager.request_human_takeover(\n            session.id,\n            reason=f\"Bot challenge detected: {challenge['signal']}\",\n        )"
+        }
+      ]
+    },
+    {
+      "name": "host allowlist with rollback of off-list navigation",
+      "what_it_is": "navigate checks the target host against ALLOWED_HOSTS (default 'example.com,localhost,127.0.0.1,::1') before execution. After every action the current page URL is checked again; a PermissionError triggers go_back when the URL changed, a 'blocked' snapshot and audit record, and BrowserActionError code 'browser_action_blocked' (403, retryable=False).",
+      "function_in_system": "Sits before and after each browser operation in the action pipeline. Contains hallucinated URLs and clicks that redirect to foreign hosts, and restores the previous page. The step ends with status 'error'. Otherwise the agent continues acting on arbitrary sites outside the intended scope.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/browser/services/actions.py",
+          "lines": "38",
+          "snippet": "self.manager._assert_url_allowed(url)"
+        },
+        {
+          "file": "controller/app/actions/pipeline.py",
+          "lines": "105",
+          "snippet": "manager._assert_runtime_url_allowed(session.page.url)"
+        },
+        {
+          "file": "controller/app/actions/pipeline.py",
+          "lines": "43-53",
+          "snippet": "except PermissionError as exc:\n    failed = await self._handle_policy_block(context, witness_state)\n    raise BrowserActionError(\n        \"Action blocked by policy\",\n        code=\"browser_action_blocked\",\n        action=context.action_name,\n        status_code=403,\n        retryable=False,\n        url=context.session.page.url,\n        details={\"snapshot\": failed},\n    ) from exc"
+        },
+        {
+          "file": "controller/app/actions/pipeline.py",
+          "lines": "124-126",
+          "snippet": "if session.page.url != witness_state.before.get(\"url\"):\n    await session.page.go_back(wait_until=\"domcontentloaded\")\n    await context.manager._settle(session.page)"
+        },
+        {
+          "file": "controller/app/browser_manager.py",
+          "lines": "1166-1179",
+          "snippet": "def _assert_url_allowed(self, url: str) -> None:\n    host = urlparse(url).hostname\n    if not host:\n        raise PermissionError(f\"Could not determine hostname for URL: {url}\")\n    patterns = self.settings.allowed_host_patterns\n    if \"*\" in patterns:\n        return\n    if not patterns or patterns == [\"*\"]:\n        return\n    for pattern in patterns:\n        normalized = pattern.removeprefix(\"*.\")\n        if fnmatch.fnmatch(host, pattern) or host == normalized or host.endswith(f\".{normalized}\"):\n            return\n    raise PermissionError(f\"Host {host!r} is not allowlisted\")"
+        },
+        {
+          "file": "controller/app/config.py",
+          "lines": "166",
+          "snippet": "allowed_hosts: str = Field(\"example.com,localhost,127.0.0.1,::1\", alias=\"ALLOWED_HOSTS\")"
+        }
+      ]
+    },
+    {
+      "name": "per-action browser timeout",
+      "what_it_is": "Every page gets a Playwright default timeout of ACTION_TIMEOUT_MS (default 15000 ms). After each operation _settle waits for networkidle at most min(action_timeout_ms, 5000) ms, then 250 ms, and proceeds when networkidle is never reached.",
+      "function_in_system": "Bounds each browser operation inside a step. A missing element or a never-idle page raises a PlaywrightError after the timeout, which the pipeline turns into a failed action. Otherwise a hung selector or page load blocks the step and the whole run indefinitely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/browser/services/sessions.py",
+          "lines": "108",
+          "snippet": "page.set_default_timeout(self.manager.settings.action_timeout_ms)"
+        },
+        {
+          "file": "controller/app/config.py",
+          "lines": "190",
+          "snippet": "action_timeout_ms: int = Field(15000, alias=\"ACTION_TIMEOUT_MS\")"
+        },
+        {
+          "file": "controller/app/browser_manager.py",
+          "lines": "1060-1066",
+          "snippet": "async def _settle(self, page: Page) -> None:\n    try:\n        await page.wait_for_load_state(\"networkidle\", timeout=min(self.settings.action_timeout_ms, 5000))\n    except Exception as exc:\n        # Busy pages legitimately never reach networkidle; proceed anyway.\n        logger.debug(\"settle: networkidle not reached: %s\", exc)\n    await page.wait_for_timeout(250)"
+        }
+      ]
+    },
+    {
+      "name": "session creation rollback",
+      "what_it_is": "Any exception during create_session calls cleanup_failed, which removes the session from the registry and releases tunnel, browser context, isolated browser and isolated runtime, each in its own try/except.",
+      "function_in_system": "Sits around session setup before the agent loop starts. Keeps a failed start from leaving half-built sessions behind. Otherwise orphaned sessions occupy the live-session limit (default 1) and leak browser processes and containers, so every following run fails.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/browser/services/sessions.py",
+          "lines": "209-217",
+          "snippet": "except Exception:\n    await self.manager._cleanup_failed_session(\n        session_id,\n        session=session,\n        context=context,\n        browser=browser,\n        runtime=runtime,\n    )\n    raise"
+        },
+        {
+          "file": "controller/app/browser/services/sessions.py",
+          "lines": "286-306",
+          "snippet": "self.manager.sessions.pop(session_id, None)\nif session is not None and session.tunnel is not None:\n    try:\n        await self.manager.tunnel_broker.release(session.tunnel)\n    except Exception as exc:\n        logger.warning(\"failed to release session tunnel during create_session rollback: %s\", exc)\nif context is not None:\n    try:\n        await context.close()\n    except Exception as exc:\n        logger.warning(\"failed to close browser context during create_session rollback: %s\", exc)\nif browser is not None and browser is not self.manager.browser:\n    try:\n        await browser.close()\n    except Exception as exc:\n        logger.warning(\"failed to close isolated browser during create_session rollback: %s\", exc)\nif runtime is not None:\n    try:\n        await self.manager.runtime_provisioner.release(runtime)\n    except Exception as exc:\n        logger.warning(\"failed to release isolated runtime during create_session rollback: %s\", exc)"
+        },
+        {
+          "file": "controller/app/session_isolation.py",
+          "lines": "115-117",
+          "snippet": "except Exception:\n    await asyncio.to_thread(self._cleanup_pending_container, pending)\n    raise"
+        },
+        {
+          "file": "controller/app/browser/services/runtime.py",
+          "lines": "113-115",
+          "snippet": "except Exception:\n    await manager.runtime_provisioner.release(runtime)\n    raise"
+        }
+      ]
+    },
+    {
+      "name": "per-session action lock",
+      "what_it_is": "Each BrowserSession holds an asyncio.Lock; action pipeline, observe, screenshot, diagnostics and close all run inside 'async with session.lock'.",
+      "function_in_system": "Serializes every access to one browser page. Agent steps, MCP tool calls and operator requests on the same session cannot interleave, so the before/after snapshots and the observation belong to the executed action. Otherwise concurrent callers act on a page state they never observed and corrupt verification and audit.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/browser_manager.py",
+          "lines": "90",
+          "snippet": "lock: asyncio.Lock = field(default_factory=asyncio.Lock)"
+        },
+        {
+          "file": "controller/app/actions/pipeline.py",
+          "lines": "38-40",
+          "snippet": "async def run(self, context: ActionRunContext) -> dict[str, Any]:\n    async with context.session.lock:\n        witness_state = await self._prepare(context)"
+        },
+        {
+          "file": "controller/app/browser/services/observation.py",
+          "lines": "26-29",
+          "snippet": "async def observe(self, session_id: str, limit: int = 40, preset: str = \"normal\") -> dict[str, Any]:\n    session = await self.manager.get_session(session_id)\n    async with session.lock:\n        result = await self.observation_payload(session, limit=limit, preset=preset)"
+        },
+        {
+          "file": "controller/app/browser/services/sessions.py",
+          "lines": "321-323",
+          "snippet": "async def close(self, session_id: str) -> dict[str, Any]:\n    session = await self.manager.get_session(session_id)\n    async with session.lock:"
+        }
+      ]
+    },
+    {
+      "name": "contract-bounded attempt retry loop with reflexion notes",
+      "what_it_is": "A harness run executes the same TaskContract up to budget.max_attempts times; each attempt is one full orchestrator.run plus a verification pass. After every attempt that fails verification, a reflexion block listing the failed postconditions, the missing evidence and a next-mutation hint is appended to the run's strategy.md. The strategy file is write-only: the context_hints handed to the orchestrator stay the same string on every attempt (iterate.py:304), so the repeated attempt carries no feedback from the previous one.",
+      "function_in_system": "Sits one level above the orchestrator step loop: orchestrator.run returns a finished run, the harness verifies it and starts the next attempt. Catches runs that terminate cleanly while missing the goal, a failure mode the step loop itself treats as success. Otherwise a single unverified run is the final answer.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "136-141",
+          "snippet": "        results: list[VerificationResult] = []\n        latest_trace: TraceEnvelope | None = None\n        attempt_budget = min(max_attempts or contract.budget.max_attempts, contract.budget.max_attempts)\n        deadline = time.monotonic() + contract.budget.max_wall_seconds\n        for attempt_index in range(1, attempt_budget + 1):\n            trace_path = run_dir / f\"attempt-{attempt_index}\" / \"trace.json\""
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "213-228",
+          "snippet": "            results.append(verification)\n            record.attempts.append(\n                HarnessAttempt(\n                    index=attempt_index,\n                    trace_path=str(trace_path),\n                    verification=verification,\n                )\n            )\n            decision = detector.decide(results)\n            record.decision = decision\n            record.status = decision.status\n            if verification.passed is not True:\n                _append_reflexion(strategy_path, verification, attempt_index)\n            self.store.save(record)\n            if not decision.should_continue:\n                break"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "298-306",
+          "snippet": "        if orchestrator is not None and session_id:\n            result = await orchestrator.run(\n                session_id=session_id,\n                provider_name=provider,\n                goal=contract.goal,\n                max_steps=contract.budget.max_steps,\n                context_hints=f\"Harness contract {contract.id}; satisfy postconditions before done.\",\n                workflow_profile=\"governed\",\n            )"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "336-347",
+          "snippet": "def _append_reflexion(path: Path, verification: VerificationResult, attempt_index: int) -> None:\n    failed = \", \".join(verification.failed_postconditions) or \"none\"\n    missing = \", \".join(verification.missing_evidence) or \"none\"\n    note = (\n        f\"\\n## Reflexion after attempt {attempt_index}\\n\\n\"\n        f\"- verifier: {verification.backend}\\n\"\n        f\"- failed postconditions: {failed}\\n\"\n        f\"- missing evidence: {missing}\\n\"\n        f\"- next mutation: harden selectors or seek a more deterministic evidence source.\\n\"\n    )\n    with path.open(\"a\", encoding=\"utf-8\") as handle:\n        handle.write(note)"
+        }
+      ]
+    },
+    {
+      "name": "convergence on consecutive verified attempts",
+      "what_it_is": "ConvergenceDetector counts verification results backwards from the newest and requires min(3, budget.max_attempts) consecutive passes to report converged; any failure resets the streak, and the run ends as unconverged once the attempt budget is used up.",
+      "function_in_system": "Decides after each verified attempt whether the harness loop continues (iterate.py:221-228). Filters runs that passed once by chance before the result is treated as a reproducible solution and turned into a skill candidate. Otherwise one lucky attempt promotes a flaky path.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/harness/converge.py",
+          "lines": "24-49",
+          "snippet": "    def decide(self, results: list[VerificationResult]) -> ConvergenceDecision:\n        total = len(results)\n        consecutive = 0\n        for result in reversed(results):\n            if result.passed is True:\n                consecutive += 1\n            else:\n                break\n        if consecutive >= self.required_successes:\n            return ConvergenceDecision(\n                status=\"converged\",\n                converged=True,\n                should_continue=False,\n                reason=f\"{consecutive} consecutive verified runs\",\n                successful_attempts=consecutive,\n                total_attempts=total,\n            )\n        if total >= self.max_attempts:\n            return ConvergenceDecision(\n                status=\"unconverged\",\n                converged=False,\n                should_continue=False,\n                reason=\"attempt budget exhausted\",\n                successful_attempts=consecutive,\n                total_attempts=total,\n            )"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "132-135",
+          "snippet": "        detector = ConvergenceDetector(\n            required_successes=min(3, max(1, contract.budget.max_attempts)),\n            max_attempts=max_attempts or contract.budget.max_attempts,\n        )"
+        }
+      ]
+    },
+    {
+      "name": "deterministic postcondition and evidence verification",
+      "what_it_is": "A ProgrammaticVerifier checks the final observation of a run against the contract postconditions (url_contains, url_matches, text_contains, dom_contains, network_response_shape, extracted_data_schema) and requires that every evidence kind the contract marks as required appears in the trace. A run passes only when all required postconditions hold, no forbidden state was hit and no required evidence is missing.",
+      "function_in_system": "Runs after each harness attempt (iterate.py:157-160) and produces the VerificationResult the convergence decision reads. Replaces the model's own done verdict with an external check on observable page state. Otherwise the run counts as successful as soon as the LLM claims it is finished.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/harness/verifier/programmatic.py",
+          "lines": "20-34",
+          "snippet": "        failed: list[str] = []\n        satisfied: list[str] = []\n        for index, postcondition in enumerate(contract.postconditions):\n            key = _condition_key(index, postcondition)\n            if _postcondition_passes(\n                postcondition,\n                url=url,\n                searchable_text=searchable_text,\n                dom_text=dom_text,\n                trace=trace,\n            ):\n                satisfied.append(key)\n            elif postcondition.required:\n                failed.append(key)\n"
+        },
+        {
+          "file": "controller/app/harness/verifier/programmatic.py",
+          "lines": "46-48",
+          "snippet": "        missing_evidence = sorted(contract.required_evidence_kinds - evidence)\n        passed = not failed and not forbidden_hits and not missing_evidence\n        confidence = 1.0 if passed else 0.0"
+        },
+        {
+          "file": "controller/app/harness/verifier/programmatic.py",
+          "lines": "128-135",
+          "snippet": "    if condition.kind == \"url_contains\":\n        return value.lower() in url.lower()\n    if condition.kind == \"url_matches\":\n        return re.search(value, url) is not None\n    if condition.kind == \"text_contains\":\n        return value.lower() in searchable_text.lower()\n    if condition.kind == \"dom_contains\":\n        return value.lower() in dom_text.lower()"
+        },
+        {
+          "file": "controller/app/harness/contracts.py",
+          "lines": "124-130",
+          "snippet": "    @property\n    def required_evidence(self) -> set[str]:\n        return {item.kind for item in self.evidence_required if item.required}\n\n    @property\n    def required_evidence_kinds(self) -> set[str]:\n        return {item.kind for item in self.evidence_required if item.required}"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "157-160",
+          "snippet": "                verification = await asyncio.wait_for(\n                    self.verifier.verify(contract, trace),\n                    timeout=_remaining_seconds(deadline),\n                )"
+        }
+      ]
+    },
+    {
+      "name": "forbidden end-state detection",
+      "what_it_is": "The contract carries a list of forbidden states (url_contains, url_matches, text_contains, url_status, captcha_screen, payment_screen, login_redirect). The verifier matches URL, page text and DOM text against them, using built-in keyword sets for the captcha, payment and login kinds, and records every hit.",
+      "function_in_system": "Part of the same verification pass as the postcondition check; a hit forces passed to False (programmatic.py:47). Catches runs that end on a payment, captcha or login screen, states a postcondition list alone leaves unnoticed. Otherwise the harness converges on a path that lands the agent in a paywall or bot wall.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/harness/contracts.py",
+          "lines": "18-26",
+          "snippet": "ForbiddenStateKind = Literal[\n    \"url_contains\",\n    \"url_matches\",\n    \"text_contains\",\n    \"url_status\",\n    \"captcha_screen\",\n    \"payment_screen\",\n    \"login_redirect\",\n]"
+        },
+        {
+          "file": "controller/app/harness/contracts.py",
+          "lines": "62-71",
+          "snippet": "    @model_validator(mode=\"after\")\n    def validate_value(self) -> \"ForbiddenState\":\n        if self.kind in {\"url_contains\", \"url_matches\", \"text_contains\", \"url_status\"} and not self.value:\n            raise ValueError(f\"{self.kind} forbidden state requires value\")\n        if self.kind == \"url_matches\":\n            try:\n                re.compile(self.value)\n            except re.error as err:\n                raise ValueError(f\"url_matches value must be a valid regex: {err}\") from None\n        return self"
+        },
+        {
+          "file": "controller/app/harness/verifier/programmatic.py",
+          "lines": "35-44",
+          "snippet": "        forbidden_hits: list[str] = []\n        for index, forbidden in enumerate(contract.forbidden_states):\n            if _forbidden_state_hit(\n                forbidden,\n                observation=observation,\n                url=url,\n                searchable_text=searchable_text,\n                dom_text=dom_text,\n            ):\n                forbidden_hits.append(f\"forbidden[{index}]:{forbidden.kind}:{forbidden.value or forbidden.kind}\")"
+        },
+        {
+          "file": "controller/app/harness/verifier/programmatic.py",
+          "lines": "177-192",
+          "snippet": "    combined = f\"{url}\\n{searchable_text}\\n{dom_text}\".lower()\n    if forbidden.kind == \"captcha_screen\":\n        needles = [\"captcha\", \"recaptcha\", \"hcaptcha\", \"verify you are human\", \"cloudflare\"]\n        if value:\n            needles.append(value.lower())\n        return any(needle in combined for needle in needles)\n    if forbidden.kind == \"payment_screen\":\n        needles = [\"payment\", \"credit card\", \"card number\", \"billing address\", \"checkout payment\"]\n        if value:\n            needles.append(value.lower())\n        return any(needle in combined for needle in needles)\n    if forbidden.kind == \"login_redirect\":\n        needles = [\"/login\", \"/signin\", \"sign in\", \"log in\", \"login required\", \"authenticate\"]\n        if value:\n            needles.append(value.lower())\n        return any(needle in combined for needle in needles)"
+        }
+      ]
+    },
+    {
+      "name": "verifier ensemble with abstention",
+      "what_it_is": "With HARNESS_VERIFIER=ensemble the programmatic verifier and an external Universal Verifier subprocess both vote. The ensemble returns passed=None whenever fewer than two verifiers reach a decisive result or the votes disagree. The external adapter abstains by returning passed=None when its command is unconfigured or absent, when the subprocess exceeds its 60 second timeout and is killed, when the exit code is non-zero, or when the output is invalid JSON.",
+      "function_in_system": "Wraps the verification step of every harness attempt. An abstention counts as a failed attempt for the convergence detector, so a broken or disagreeing verifier blocks convergence. Otherwise a crashing or hanging external verifier either takes the run down or its silence reads as a pass.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/harness/verifier/base.py",
+          "lines": "33-50",
+          "snippet": "        results = [await verifier.verify(contract, trace) for verifier in self.verifiers]\n        decisive = [result for result in results if result.passed is not None]\n        if not decisive:\n            return VerificationResult(\n                passed=None,\n                confidence=0.0,\n                notes=\"No verifier produced a decisive result.\",\n                backend=\"ensemble\",\n                details={\"results\": [result.model_dump() for result in results]},\n            )\n        if len(self.verifiers) > 1 and len(decisive) < 2:\n            return VerificationResult(\n                passed=None,\n                confidence=sum(result.confidence for result in decisive) / len(decisive),\n                notes=\"Insufficient decisive verifier votes; abstaining.\",\n                backend=\"ensemble\",\n                details={\"results\": [result.model_dump() for result in results]},\n            )"
+        },
+        {
+          "file": "controller/app/harness/verifier/uv.py",
+          "lines": "26-30",
+          "snippet": "        if not self.command:\n            return self._unavailable(\"Universal Verifier command is not configured.\")\n        if not which(self.command[0]):\n            return self._unavailable(f\"Universal Verifier command was not found: {self.command[0]}\")\n"
+        },
+        {
+          "file": "controller/app/harness/verifier/uv.py",
+          "lines": "42-64",
+          "snippet": "        try:\n            stdout, stderr = await asyncio.wait_for(\n                process.communicate(json.dumps(payload).encode(\"utf-8\")),\n                timeout=self.timeout_seconds,\n            )\n        except asyncio.TimeoutError:\n            process.kill()\n            await process.communicate()\n            return self._unavailable(\"Universal Verifier command timed out.\")\n\n        if process.returncode != 0:\n            detail = stderr.decode(\"utf-8\", errors=\"replace\")[:1024]\n            return self._unavailable(\n                f\"Universal Verifier command failed (code {process.returncode}): {detail}\",\n            )\n\n        try:\n            result = json.loads(stdout.decode(\"utf-8\", errors=\"replace\"))\n        except json.JSONDecodeError:\n            return self._unavailable(\"Universal Verifier command returned invalid JSON output.\")\n\n        if not isinstance(result, dict):\n            return self._unavailable(\"Universal Verifier output shape is invalid.\")"
+        },
+        {
+          "file": "controller/app/harness/verifier/uv.py",
+          "lines": "84-91",
+          "snippet": "    def _unavailable(self, note: str) -> VerificationResult:\n        return VerificationResult(\n            passed=None,\n            confidence=0.0,\n            notes=note,\n            backend=self.backend,\n            details={\"available\": False},\n        )"
+        },
+        {
+          "file": "controller/app/startup/extensions.py",
+          "lines": "130-141",
+          "snippet": "def _build_harness_verifier(settings):\n    from app.harness.verifier import EnsembleVerifier, ProgrammaticVerifier, UniversalVerifierAdapter\n\n    mode = str(getattr(settings, \"harness_verifier\", \"\") or os.environ.get(\"HARNESS_VERIFIER\", \"programmatic\")).lower()\n    uv_command = str(getattr(settings, \"harness_uv_command\", \"\") or os.environ.get(\"HARNESS_UV_COMMAND\", \"\"))\n    uv = UniversalVerifierAdapter(command=shlex.split(uv_command) if uv_command else None)\n    programmatic = ProgrammaticVerifier()\n    if mode == \"uv\":\n        return uv\n    if mode == \"ensemble\":\n        return EnsembleVerifier([programmatic, uv])\n    return programmatic"
+        },
+        {
+          "file": "controller/app/config.py",
+          "lines": "59-61",
+          "snippet": "    harness_root: str = Field(\"/data/harness\", alias=\"HARNESS_ROOT\")\n    harness_verifier: str = Field(\"programmatic\", alias=\"HARNESS_VERIFIER\")\n    harness_uv_command: str = Field(\"\", alias=\"HARNESS_UV_COMMAND\")"
+        }
+      ]
+    },
+    {
+      "name": "contract budget across attempts",
+      "what_it_is": "Budget fields bound a harness run: max_steps (passed into orchestrator.run), max_attempts, max_wall_seconds, plus recorded max_model_calls and max_usd. A deadline computed once at run start wraps every attempt and every verification in asyncio.wait_for, with the remaining time recalculated per call; zero remaining time raises TimeoutError immediately.",
+      "function_in_system": "Spans the whole harness loop and reaches into the step loop through max_steps, extending the per-run step budget to the repeat level. Bounds the wall-clock time and the model spend a retrying contract can consume. Otherwise the wall-clock time and model spend of one task grow with every repeated attempt.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/harness/contracts.py",
+          "lines": "79-84",
+          "snippet": "class Budget(HarnessModel):\n    max_steps: int = Field(default=8, ge=1, le=100)\n    max_attempts: int = Field(default=3, ge=1, le=20)\n    max_wall_seconds: int = Field(default=300, ge=1, le=86400)\n    max_model_calls: int = Field(default=30, ge=0, le=10000)\n    max_usd: float = Field(default=5.0, ge=0.0, le=100000.0)"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "138-139",
+          "snippet": "        attempt_budget = min(max_attempts or contract.budget.max_attempts, contract.budget.max_attempts)\n        deadline = time.monotonic() + contract.budget.max_wall_seconds"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "142-160",
+          "snippet": "            try:\n                trace = await asyncio.wait_for(\n                    self._run_attempt(\n                        contract,\n                        run_id=run_id,\n                        attempt_index=attempt_index,\n                        mock_final_observation=mock_final_observation,\n                        orchestrator=orchestrator,\n                        session_id=session_id,\n                        provider=provider,\n                    ),\n                    timeout=_remaining_seconds(deadline),\n                )\n                latest_trace = trace\n                trace.write_json(trace_path)\n                verification = await asyncio.wait_for(\n                    self.verifier.verify(contract, trace),\n                    timeout=_remaining_seconds(deadline),\n                )"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "371-375",
+          "snippet": "def _remaining_seconds(deadline: float) -> float:\n    remaining = deadline - time.monotonic()\n    if remaining <= 0:\n        raise asyncio.TimeoutError\n    return remaining"
+        }
+      ]
+    },
+    {
+      "name": "harness attempt failure containment",
+      "what_it_is": "A budget timeout and any other exception raised inside an attempt are caught separately. Both write an error trace envelope for the attempt, record a VerificationResult with passed=None, set the run decision and status to over_budget respectively failed, append the note, write the reflexion and persist the record before breaking out of the loop.",
+      "function_in_system": "Sits around _run_attempt and the verifier call inside the harness loop. Turns a crashing attempt into a stored run status with a readable trace. Counterpart on the attempt level to the step-level containment in the orchestrator. Otherwise one failing attempt loses the whole run record and its evidence.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "161-173",
+          "snippet": "            except asyncio.TimeoutError as exc:\n                trace = _error_trace(contract, run_id=run_id, attempt_index=attempt_index, error=exc)\n                trace.write_json(trace_path)\n                verification = VerificationResult(\n                    passed=None,\n                    confidence=0.0,\n                    notes=\"Harness budget exceeded: max_wall_seconds\",\n                    backend=\"harness\",\n                    details={\"budget\": \"max_wall_seconds\"},\n                )\n                record.attempts.append(\n                    HarnessAttempt(index=attempt_index, trace_path=str(trace_path), verification=verification)\n                )"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "174-186",
+          "snippet": "                record.decision = ConvergenceDecision(\n                    status=\"over_budget\",\n                    converged=False,\n                    should_continue=False,\n                    reason=\"max_wall_seconds budget exhausted\",\n                    successful_attempts=sum(1 for result in results if result.passed is True),\n                    total_attempts=len(record.attempts),\n                )\n                record.status = \"over_budget\"\n                record.notes.append(verification.notes)\n                _append_reflexion(strategy_path, verification, attempt_index)\n                self.store.save(record)\n                break"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "187-199",
+          "snippet": "            except Exception as exc:\n                trace = _error_trace(contract, run_id=run_id, attempt_index=attempt_index, error=exc)\n                trace.write_json(trace_path)\n                verification = VerificationResult(\n                    passed=None,\n                    confidence=0.0,\n                    notes=f\"Harness attempt failed: {type(exc).__name__}\",\n                    backend=\"harness\",\n                    details={\"error_type\": type(exc).__name__},\n                )\n                record.attempts.append(\n                    HarnessAttempt(index=attempt_index, trace_path=str(trace_path), verification=verification)\n                )"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "350-368",
+          "snippet": "def _error_trace(contract: TaskContract, *, run_id: str, attempt_index: int, error: Exception) -> TraceEnvelope:\n    from .trace import TraceEvent\n\n    event = TraceEvent(\n        run_id=f\"{run_id}-{attempt_index}\",\n        step_idx=attempt_index,\n        event_type=\"error\",\n        payload={\n            \"error_type\": type(error).__name__,\n            \"message\": \"attempt failed\",\n        },\n    ).with_hash()\n    return TraceEnvelope(\n        run_id=f\"{run_id}-{attempt_index}\",\n        contract_hash=contract.hash(),\n        events=[event],\n        final_observation={},\n        metadata={\"mode\": \"error\", \"attempt_index\": attempt_index},\n    )"
+        }
+      ]
+    },
+    {
+      "name": "staged-only skill promotion",
+      "what_it_is": "A converged run induces a skill candidate into the staging root: SKILL.md with status staging, a replay helper, a self test, provenance with contract and trace hashes, and a signed envelope. graduate() returns status staged with a message pointing at a manual governed promotion step, and it refuses runs that are unconverged or lack a candidate.",
+      "function_in_system": "Sits at the exit of the harness loop, between a verified run and any reuse of the learned path. Keeps a self-generated skill behind a human review gate. Otherwise the system moves its own induced skills into the active tool surface on its own authority.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "230-239",
+          "snippet": "        if record.status == \"converged\" and latest_trace is not None and results:\n            record.candidate = self.inducer.induce(\n                contract=contract,\n                trace=latest_trace,\n                verification=results[-1],\n                attempts=len(record.attempts),\n                model_tiers=self.model_tiers,\n            )\n            record.notes.append(\"Staged skill candidate emitted; promotion requires review.\")\n            self.store.save(record)"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "270-278",
+          "snippet": "    def graduate(self, run_id: str) -> dict[str, Any]:\n        record = self.store.get(run_id)\n        if record.status != \"converged\" or record.candidate is None:\n            raise ValueError(\"Only converged runs with staged candidates can be graduated\")\n        return {\n            \"status\": \"staged\",\n            \"message\": \"Candidate is staged only. Governed promotion is intentionally not automatic.\",\n            \"candidate\": record.candidate.model_dump(mode=\"json\"),\n        }"
+        },
+        {
+          "file": "controller/app/harness/induce.py",
+          "lines": "185-188",
+          "snippet": "## Runtime\n\nUse `helper.py` as the generated replay helper. This candidate is staged and must be reviewed before promotion.\n\"\"\""
+        }
+      ]
+    },
+    {
+      "name": "staged skill drift monitor",
+      "what_it_is": "For a staged candidate the monitor reloads the stored contract and trace, compares their hashes against the provenance recorded in the candidate, re-runs the full verification and classifies the result as healthy, unverified or degraded. The outcome is written as drift.json next to the candidate; unreadable artifacts yield degraded.",
+      "function_in_system": "Runs outside the agent loop over the skill candidates the harness produced, on demand per candidate or across all of them. Detects that a previously verified path stopped working or that its artifacts changed. Otherwise a stale candidate keeps its verified provenance while the site it targets has moved on.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/harness/drift.py",
+          "lines": "37-54",
+          "snippet": "    async def check_candidate(self, skill_id: str) -> DriftCheckResult:\n        try:\n            candidate = self.registry.get_candidate(skill_id)\n        except KeyError:\n            return DriftCheckResult(skill_id=skill_id, status=\"missing\", notes=[\"candidate not found\"])\n\n        candidate_dir = self.registry.candidate_dir(candidate.skill_id)\n        try:\n            contract = TaskContract.model_validate_json(_read_artifact(candidate_dir, \"contract.json\"))\n            trace = TraceEnvelope.read_json(_artifact_path(candidate_dir, \"trace.json\"))\n        except Exception as exc:\n            result = DriftCheckResult(\n                skill_id=skill_id,\n                status=\"degraded\",\n                notes=[f\"candidate artifacts unreadable: {type(exc).__name__}\"],\n            )\n            _write_result(candidate_dir, result)\n            return result"
+        },
+        {
+          "file": "controller/app/harness/drift.py",
+          "lines": "56-83",
+          "snippet": "        notes: list[str] = []\n        contract_hash = contract.hash()\n        trace_hash = trace.trace_hash\n        if contract_hash != candidate.contract_hash:\n            notes.append(\"contract hash differs from candidate provenance\")\n        if trace_hash != candidate.trace_hash:\n            notes.append(\"trace hash differs from candidate provenance\")\n\n        verification = await self.verifier.verify(contract, trace)\n        if verification.passed is True and not notes:\n            status = \"healthy\"\n        elif verification.passed is None and not notes:\n            status = \"unverified\"\n        else:\n            status = \"degraded\"\n        if verification.notes:\n            notes.append(verification.notes)\n\n        result = DriftCheckResult(\n            skill_id=skill_id,\n            status=status,\n            contract_hash=contract_hash,\n            trace_hash=trace_hash,\n            verification=verification,\n            notes=notes,\n        )\n        _write_result(candidate_dir, result)\n        return result"
+        },
+        {
+          "file": "controller/app/harness/iterate.py",
+          "lines": "264-268",
+          "snippet": "    async def check_drift(self, skill_id: str) -> dict[str, Any]:\n        return (await self.drift_monitor.check_candidate(skill_id)).model_dump(mode=\"json\")\n\n    async def check_all_drifts(self) -> list[dict[str, Any]]:\n        return [item.model_dump(mode=\"json\") for item in await self.drift_monitor.check_all()]"
+        }
+      ]
+    },
+    {
+      "name": "per-step retry with exponential backoff and timeout",
+      "what_it_is": "Every workflow step runs inside asyncio.wait_for with its own timeout_seconds (default 120). A timeout or any exception is retried up to retry_max times (default 2, so three attempts) with a wait of retry_backoff_seconds * 2 ** attempt (default 3s then 6s). After the last attempt the step is marked FAILED and the last exception is raised to the graph executor.",
+      "function_in_system": "Sits around the action handler call inside the workflow step graph and absorbs transient failures of a single step. The shipped controller registers zero action handlers (startup/extensions.py:201-206), so in the delivered app every step fails at the handler lookup and the retry path stays unreachable through the REST surface. Otherwise one slow or flaky step fails the whole workflow run.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/workflow/engine.py",
+          "lines": "47-49",
+          "snippet": "    retry_max: int = 2\n    retry_backoff_seconds: float = 3.0\n    timeout_seconds: float = 120.0"
+        },
+        {
+          "file": "controller/app/workflow/engine.py",
+          "lines": "209-242",
+          "snippet": "        last_exc: Optional[Exception] = None\n        for attempt in range(step.retry_max + 1):\n            try:\n                result = await asyncio.wait_for(\n                    fn(step.action, resolved_params, run.context),\n                    timeout=step.timeout_seconds,\n                )\n                run.step_results[step.id] = result\n                run.step_statuses[step.id] = StepStatus.COMPLETED\n                # Merge result into context under step.id namespace\n                run.context[step.id] = result\n                self._save(run)\n                return\n            except asyncio.TimeoutError:\n                last_exc = TimeoutError(f\"Step {step.id!r} timed out after {step.timeout_seconds}s\")\n                logger.warning(\n                    \"workflow.step %r attempt %d/%d timed out\",\n                    step.id, attempt + 1, step.retry_max + 1,\n                )\n                if attempt < step.retry_max:\n                    backoff = step.retry_backoff_seconds * (2 ** attempt)\n                    await asyncio.sleep(backoff)\n            except Exception as exc:\n                last_exc = exc\n                logger.warning(\n                    \"workflow.step %r attempt %d/%d failed: %s\",\n                    step.id, attempt + 1, step.retry_max + 1, exc,\n                )\n                if attempt < step.retry_max:\n                    backoff = step.retry_backoff_seconds * (2 ** attempt)\n                    await asyncio.sleep(backoff)\n\n        run.step_statuses[step.id] = StepStatus.FAILED\n        raise last_exc or RuntimeError(f\"Step {step.id!r} failed after {step.retry_max + 1} attempts\")"
+        },
+        {
+          "file": "controller/app/startup/extensions.py",
+          "lines": "201-206",
+          "snippet": "def _init_workflow_engine(app) -> None:\n    from app.workflow.engine import WorkflowEngine\n    wf_root = Path(os.environ.get(\"WORKFLOWS_ROOT\", \"/data/workflows\"))\n    engine = WorkflowEngine(workflows_root=wf_root)\n    app.state.workflow_engine = engine\n    logger.info(\"startup.workflow: engine initialized root=%s\", wf_root)"
+        }
+      ]
+    },
+    {
+      "name": "dependency failure propagation and deadlock detection",
+      "what_it_is": "The executor runs a step once all its dependencies are done. A step that depends on a failed step is marked FAILED with 'Dependency failed' and stays unexecuted. When a full pass over the step list produces no progress, every remaining step is failed with 'Deadlock: unresolvable dependencies' and the loop breaks; any failure makes the run raise at the end.",
+      "function_in_system": "Sits in the step graph scheduler of a workflow run. Stops work whose inputs are missing and bounds the scheduling loop against cyclic or unsatisfiable dependency sets. Otherwise a step runs on empty template values, or the while loop spins forever over steps that can never become ready.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/workflow/engine.py",
+          "lines": "161-170",
+          "snippet": "            for step in run.steps:\n                if step.id in done or step.id in failed:\n                    continue\n                # Skip if any dep failed\n                if any(dep in failed for dep in step.depends_on):\n                    failed.add(step.id)\n                    run.step_statuses[step.id] = StepStatus.FAILED\n                    run.step_errors[step.id] = \"Dependency failed\"\n                    progress = True\n                    continue"
+        },
+        {
+          "file": "controller/app/workflow/engine.py",
+          "lines": "184-196",
+          "snippet": "            if not progress:\n                # No step could make progress — deadlock\n                pending = [s.id for s in run.steps if s.id not in done and s.id not in failed]\n                for sid in pending:\n                    failed.add(sid)\n                    run.step_statuses[sid] = StepStatus.FAILED\n                    run.step_errors[sid] = \"Deadlock: unresolvable dependencies\"\n                break\n\n        if failed:\n            raise RuntimeError(\n                f\"Workflow {run.workflow_id!r}: steps failed: {sorted(failed)}\"\n            )"
+        }
+      ]
+    },
+    {
+      "name": "workflow run containment with per-step checkpointing",
+      "what_it_is": "run() catches every exception out of the step executor, sets the run to FAILED with a generic error code and persists the record in a finally block. The record is written at every status transition (run start, step start, step completion) through a temp file plus rename, and list_runs skips files it fails to parse.",
+      "function_in_system": "Wraps the whole workflow execution. Turns a failing run into a stored record that names the status and error of each individual step. Related to the job checkpointing of the agent queue, with inspection as the purpose rather than resume. Otherwise a crashed run leaves the caller with an exception and loses the per-step state.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/workflow/engine.py",
+          "lines": "141-152",
+          "snippet": "        try:\n            await self._execute(run)\n            run.status = StepStatus.COMPLETED\n        except Exception as exc:\n            run.status = StepStatus.FAILED\n            run.error = \"workflow_run_failed\"\n            logger.error(\"workflow.engine: run %s failed: %s\", run.run_id, exc)\n        finally:\n            run.finished_at = time.time()\n            self._save(run)\n\n        return run"
+        },
+        {
+          "file": "controller/app/workflow/engine.py",
+          "lines": "199-201",
+          "snippet": "    async def _run_step(self, step: WorkflowStep, run: WorkflowRun) -> None:\n        run.step_statuses[step.id] = StepStatus.RUNNING\n        self._save(run)"
+        },
+        {
+          "file": "controller/app/workflow/engine.py",
+          "lines": "216-220",
+          "snippet": "                run.step_results[step.id] = result\n                run.step_statuses[step.id] = StepStatus.COMPLETED\n                # Merge result into context under step.id namespace\n                run.context[step.id] = result\n                self._save(run)"
+        },
+        {
+          "file": "controller/app/workflow/engine.py",
+          "lines": "244-262",
+          "snippet": "    def _save(self, run: WorkflowRun) -> None:\n        path = self._root / f\"{run.run_id}.json\"\n        data = {\n            \"workflow_id\": run.workflow_id,\n            \"run_id\": run.run_id,\n            \"status\": run.status.value,\n            \"context\": run.context,\n            \"step_statuses\": {k: v.value for k, v in run.step_statuses.items()},\n            \"step_results\": run.step_results,\n            \"step_errors\": run.step_errors,\n            \"started_at\": run.started_at,\n            \"finished_at\": run.finished_at,\n            \"error\": run.error,\n        }\n        # Atomic write: temp file + rename, so a crash mid-write never\n        # leaves a corrupted run JSON that will break list_runs() later.\n        tmp = path.with_suffix(\".json.tmp\")\n        tmp.write_text(json.dumps(data, indent=2))\n        tmp.replace(path)"
+        }
+      ]
+    },
+    {
+      "name": "scheduler fault isolation",
+      "what_it_is": "The APScheduler callback _scheduled_run wraps the whole job execution in try/except and logs failures; a job id that has vanished from the store returns silently. Registration failures (for example an invalid cron expression in CronTrigger.from_crontab) and failed remove_job calls during update and delete are logged and skipped.",
+      "function_in_system": "Sits between the scheduler and the agent job queue, at the entry point of every scheduled agent run. Keeps one broken job local to itself. Otherwise a malformed cron expression or a failing run propagates into the scheduler and takes the other scheduled jobs with it.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/cron_service.py",
+          "lines": "234-242",
+          "snippet": "    async def _scheduled_run(self, job_id: str) -> None:\n        \"\"\"Called by APScheduler on cron trigger.\"\"\"\n        try:\n            jobs = self._load()\n            if job_id not in jobs:\n                return\n            await self._run_job_now(jobs[job_id])\n        except Exception as exc:\n            logger.error(\"cron job %s failed: %s\", job_id, exc)"
+        },
+        {
+          "file": "controller/app/cron_service.py",
+          "lines": "218-232",
+          "snippet": "    def _register_job(self, job: dict[str, Any]) -> None:\n        if not _APSCHEDULER_AVAILABLE or self._scheduler is None:\n            return\n        try:\n            trigger = CronTrigger.from_crontab(job[\"schedule\"])\n            self._scheduler.add_job(\n                self._scheduled_run,\n                trigger=trigger,\n                id=job[\"id\"],\n                args=[job[\"id\"]],\n                replace_existing=True,\n            )\n            logger.info(\"registered cron job %s: %s\", job[\"id\"], job[\"schedule\"])\n        except Exception as exc:\n            logger.warning(\"failed to register cron job %s: %s\", job[\"id\"], exc)"
+        },
+        {
+          "file": "controller/app/cron_service.py",
+          "lines": "168-174",
+          "snippet": "            if self._scheduler is not None:\n                try:\n                    self._scheduler.remove_job(job_id)\n                except Exception as exc:\n                    logger.warning(\"failed to remove cron job %s during update: %s\", job_id, exc)\n                if job.get(\"enabled\") and job.get(\"schedule\"):\n                    self._register_job(job)"
+        }
+      ]
+    },
+    {
+      "name": "delegated capability failure containment",
+      "what_it_is": "Inbound delegation turns every downstream outcome into a structured DelegationResponse: a policy error becomes status rejected, a tool gateway result carrying _mesh_error becomes rejected with the partial result attached, unwired session and workflow capabilities and unknown capability kinds return their own error dicts. The route maps only DelegationRejected and DelegationReplayError to HTTP 403.",
+      "function_in_system": "Sits at the peer boundary, between the signature and policy checks and the local tool gateway. Counterpart of the step-level error status on the mesh edge: the delegating node receives a status it can act on. Otherwise a failure inside the delegated tool surfaces as a dropped connection or an opaque HTTP 500 on the calling node.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/mesh/delegation.py",
+          "lines": "232-240",
+          "snippet": "        try:\n            grant = self._policy.evaluate(peer, request)\n        except PolicyError as exc:\n            logger.info(\"mesh.policy.denied peer=%s capability=%s reason=%s\", sender_id, request.capability, exc)\n            return DelegationResponse(\n                request_id=request.request_id,\n                status=\"rejected\",\n                error=\"Delegation policy rejected the request\",\n            )"
+        },
+        {
+          "file": "controller/app/mesh/delegation.py",
+          "lines": "291-312",
+          "snippet": "        # Route capability\n        result = await self._route_capability(request)\n        if result.get(\"status\") == \"approval_required\":\n            return DelegationResponse(\n                request_id=request.request_id,\n                status=\"approval_required\",\n                approval_id=result.get(\"approval_id\"),\n                error=result.get(\"error\"),\n                result={k: v for k, v in result.items() if k != \"_mesh_error\"},\n            )\n        if result.get(\"_mesh_error\"):\n            return DelegationResponse(\n                request_id=request.request_id,\n                status=\"rejected\",\n                error=str(result.get(\"error\") or \"Delegated capability failed\"),\n                result={k: v for k, v in result.items() if k != \"_mesh_error\"},\n            )\n        return DelegationResponse(\n            request_id=request.request_id,\n            status=\"ok\",\n            result=result,\n        )"
+        },
+        {
+          "file": "controller/app/mesh/delegation.py",
+          "lines": "330-342",
+          "snippet": "        # session:<verb> → session handler stub\n        if cap.startswith(\"session:\"):\n            verb = cap[8:]\n            logger.info(\"mesh.delegation.session_verb verb=%s session_id=%s\", verb, request.session_id)\n            return {\"_mesh_error\": True, \"error\": \"session delegation not yet wired\", \"verb\": verb}\n\n        # workflow:<name> → workflow engine stub\n        if cap.startswith(\"workflow:\"):\n            name = cap[9:]\n            logger.info(\"mesh.delegation.workflow name=%s\", name)\n            return {\"_mesh_error\": True, \"error\": \"workflow delegation not yet wired\", \"name\": name}\n\n        return {\"_mesh_error\": True, \"error\": f\"Unknown capability kind: {cap!r}\"}"
+        },
+        {
+          "file": "controller/app/routes/extensions.py",
+          "lines": "45-54",
+          "snippet": "    from app.mesh import DelegationRejected, DelegationReplayError, SignedEnvelope, make_envelope\n\n    envelope = SignedEnvelope(**body.model_dump())\n    try:\n        response = await delegation_mgr.receive_inbound(envelope)\n    except (DelegationRejected, DelegationReplayError):\n        raise HTTPException(403, \"Mesh delegation rejected\")\n    except Exception:\n        logger.exception(\"mesh.receive error\")\n        raise HTTPException(500, \"Mesh receive failed\")"
+        }
+      ]
+    },
+    {
+      "name": "mesh transport timeout with typed failures",
+      "what_it_is": "Outbound envelopes are posted with an httpx client at a 10 second timeout and TLS verification on. A timeout, a connection error, any other request error, a status code outside 200/201/202 and an unparsable reply envelope each raise TransportError. A missing peer endpoint raises before the request is made.",
+      "function_in_system": "Sits on the outbound side of delegation, around the single HTTP call to a peer. Bounds how long a delegating run waits on an unresponsive peer and gives the caller one error type to handle. Otherwise a hanging peer blocks the delegating node for the lifetime of the socket.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/mesh/transport.py",
+          "lines": "22",
+          "snippet": "_SEND_TIMEOUT_SECONDS = 10.0"
+        },
+        {
+          "file": "controller/app/mesh/transport.py",
+          "lines": "125-151",
+          "snippet": "    if not peer.endpoint:\n        raise TransportError(f\"Peer {peer.node_id!r} has no endpoint configured\")\n\n    url = peer.endpoint.rstrip(\"/\") + \"/mesh/receive\"\n    payload = envelope.model_dump()\n\n    try:\n        async with httpx.AsyncClient(timeout=_SEND_TIMEOUT_SECONDS, verify=True) as client:\n            response = await client.post(url, json=payload)\n    except httpx.TimeoutException as exc:\n        raise TransportError(f\"Timeout sending envelope to {url}: {exc}\") from exc\n    except httpx.ConnectError as exc:\n        raise TransportError(f\"Connection error to {url}: {exc}\") from exc\n    except httpx.RequestError as exc:\n        raise TransportError(f\"Request error to {url}: {exc}\") from exc\n\n    if response.status_code not in (200, 201, 202):\n        raise TransportError(\n            f\"Peer {peer.node_id!r} returned HTTP {response.status_code} \"\n            f\"from {url}: {response.text[:200]}\"\n        )\n\n    try:\n        data = response.json()\n        return SignedEnvelope(**data)\n    except Exception as exc:\n        raise TransportError(f\"Failed to parse reply envelope from {url}: {exc}\") from exc"
+        },
+        {
+          "file": "controller/app/mesh/delegation.py",
+          "lines": "144-147",
+          "snippet": "        try:\n            reply_envelope = await send_envelope(peer=peer, envelope=envelope)\n        except TransportError:\n            raise"
+        }
+      ]
+    },
+    {
+      "name": "approval gate for delegated capabilities",
+      "what_it_is": "When the matching capability grant carries require_approval, the delegation manager allocates an approval id and awaits the configured approval function before routing. A missing handler, an exception inside it, a pending status and any status other than approved all end the delegation as approval_required or rejected.",
+      "function_in_system": "Sits between policy evaluation and the local tool gateway on inbound delegation, the third approval gate next to the governed profile gate and the risk category gate. Puts a person between a remote peer and a local browser action. Otherwise a peer holding a valid grant drives this node's browser on its own.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/mesh/delegation.py",
+          "lines": "245-289",
+          "snippet": "        # Approval gate\n        if grant.require_approval:\n            if self._approval_fn is None:\n                return DelegationResponse(\n                    request_id=request.request_id,\n                    status=\"approval_required\",\n                    error=\"Approval required but no approval handler configured\",\n                )\n            approval_id = str(uuid.uuid4())\n            logger.info(\n                \"mesh.delegation.approval_required peer=%s capability=%s approval_id=%s\",\n                sender_id,\n                request.capability,\n                approval_id,\n            )\n            try:\n                approval_result = await self._approval_fn(approval_id, request.model_dump())\n            except Exception:\n                return DelegationResponse(\n                    request_id=request.request_id,\n                    status=\"approval_required\",\n                    approval_id=approval_id,\n                    error=\"Delegation approval failed\",\n                )\n            # Inspect approval outcome: any status != \"approved\" blocks routing.\n            # Convention: approval_fn returns {\"status\": \"approved\"|\"denied\"|...} dict.\n            approval_status = (approval_result or {}).get(\"status\", \"denied\")\n            if approval_status in {\"pending\", \"approval_required\"}:\n                return DelegationResponse(\n                    request_id=request.request_id,\n                    status=\"approval_required\",\n                    approval_id=approval_id,\n                    error=f\"Approval pending (status={approval_status})\",\n                )\n            if approval_status != \"approved\":\n                logger.info(\n                    \"mesh.delegation.approval_denied peer=%s capability=%s approval_id=%s status=%s\",\n                    sender_id, request.capability, approval_id, approval_status,\n                )\n                return DelegationResponse(\n                    request_id=request.request_id,\n                    status=\"rejected\",\n                    approval_id=approval_id,\n                    error=f\"Approval denied (status={approval_status})\",\n                )"
+        },
+        {
+          "file": "controller/app/mesh/policy.py",
+          "lines": "159-165",
+          "snippet": "        logger.info(\n            \"mesh.policy: PERMIT peer=%s capability=%s require_approval=%s\",\n            peer.node_id,\n            request.capability,\n            matching_grant.require_approval,\n        )\n        return matching_grant"
+        }
+      ]
+    },
+    {
+      "name": "per-session ephemeral browser container",
+      "what_it_is": "In mode docker_ephemeral each session gets its own labeled browser-node container with a per-session profile and downloads mount, shm_size=2g, mem_limit=4g (ISOLATED_BROWSER_MEM_LIMIT), pids_limit=2048 (ISOLATED_BROWSER_PIDS_LIMIT) and optional nano_cpus, released when the session closes.",
+      "function_in_system": "Sits in session setup before the agent loop starts (browser/services/runtime.py:98-103). Confines browser state and resource usage of one agent run to one container, so cookies, downloads and a runaway renderer stay inside that session. Otherwise all sessions share one browser process, where one page can exhaust host memory for every other run and profile state carries over between tasks.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/config.py",
+          "lines": "78",
+          "snippet": "session_isolation_mode: str = Field(\"shared_browser_node\", alias=\"SESSION_ISOLATION_MODE\")"
+        },
+        {
+          "file": "controller/app/session_isolation.py",
+          "lines": "150-162",
+          "snippet": "if self.settings.isolated_browser_mem_limit:\n    resource_kwargs[\"mem_limit\"] = self.settings.isolated_browser_mem_limit\nif self.settings.isolated_browser_pids_limit > 0:\n    resource_kwargs[\"pids_limit\"] = self.settings.isolated_browser_pids_limit\nif self.settings.isolated_browser_cpus > 0:\n    resource_kwargs[\"nano_cpus\"] = int(self.settings.isolated_browser_cpus * 1_000_000_000)\n\ncontainer = client.containers.run(\n    self.settings.isolated_browser_image,\n    name=container_name,\n    detach=True,\n    network=network_name,\n    shm_size=\"2g\","
+        },
+        {
+          "file": "controller/app/session_isolation.py",
+          "lines": "171-183",
+          "snippet": "volumes={\n    str(host_profile_dir): {\"bind\": \"/data/profile\", \"mode\": \"rw\"},\n    str(host_downloads_dir): {\"bind\": \"/data/downloads\", \"mode\": \"rw\"},\n},\nports={\n    \"6080/tcp\": (self.settings.isolated_browser_bind_host, None),\n    \"5900/tcp\": (self.settings.isolated_browser_bind_host, None),\n},\nlabels={\n    _MANAGED_LABEL: \"true\",\n    \"auto-browser.session_id\": session_id,\n    \"auto-browser.mode\": \"docker_ephemeral\",\n},"
+        },
+        {
+          "file": "controller/app/browser/services/runtime.py",
+          "lines": "100-103",
+          "snippet": "if manager.settings.session_isolation_mode != \"docker_ephemeral\":\n    return await self.ensure_browser(), None\n\nruntime = await manager.runtime_provisioner.provision(session_id)"
+        }
+      ]
+    },
+    {
+      "name": "orphan container reaping at startup",
+      "what_it_is": "startup() lists every container carrying the label auto-browser.managed=true and force-removes it; the sweep is skipped when ISOLATED_BROWSER_KEEP_CONTAINERS is enabled, and a failure on one container is logged while the sweep continues.",
+      "function_in_system": "Runs once at controller startup before any session exists (browser_manager.py:243), so every labeled container is a leftover of a crashed or killed controller. Reclaims memory, ports and profile mounts held by dead runs. Otherwise each crash leaves containers behind that accumulate over restarts and occupy host resources for sessions that ended long ago.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/session_isolation.py",
+          "lines": "58-62",
+          "snippet": "async def startup(self) -> None:\n    if self.settings.session_isolation_mode != \"docker_ephemeral\":\n        return\n    await asyncio.to_thread(self._ensure_context)\n    await asyncio.to_thread(self._reap_orphaned_containers)"
+        },
+        {
+          "file": "controller/app/session_isolation.py",
+          "lines": "72-88",
+          "snippet": "if self.settings.isolated_browser_keep_containers:\n    logger.debug(\"Skipping orphan container sweep: ISOLATED_BROWSER_KEEP_CONTAINERS is enabled\")\n    return\nclient = self._ensure_context()\ntry:\n    orphans = client.containers.list(all=True, filters={\"label\": f\"{_MANAGED_LABEL}=true\"})\nexcept Exception as exc:\n    logger.warning(\"Could not list orphaned browser containers: %s\", exc)\n    return\nfor container in orphans:\n    name = getattr(container, \"name\", \"<unknown>\")\n    try:\n        container.remove(force=True)\n    except Exception as exc:\n        logger.warning(\"Failed to remove orphaned browser container %s: %s\", name, exc)\n        continue\n    logger.info(\"Reaped orphaned browser container %s\", name)"
+        }
+      ]
+    },
+    {
+      "name": "browser node readiness wait with fail-fast on container exit",
+      "what_it_is": "After starting the container, provisioning polls the ws-endpoint file every 0.25s for ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS (default 45) seconds, aborts as soon as the container status is exited or dead, and raises a RuntimeError carrying the last 20 log lines on both paths.",
+      "function_in_system": "Sits between container start and the Playwright connect inside session creation. Holds session setup until the node publishes its endpoint, and turns a dead node into an immediate typed failure with diagnostics. Otherwise the connect runs against a container that is still booting and the session start ends in an opaque timeout deep in Playwright.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/session_isolation.py",
+          "lines": "263-280",
+          "snippet": "async def _wait_for_ws_endpoint(self, container, endpoint_file: Path) -> str:\n    for _ in range(max(1, self.settings.isolated_browser_wait_timeout_seconds * 4)):\n        await asyncio.to_thread(container.reload)\n        status = str(getattr(container, \"status\", \"\") or container.attrs.get(\"State\", {}).get(\"Status\", \"\"))\n        if status in {\"exited\", \"dead\"}:\n            logs = self._container_logs(container)\n            raise RuntimeError(\n                f\"Isolated browser container {container.name} exited before Playwright endpoint was ready. {logs}\"\n            )\n        if endpoint_file.exists():\n            endpoint = endpoint_file.read_text(encoding=\"utf-8\").strip()\n            if endpoint:\n                return endpoint\n        await asyncio.sleep(0.25)\n    logs = self._container_logs(container)\n    raise RuntimeError(\n        f\"Timed out waiting for isolated browser endpoint file {endpoint_file}. {logs}\"\n    )"
+        },
+        {
+          "file": "controller/app/config.py",
+          "lines": "87-90",
+          "snippet": "isolated_browser_wait_timeout_seconds: int = Field(\n    45,\n    alias=\"ISOLATED_BROWSER_WAIT_TIMEOUT_SECONDS\",\n)"
+        }
+      ]
+    },
+    {
+      "name": "retention-based artifact cleanup with live-session protection",
+      "what_it_is": "A background task runs run_cleanup at startup and then every CLEANUP_INTERVAL_SECONDS (3600), deleting files older than the per-root retention (168h) under artifact, upload and auth roots and pruning the emptied directories. Paths under auth_root/profiles and under the artifact, upload and auth directory of every live session are skipped; counts land in a report exposed at /maintenance/status.",
+      "function_in_system": "Sits outside the agent loop, next to the per-action artifacts every step writes (screenshots, traces, downloads, auth state). Bounds disk growth over long-running deployments while keeping the working files of running sessions intact. Otherwise the controller fills its volume and every later action that writes an artifact fails.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/maintenance.py",
+          "lines": "56-61",
+          "snippet": "async def startup(self) -> None:\n    self._stop_event.clear()\n    if self.settings.cleanup_on_startup:\n        await self.run_cleanup()\n    if self.settings.cleanup_interval_seconds > 0:\n        self._task = asyncio.create_task(self._run_loop(), name=\"maintenance-cleanup-loop\")"
+        },
+        {
+          "file": "controller/app/maintenance.py",
+          "lines": "88-93",
+          "snippet": "async def _run_loop(self) -> None:\n    while not self._stop_event.is_set():\n        try:\n            await asyncio.wait_for(self._stop_event.wait(), timeout=self.settings.cleanup_interval_seconds)\n        except asyncio.TimeoutError:\n            await self.run_cleanup()"
+        },
+        {
+          "file": "controller/app/maintenance.py",
+          "lines": "102-110",
+          "snippet": "def _protected_roots(self) -> list[Path]:\n    protected: list[Path] = [Path(self.settings.auth_root).resolve() / \"profiles\"]\n    for session in self.session_provider():\n        for attr in (\"artifact_dir\", \"upload_dir\", \"auth_dir\"):\n            value = getattr(session, attr, None)\n            if value is None:\n                continue\n            protected.append(Path(value).resolve())\n    return protected"
+        },
+        {
+          "file": "controller/app/maintenance.py",
+          "lines": "117-126",
+          "snippet": "cutoff = datetime.now(UTC).timestamp() - (retention_hours * 3600)\nfor path in sorted(root.rglob(\"*\"), key=lambda item: (item.is_file(), len(item.parts))):\n    if path.name == \".gitkeep\":\n        continue\n    resolved = path.resolve()\n    protected_match = self._protected_match(resolved, protected_roots)\n    if protected_match is not None:\n        if resolved == protected_match:\n            stats.skipped_protected += 1\n        continue"
+        },
+        {
+          "file": "controller/app/maintenance.py",
+          "lines": "134-138",
+          "snippet": "if path.is_file():\n    size = path.stat().st_size\n    path.unlink(missing_ok=True)\n    stats.deleted_files += 1\n    stats.bytes_reclaimed += size"
+        },
+        {
+          "file": "controller/app/config.py",
+          "lines": "200-204",
+          "snippet": "cleanup_on_startup: bool = Field(True, alias=\"CLEANUP_ON_STARTUP\")\ncleanup_interval_seconds: float = Field(3600.0, alias=\"CLEANUP_INTERVAL_SECONDS\")\nartifact_retention_hours: float = Field(168.0, alias=\"ARTIFACT_RETENTION_HOURS\")\nupload_retention_hours: float = Field(168.0, alias=\"UPLOAD_RETENTION_HOURS\")\nauth_retention_hours: float = Field(168.0, alias=\"AUTH_RETENTION_HOURS\")"
+        }
+      ]
+    },
+    {
+      "name": "anti-bot fingerprint masking across page, context and session layers",
+      "what_it_is": "With STEALTH_ENABLED the controller masks automation signals on three layers: an init script injected before every page load removes navigator.webdriver, fakes window.chrome, navigator.plugins and navigator.languages; the browser context is created with a user agent sampled from USER_AGENT_POOL plus a fixed timezone, locale and Accept-Language header; and a session-stable FingerprintConfig seeded from the session id adds canvas and WebGL noise when STEALTH_PROFILE is set beyond off.",
+      "function_in_system": "Sits in session and page setup ahead of the first navigation, so every action the agent performs runs under a consistent browser identity. Keeps the run from being classified as automated traffic, which is the failure mode the bot-challenge takeover handles once it has already happened. Otherwise a headless Chromium exposes navigator.webdriver, an empty plugin list and a default fingerprint, and the target site blocks or challenges the session before the goal is reached.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "controller/app/config.py",
+          "lines": "246-252",
+          "snippet": "stealth_enabled: bool = Field(False, alias=\"STEALTH_ENABLED\")\n# Defaults to the single authoritative pool in stealth.fingerprint so the\n# context-level UA and the fingerprint layer cannot drift apart.\nuser_agent_pool: str = Field(\n    \",\".join(CHROME_UA_POOL),\n    alias=\"USER_AGENT_POOL\",\n)"
+        },
+        {
+          "file": "controller/app/config.py",
+          "lines": "337-339",
+          "snippet": "def random_user_agent(self) -> str:\n    agents = [a.strip() for a in self.user_agent_pool.split(\",\") if a.strip()]\n    return random.choice(agents) if agents else \"\""
+        },
+        {
+          "file": "controller/app/browser_scripts.py",
+          "lines": "4-13",
+          "snippet": "# Injected before every page load via add_init_script().\n# Removes automation signals, mocks realistic browser properties.\nSTEALTH_INIT_SCRIPT = r\"\"\"\n() => {\n  // Remove webdriver flag\n  try {\n    Object.defineProperty(navigator, 'webdriver', {\n      get: () => undefined, configurable: true,\n    });\n  } catch (_) {}"
+        },
+        {
+          "file": "controller/app/browser_scripts.py",
+          "lines": "612-616",
+          "snippet": "async def apply_stealth(page: object) -> None:\n    \"\"\"Inject stealth init script into a page before any navigation.\"\"\"\n    add_init_script = getattr(page, \"add_init_script\", None)\n    if callable(add_init_script):\n        await add_init_script(STEALTH_INIT_SCRIPT)"
+        },
+        {
+          "file": "controller/app/browser/services/sessions.py",
+          "lines": "107-110",
+          "snippet": "page = await context.new_page()\npage.set_default_timeout(self.manager.settings.action_timeout_ms)\nif self.manager.settings.stealth_enabled:\n    await apply_stealth(page)"
+        },
+        {
+          "file": "controller/app/browser/services/sessions.py",
+          "lines": "258-267",
+          "snippet": "effective_ua = (\n    user_agent\n    or (self.manager.settings.random_user_agent if self.manager.settings.stealth_enabled else None)\n)\nif effective_ua:\n    kwargs[\"user_agent\"] = effective_ua\nif self.manager.settings.stealth_enabled:\n    kwargs.setdefault(\"timezone_id\", \"America/New_York\")\n    kwargs.setdefault(\"locale\", \"en-US\")\n    kwargs.setdefault(\"extra_http_headers\", {\"Accept-Language\": \"en-US,en;q=0.9\"})"
+        },
+        {
+          "file": "controller/app/startup/extensions.py",
+          "lines": "260-269",
+          "snippet": "try:\n    settings = getattr(app.state, \"settings\", None)\n    stealth_profile = os.environ.get(\"STEALTH_PROFILE\", \"off\")\n    if getattr(settings, \"stealth_enabled\", False) and stealth_profile != \"off\":\n        from app.stealth.fingerprint import FingerprintConfig, apply_fingerprint\n        config = FingerprintConfig(session_id, stealth_profile)\n        await apply_fingerprint(page.context, config)\n        logger.debug(\"on_session_created: stealth profile=%s applied\", stealth_profile)\nexcept Exception as exc:\n    logger.warning(\"on_session_created: stealth fingerprint failed — %s\", exc)"
+        }
+      ]
+    }
+  ]
+}

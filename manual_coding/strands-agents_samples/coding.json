@@ -1,0 +1,1257 @@
+{
+  "repo": "strands-agents/samples",
+  "commit": "c54e630492",
+  "system_type": "sample-collection",
+  "system_type_reason": "Official example collection for the Strands Agents SDK; contains no runtime of its own.",
+  "repo_overview": {
+    "summary": "Official example collection for the Strands Agents SDK (Python and TypeScript). About 60 self-contained samples show how to build, deploy, integrate and evaluate agents; each one instantiates the SDK's Agent (model-driven tool-use loop inside the external strands-agents package) with custom tools, hooks, multi-agent patterns or deployment wiring. The repo contains no agent runtime of its own; it configures and extends the SDK.",
+    "components": [
+      {
+        "path": "python/01-learn/",
+        "purpose": "18 tutorials on SDK features: first agent, tools/MCP, model providers, streaming, guardrails, memory, observability, bidi streaming, agents-as-tools, swarm, graph, human-in-the-loop, plugins, skills, hooks lifecycle, conversation management, self-improving agents"
+      },
+      {
+        "path": "python/02-deploy/",
+        "purpose": "deployment wiring: AWS Lambda, Fargate, Bedrock AgentCore, AgentCore multi-agent (A2A orchestration)"
+      },
+      {
+        "path": "python/03-integrate/",
+        "purpose": "third-party integrations: databases (Aurora DSQL, Neptune, Supabase), guardrails (WonderFence, LlamaFirewall, NeMo), memory (Zep), observability (Arize), protocols (A2A), tools (Exa, Nova Act, Tavily), voice (Nova Sonic)"
+      },
+      {
+        "path": "python/04-industry-use-cases/",
+        "purpose": "end-to-end domain applications: finance, healthcare, logistics (custom airline orchestration), marketing, productivity (email, research, scrum), retail, software engineering (code assistant, SRE incident response, Lambda error analysis, data warehouse optimizer)"
+      },
+      {
+        "path": "python/05-technical-use-cases/",
+        "purpose": "technical patterns: agentic RAG, steering (library-book-renewal agent), pokemon team advisor"
+      },
+      {
+        "path": "python/06-evaluate/",
+        "purpose": "evaluation: A/B testing of models, built-in and custom evaluators, dataset generation, multi-agent and trajectory evaluation, multi-turn actor simulator"
+      },
+      {
+        "path": "python/07-ux-demos/",
+        "purpose": "UI frontends around agents: AG-UI/CopilotKit, HITL approval agent, Streamlit, Slack, triage agent, playground, analytics assistants"
+      },
+      {
+        "path": "python/08-edge/",
+        "purpose": "edge/robotics sample (Boston Dynamics Spot agent)"
+      },
+      {
+        "path": "typescript/",
+        "purpose": "TypeScript SDK tutorials (first agent, custom tools, model providers, streaming, agent state, browser agent) and AgentCore deployment"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "python/01-learn/01-first-agent/02-simple-interactive-usecase/recipe_bot.py",
+        "lines": "39-44",
+        "snippet": "recipe_agent = Agent(\n    system_prompt=\"\"\"You are RecipeBot, a helpful cooking assistant.\n    Help users find recipes based on ingredients and answer cooking questions.\n    Use the websearch tool to find recipes when users mention ingredients or to look up cooking information.\"\"\",\n    tools=[websearch],\n)"
+      },
+      {
+        "file": "python/01-learn/01-first-agent/02-simple-interactive-usecase/recipe_bot.py",
+        "lines": "56",
+        "snippet": "response = recipe_agent(user_input)"
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "Every sample hands tools to the SDK Agent (recipe_bot.py:39-44); the model decides which tool to call, and the SDK event loop executes it. The loop code itself lives in the external strands-agents package.",
+      "consumes_feedback": "Tool results (e.g. the websearch return value, recipe_bot.py:27-35) are returned to the model as tool results inside the SDK loop and inform the next model call.",
+      "multi_turn_until_termination": "A single recipe_agent(user_input) call (recipe_bot.py:56) runs model/tool cycles until the model ends its turn without further tool calls (SDK end_turn stop reason)."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent",
+    "evidence": [
+      {
+        "file": "python/01-learn/11-swarm/swarm.ipynb",
+        "lines": "cell 14, lines 1-7",
+        "snippet": "# Create specialized agents with different expertise\nresearch_agent = Agent(system_prompt=(\"\"\"You are a Research Agent specializing in gathering and analyzing information.\nYour role in the swarm is to provide factual information and research insights on the topic.\nYou should focus on providing accurate data and identifying key aspects of the problem.\nWhen receiving input from other agents, evaluate if their information aligns with your research.\n\"\"\"), \nname=\"research_agent\",model=\"us.anthropic.claude-sonnet-4-5-20250929-v1:0\")"
+      },
+      {
+        "file": "python/01-learn/11-swarm/swarm.ipynb",
+        "lines": "cell 16, lines 4-12",
+        "snippet": "swarm = Swarm(\n    [research_agent, creative_agent, critical_agent, summarizer_agent],\n    max_handoffs=20,\n    max_iterations=20,\n    execution_timeout=900.0,  # 15 minutes\n    node_timeout=300.0,       # 5 minutes per agent\n    repetitive_handoff_detection_window=8,  # There must be >= 3 unique agents in the last 8 handoffs\n    repetitive_handoff_min_unique_agents=3\n)"
+      }
+    ],
+    "justification": "The collection covers both topologies. Single-agent samples such as recipe_bot.py run one Agent with tools. Several samples build multi-agent systems: the swarm tutorial defines four Agents with distinct system prompts (swarm.ipynb cell 14) that hand off to each other inside a Swarm (cell 16); further samples use agents-as-tools, Graph and A2A orchestration. Because the repo explicitly demonstrates these patterns as first-class content, the repo is coded multi-agent.",
+    "verdict_raw": "multi-agent"
+  },
+  "resilience": [
+    {
+      "name": "Bedrock Guardrail filters on model input and output",
+      "what_it_is": "A Bedrock guardrail is created via create_guardrail with a DENY topic ('Fiduciary Advice'), content filters (sexual, violence, hate, insults, misconduct at HIGH, prompt-attack on input), a word list plus managed profanity list, and fixed blocked-input/output messages. It is attached to the model via BedrockModel(guardrail_id=..., guardrail_version=..., guardrail_trace=\"enabled\"); on intervention the SDK ends the turn with stop_reason 'guardrail_intervened' and returns the blocked message.",
+      "function_in_system": "Wraps every model call of the agent loop as an external filter evaluated by Bedrock on both the user input and the model output. It stops disallowed or unsafe content (investment advice, harmful content, prompt attacks) before it reaches the user or drives tool calls. Otherwise the customer-support agent answers with fiduciary advice or harmful content.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "python/01-learn/05-guardrails/bedrock_guardrails_sample.ipynb",
+          "lines": "cell 11, lines 2-8, 48-52",
+          "snippet": "response = bedrock_client.create_guardrail(\n    name='no-investment-advice',\n    description='Prevents the model from providing fiduciary advice.',\n    topicPolicyConfig={\n        'topicsConfig': [\n            {\n                'name': 'Fiduciary Advice',\n...\n            {\n                'type': 'PROMPT_ATTACK',\n                'inputStrength': 'HIGH',\n                'outputStrength': 'NONE'\n            }"
+        },
+        {
+          "file": "python/01-learn/05-guardrails/bedrock_guardrails_sample.ipynb",
+          "lines": "cell 17, lines 2-8",
+          "snippet": "bedrock_model = BedrockModel(\n    model_id=\"us.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    guardrail_id=guardrail_id,\n    guardrail_version=guardrail_version,\n    # Enable trace info for debugging\n    guardrail_trace=\"enabled\"\n)"
+        },
+        {
+          "file": "python/01-learn/05-guardrails/bedrock_guardrails_sample.ipynb",
+          "lines": "cell 19, lines 8-10",
+          "snippet": "    # Check for guardrail intervention\n    if hasattr(response, 'stop_reason') and response.stop_reason == \"guardrail_intervened\":\n        print(\"\\n ⚠️ GUARDRAIL INTERVENED!\")"
+        },
+        {
+          "file": "python/04-industry-use-cases/finance/personal-finance-assistant/lab1-foundations.ipynb",
+          "lines": "cell 25, lines 1-20, 48-54, 73-75",
+          "snippet": "# Create a Bedrock guardrail\nresponse = bedrock_client.create_guardrail(\n    name='guardrail-no-investment-advice',\n    description='Prevents the model from providing stock investment advice.',\n    topicPolicyConfig={\n        'topicsConfig': [\n            {\n                'name': 'Stock Investment Advice',\n                'definition': 'Providing personalized advice or recommendations on investing in financial instruments such as stocks or trusts in a fiduciary capacity or assuming related obligations and liabilities.',\n                'examples': [\n                    'What stocks should I invest in for my retirement?',\n                    'Is it a good idea to put my money in a mutual fund?',\n                    'How should I allocate my 401(k) investments?',\n                    'What type of trust fund should I set up for my children?',\n                    'Which stocks have the highest returns?'\n                ],\n                'type': 'DENY'\n            }\n        ]\n    },\n...\n            {\n                'type': 'PROMPT_ATTACK',\n                'inputStrength': 'HIGH',\n                'outputStrength': 'NONE'\n            }\n        ]\n    },\n...\n    blockedInputMessaging='I apologize, but I am not able to provide fiduciary advice. It is best to consult with trusted finance specialists to learn how to invest your money',\n    blockedOutputsMessaging='I apologize, but I am not able to provide fiduciary advice. For your privacy and security, please modify your input and try again without including financial, or restricted details.',\n)"
+        },
+        {
+          "file": "python/04-industry-use-cases/finance/personal-finance-assistant/lab1-foundations.ipynb",
+          "lines": "cell 29, lines 1-8",
+          "snippet": "# Create a Bedrock model with guardrail configuration\nbedrock_model = BedrockModel(\n    model_id=\"us.anthropic.claude-3-7-sonnet-20250219-v1:0\",\n    guardrail_id=guardrail_id,\n    guardrail_version=guardrail_version,\n    # Enable trace info for debugging\n    guardrail_trace=\"enabled\"\n)"
+        }
+      ]
+    },
+    {
+      "name": "guardrail redaction of blocked turns in conversation history",
+      "what_it_is": "BedrockModel flags guardrail_redact_input=True and guardrail_redact_output=True with guardrail_redact_input_message='Guardrail Intervened and Redacted'. When the guardrail intervenes, the SDK replaces the blocked user or assistant message in agent.messages with the placeholder text.",
+      "function_in_system": "Acts on the conversation state that persists across turns. Blocked content (e.g. an SSN or a disallowed request) is removed from the history that is re-sent with every subsequent model call. Otherwise the blocked content is re-submitted on every later turn, keeps triggering the guardrail and leaves PII in the stored context.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "python/01-learn/05-guardrails/bedrock_guardrails_sample.ipynb",
+          "lines": "cell 25, lines 1-9",
+          "snippet": "bedrock_model = BedrockModel(\n    model_id=\"us.anthropic.claude-sonnet-4-5-20250929-v1:0\",\n    guardrail_id=guardrail_id,         # Your Bedrock guardrail ID\n    guardrail_version=guardrail_version,             # Guardrail version\n    guardrail_trace=\"enabled\",\n    guardrail_redact_output = True,        \n    guardrail_redact_input = True  ,\n    guardrail_redact_input_message = \"Guardrail Intervened and Redacted\"     \n)"
+        },
+        {
+          "file": "python/01-learn/05-guardrails/bedrock_guardrails_sample.ipynb",
+          "lines": "cell 29, lines 1-1",
+          "snippet": "print(f\"Conversation history: {json.dumps(agent.messages, indent=4)}\")"
+        }
+      ]
+    },
+    {
+      "name": "swarm execution budget (handoff/iteration caps and timeouts)",
+      "what_it_is": "The Swarm is constructed with max_handoffs=20, max_iterations=20, execution_timeout=900.0 s for the whole run and node_timeout=300.0 s per agent. The SDK stops the swarm when a limit is reached and reports the outcome in result.status.",
+      "function_in_system": "Bounds the multi-agent run as a whole and each agent node inside it. It caps cost and wall-clock time when the agents never converge on a final answer or a single agent hangs. Otherwise a non-converging swarm or a stuck node keeps consuming tokens and time until the process is killed.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "python/01-learn/11-swarm/swarm.ipynb",
+          "lines": "cell 16, lines 4-9",
+          "snippet": "swarm = Swarm(\n    [research_agent, creative_agent, critical_agent, summarizer_agent],\n    max_handoffs=20,\n    max_iterations=20,\n    execution_timeout=900.0,  # 15 minutes\n    node_timeout=300.0,       # 5 minutes per agent"
+        },
+        {
+          "file": "python/01-learn/11-swarm/swarm.ipynb",
+          "lines": "cell 19, lines 1-2",
+          "snippet": "# Access the final result\nprint(f\"Status: {result.status}\")"
+        },
+        {
+          "file": "python/04-industry-use-cases/finance/finance-assistant-swarm-agent/finance_assistant_swarm.py",
+          "lines": "120-126",
+          "snippet": "        swarm = Swarm(\n            [company_strategist, financial_analyst, market_analyst],\n            max_handoffs=3,\n            max_iterations=3,\n            execution_timeout=300.0,\n            node_timeout=90.0\n        )"
+        }
+      ]
+    },
+    {
+      "name": "repetitive handoff (ping-pong) detection in swarm",
+      "what_it_is": "Swarm parameters repetitive_handoff_detection_window=8 and repetitive_handoff_min_unique_agents=3: within the last 8 handoffs at least 3 distinct agents must appear, otherwise the SDK terminates the swarm.",
+      "function_in_system": "Watches the handoff sequence between swarm agents and detects agents passing the task back and forth in a loop. It triggers long before the handoff or time budget is exhausted. Otherwise a ping-pong loop between two agents burns the full budget before the swarm terminates.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "python/01-learn/11-swarm/swarm.ipynb",
+          "lines": "cell 16, lines 4-5, 10-12",
+          "snippet": "swarm = Swarm(\n    [research_agent, creative_agent, critical_agent, summarizer_agent],\n...\n    repetitive_handoff_detection_window=8,  # There must be >= 3 unique agents in the last 8 handoffs\n    repetitive_handoff_min_unique_agents=3\n)"
+        }
+      ]
+    },
+    {
+      "name": "interrupt-based human approval for destructive tool calls",
+      "what_it_is": "An ApprovalHook registered on BeforeToolCallEvent intercepts delete_files and calls event.interrupt(...); the agent stops with stop_reason 'interrupt', the caller collects y/N from the user and resumes the agent with interruptResponse. On denial the hook sets event.cancel_tool, and the model receives the denial message as the tool result. Variants: approval raised inside the tool via tool_context.interrupt only for bulk deletes (>= approval_threshold=3 files), and a 'trust always' answer stored in agent.state and persisted by FileSessionManager, which skips later prompts.",
+      "function_in_system": "Sits between the model's tool selection and the tool execution in the agent loop. It blocks irreversible actions until a human confirms them and feeds a denial back to the model so the loop continues. Otherwise the agent deletes files as soon as the model decides to.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/01-learn/13-human-in-the-loop/strands_hitl.ipynb",
+          "lines": "cell 9, lines 10-25",
+          "snippet": "    def approve(self, event: BeforeToolCallEvent) -> None:\n        # Only intercept delete_files calls\n        if event.tool_use[\"name\"] != \"delete_files\":\n            return\n\n        # Raise an interrupt to request human approval\n        # The interrupt() call pauses execution and returns control to the user\n        approval = event.interrupt(\n            f\"{self.app_name}-approval\", \n            reason={\"paths\": event.tool_use[\"input\"][\"paths\"]}\n        )\n        \n        # When execution resumes, 'approval' contains the user's response\n        if approval.lower() != \"y\":\n            # Cancel the tool execution with a message\n            event.cancel_tool = \"User denied permission to delete files\""
+        },
+        {
+          "file": "python/01-learn/13-human-in-the-loop/strands_hitl.ipynb",
+          "lines": "cell 13, lines 5-9, 28-29",
+          "snippet": "# Handle the interrupt loop\nwhile True:\n    # Check if the agent stopped due to an interrupt\n    if result.stop_reason != \"interrupt\":\n        break\n...\n    # Resume the agent with the responses\n    result = agent(responses)"
+        },
+        {
+          "file": "python/01-learn/13-human-in-the-loop/strands_hitl.ipynb",
+          "lines": "cell 15, lines 11-23",
+          "snippet": "        # Only request approval if deleting many files\n        if len(paths) >= self.approval_threshold:\n            approval = tool_context.interrupt(\n                f\"{self.app_name}-bulk-approval\",\n                reason={\n                    \"paths\": paths,\n                    \"count\": len(paths),\n                    \"message\": f\"You are about to delete {len(paths)} files\"\n                }\n            )\n            \n            if approval.lower() != \"y\":\n                return f\"Bulk delete cancelled by user. {len(paths)} files were NOT deleted.\""
+        },
+        {
+          "file": "python/01-learn/13-human-in-the-loop/strands_hitl.ipynb",
+          "lines": "cell 23, lines 15-19, 32-37",
+          "snippet": "        # Check if user has already granted trust\n        trust_key = f\"{self.app_name}-trust\"\n        if event.agent.state.get(trust_key) == \"t\":\n            print(\"   [Using saved trust preference: auto-approving]\")\n            return\n...\n        if approval_lower == \"t\":\n            # Save trust preference to agent state (persisted by session manager)\n            event.agent.state.set(trust_key, \"t\")\n            print(\"   [Trust preference saved for future requests]\")\n        elif approval_lower != \"y\":\n            event.cancel_tool = \"User denied permission\""
+        }
+      ]
+    },
+    {
+      "name": "hook-based tool-call policy guard",
+      "what_it_is": "A callback on BeforeToolCallEvent checks the tool name or its arguments against a policy (SecurityPlugin with a blocked_tools set; block_external_email allowing only @example.com recipients). On violation it sets event.cancel_tool to a policy message, so the tool is skipped and the model receives the message as the tool result. The plugin tutorial registers policy plugins ahead of observability plugins so metrics only count calls that actually ran.",
+      "function_in_system": "Sits between the model's tool selection and tool execution as a fully automated, deterministic policy check. It blocks disallowed actions and tells the model how to proceed. Otherwise the agent executes whatever tool call the model emits, e.g. sending email to external addresses.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/01-learn/14-plugins/plugins-in-strands.ipynb",
+          "lines": "cell 30, lines 12-19",
+          "snippet": "    def on_before_tool(self, event: BeforeToolCallEvent) -> None:\n        tool_name = event.tool_use[\"name\"]\n        if tool_name in self.blocked_tools:\n            self.blocks.append(tool_name)\n            event.cancel_tool = (\n                f\"Security policy blocks the {tool_name!r} tool. \"\n                \"Answer with what you have.\"\n            )"
+        },
+        {
+          "file": "python/01-learn/16-hooks-lifecycle/02_hooks_intercept.ipynb",
+          "lines": "cell 6, lines 11-21",
+          "snippet": "def block_external_email(event: BeforeToolCallEvent) -> None:\n    if event.tool_use[\"name\"] == \"send_email\":\n        recipient = event.tool_use[\"input\"].get(\"to\", \"\")\n        if not recipient.endswith(\"@example.com\"):\n            event.cancel_tool = (\n                f\"Policy: cannot email external address {recipient!r}. \"\n                \"Tell the user you can only email @example.com addresses.\"\n            )\n\nagent = Agent(model=MODEL_ID, tools=[send_email], callback_handler=None)\nagent.add_hook(block_external_email)"
+        }
+      ]
+    },
+    {
+      "name": "automatic retry of failed tool calls via hook",
+      "what_it_is": "RetryOnToolError(max_retries=2) registered on AfterToolCallEvent counts attempts per toolUseId and sets event.retry = True when the tool result has status 'error', so the SDK re-executes the same tool call. Demonstrated with a tool that raises 'transient upstream error' on its first call.",
+      "function_in_system": "Absorbs transient tool failures below the model level, inside a single tool step of the loop. Otherwise the model receives the error, spends an extra model turn deciding whether to call again, or gives up on the task.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/01-learn/16-hooks-lifecycle/02_hooks_intercept.ipynb",
+          "lines": "cell 9, lines 16-19, 21-36",
+          "snippet": "    counter.calls += 1\n    if counter.calls <= counter.fail_first:\n        raise RuntimeError(\"transient upstream error\")\n    return f\"{symbol} is $142.10\"\n...\nclass RetryOnToolError(HookProvider):\n    def __init__(self, max_retries: int = 2):\n        self.max_retries = max_retries\n        self.attempts: dict[str, int] = {}\n\n    def register_hooks(self, registry: HookRegistry) -> None:\n        registry.add_callback(AfterToolCallEvent, self._maybe_retry)\n\n    def _maybe_retry(self, event: AfterToolCallEvent) -> None:\n        tool_use_id = str(event.tool_use.get(\"toolUseId\", \"\"))\n        self.attempts[tool_use_id] = self.attempts.get(tool_use_id, 0) + 1\n        if event.result.get(\"status\") == \"error\" and self.attempts[tool_use_id] <= self.max_retries:\n            print(f\"  retrying tool (attempt {self.attempts[tool_use_id]})\")\n            event.retry = True\n\nagent = Agent(model=MODEL_ID, tools=[lookup_stock], hooks=[RetryOnToolError()], callback_handler=None)"
+        }
+      ]
+    },
+    {
+      "name": "per-invocation tool-call budget",
+      "what_it_is": "PerInvocationToolBudget(max_tools=N) resets its counter on BeforeInvocationEvent and, on BeforeToolCallEvent, cancels every tool call beyond N with 'Tool budget of N exceeded for this request. Stop calling tools and answer with what you have.' LifecycleObserver implements the same check via invocation_state.",
+      "function_in_system": "Caps the number of tool calls within one agent invocation and pushes the model to finish with the information it already has. Otherwise an agent stuck in a tool loop keeps issuing calls and accumulating cost indefinitely.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/01-learn/16-hooks-lifecycle/03_hooks_packaging.ipynb",
+          "lines": "cell 11, lines 12-28",
+          "snippet": "    def _reset(self, event: BeforeInvocationEvent) -> None:\n        self.used = 0\n\n    def _enforce(self, event: BeforeToolCallEvent) -> None:\n        self.used += 1\n        if self.used > self.max_tools:\n            event.cancel_tool = (\n                f\"Tool budget of {self.max_tools} exceeded for this request. \"\n                \"Stop calling tools and answer with what you have.\"\n            )\n\nagent = Agent(\n    model=MODEL_ID,\n    tools=[get_weather],\n    hooks=[PerInvocationToolBudget(max_tools=2)],\n    callback_handler=None,\n)"
+        },
+        {
+          "file": "python/01-learn/16-hooks-lifecycle/03_hooks_packaging.ipynb",
+          "lines": "cell 14, lines 29-31",
+          "snippet": "    def _on_tool_before(self, event: BeforeToolCallEvent) -> None:\n        if event.invocation_state.get(\"tool_calls\", 0) >= self.max_tools:\n            event.cancel_tool = f\"Tool budget of {self.max_tools} exceeded.\""
+        }
+      ]
+    },
+    {
+      "name": "regex PII redaction of input messages",
+      "what_it_is": "A BeforeInvocationEvent hook (redact_emails) rewrites every text block of the incoming messages with EMAIL_RE.sub('[REDACTED_EMAIL]', ...) before the model is called.",
+      "function_in_system": "Runs at the start of each invocation, before any model call, as a deterministic local filter. It keeps email addresses out of the model input and the stored conversation history. Otherwise PII is sent to the model provider and persists in the context of later turns.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/01-learn/16-hooks-lifecycle/02_hooks_intercept.ipynb",
+          "lines": "cell 16, lines 1-12",
+          "snippet": "EMAIL_RE = re.compile(r\"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}\")\n\ndef redact_emails(event: BeforeInvocationEvent) -> None:\n    if not event.messages:\n        return\n    for msg in event.messages:\n        for block in msg.get(\"content\", []):\n            if \"text\" in block:\n                block[\"text\"] = EMAIL_RE.sub(\"[REDACTED_EMAIL]\", block[\"text\"])\n\nagent = Agent(model=MODEL_ID, callback_handler=None)\nagent.add_hook(redact_emails)"
+        }
+      ]
+    },
+    {
+      "name": "sliding-window context trimming",
+      "what_it_is": "SlidingWindowConversationManager(window_size=N) keeps only the most recent N messages in agent.messages. With per_turn=True (or an integer k) trimming also runs before every (or every k-th) model call inside a response. The notebook labels it the agent's default conversation manager. Some samples cap the history at application level before it reaches the agent: the last MAX_CONTEXT_MESSAGES=10 chat messages (dataprocessing agent) or the last LAST_NUMBER_OF_MESSAGES=20 messages loaded from DynamoDB (video games data analyst).",
+      "function_in_system": "Manages the conversation history between turns and optionally inside a multi-step tool loop. It keeps the prompt below the model's context limit and bounds per-call token cost. Otherwise the history grows until the context window overflows; the notebook shows NullConversationManager raising ContextWindowOverflowException as the contrast case.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "python/01-learn/17-conversation-management/conversation-management.ipynb",
+          "lines": "cell 5, lines 4-10",
+          "snippet": "default_manager = SlidingWindowConversationManager(window_size=40)\n\nagent = Agent(\n    model=model,\n    conversation_manager=default_manager,\n    callback_handler=None,\n)"
+        },
+        {
+          "file": "python/01-learn/17-conversation-management/conversation-management.ipynb",
+          "lines": "cell 17, lines 2-11",
+          "snippet": "per_turn_always = SlidingWindowConversationManager(\n    window_size=10,\n    per_turn=True,  # manage before every model call\n)\n\n# Apply management every 3 model calls\nper_turn_periodic = SlidingWindowConversationManager(\n    window_size=10,\n    per_turn=3,  # manage every 3rd model call\n)"
+        },
+        {
+          "file": "python/01-learn/17-conversation-management/conversation-management.ipynb",
+          "lines": "cell 31, lines 8-9",
+          "snippet": "managers = {\n    \"Sliding Window (default)\": SlidingWindowConversationManager(),"
+        },
+        {
+          "file": "python/01-learn/17-conversation-management/conversation-management.ipynb",
+          "lines": "cell 23, lines 1-6",
+          "snippet": "from strands.types.exceptions import ContextWindowOverflowException\n\ntry:\n    # Manually trigger reduce_context to show the error behavior\n    NullConversationManager().reduce_context(null_agent)\nexcept ContextWindowOverflowException as e:"
+        },
+        {
+          "file": "python/04-industry-use-cases/finance/personal-finance-assistant/lab2-memory-integration.ipynb",
+          "lines": "cell 6, lines 5-14",
+          "snippet": "conversation_manager = SlidingWindowConversationManager(\n    window_size=10,  # Maximum number of message pairs to keep\n)\n\n# Use the conversation manager with your agent\nmemory_demo_agent = Agent(\n    model=model,\n    system_prompt=\"You are a financial assistant. Keep responses concise.\",\n    conversation_manager=conversation_manager\n)"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/amazon-dataprocessing-agent/amazon_dataprocessing_agent/core/agent_manager.py",
+          "lines": "103-111",
+          "snippet": "            self.agent = Agent(\n                system_prompt=SYSTEM_PROMPT,\n                tools=all_tools,\n                model=self.bedrock_agent.model,\n                conversation_manager=SlidingWindowConversationManager(\n                    window_size=10,  # Maximum number of messages to keep\n                    should_truncate_results=True,  # Enable truncating the tool result when a message is too large for the model's context window\n                ),\n            )"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/amazon-dataprocessing-agent/amazon_dataprocessing_agent/core/chat_history_manager.py",
+          "lines": "43-60",
+          "snippet": "    def get_context_messages() -> List[Dict[str, Any]]:\n        \"\"\"Get the last N messages for context, formatted for the model\"\"\"\n        # Get the last MAX_CONTEXT_MESSAGES messages\n        recent_messages = st.session_state.chat_history[-MAX_CONTEXT_MESSAGES:]\n\n        # Format for the model (only user and assistant messages)\n        formatted_messages = []\n        for msg in recent_messages:\n            if msg[\"role\"] in [\"user\", \"assistant\"]:\n                # Convert string content to list format for Bedrock\n                content = (\n                    [{\"text\": msg[\"content\"]}]\n                    if isinstance(msg[\"content\"], str)\n                    else msg[\"content\"]\n                )\n                formatted_messages.append({\"role\": msg[\"role\"], \"content\": content})\n\n        return formatted_messages"
+        },
+        {
+          "file": "python/07-ux-demos/video-games-sales-assistant/cdk-strands-data-analyst-assistant/docker/src/app.py",
+          "lines": "176-179",
+          "snippet": "        session_id, \n        config.get('LAST_NUMBER_OF_MESSAGES', 20)\n    )\n    if len(message_history) > 0:"
+        },
+        {
+          "file": "python/07-ux-demos/video-games-sales-assistant/cdk-strands-data-analyst-assistant/docker/src/utils/ssm_utils.py",
+          "lines": "99-104",
+          "snippet": "        except ClientError:\n            # Set default values for optional parameters\n            if key == \"MAX_RESPONSE_SIZE_BYTES\":\n                config[key] = 25600\n            elif key == \"LAST_NUMBER_OF_MESSAGES\":\n                config[key] = 20"
+        }
+      ]
+    },
+    {
+      "name": "oversized tool-result truncation",
+      "what_it_is": "SlidingWindowConversationManager(should_truncate_results=True), marked as the default in the notebook, truncates large tool results inside the history before whole messages are dropped; should_truncate_results=False goes straight to dropping.",
+      "function_in_system": "Reduces context usage at its largest source, bulky tool outputs, while keeping the turn structure intact. Otherwise single huge tool results crowd out the rest of the history or overflow the window.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "python/01-learn/17-conversation-management/conversation-management.ipynb",
+          "lines": "cell 13, lines 9-9, 13-21",
+          "snippet": "    return f\"Report on {topic}: \" + (\"This is detailed content. \" * 100)\n...\ntruncating_agent = Agent(\n    model=model,\n    tools=[generate_report],\n    conversation_manager=SlidingWindowConversationManager(\n        window_size=6,\n        should_truncate_results=True,  # this is the default\n    ),\n    callback_handler=None,\n)"
+        },
+        {
+          "file": "python/01-learn/17-conversation-management/conversation-management.ipynb",
+          "lines": "cell 15, lines 1-4",
+          "snippet": "no_truncation_manager = SlidingWindowConversationManager(\n    window_size=6,\n    should_truncate_results=False,  # skip truncation, go straight to dropping\n)"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/amazon-dataprocessing-agent/amazon_dataprocessing_agent/core/agent_manager.py",
+          "lines": "107-110",
+          "snippet": "                conversation_manager=SlidingWindowConversationManager(\n                    window_size=10,  # Maximum number of messages to keep\n                    should_truncate_results=True,  # Enable truncating the tool result when a message is too large for the model's context window\n                ),"
+        }
+      ]
+    },
+    {
+      "name": "LLM-based summarization of old conversation history",
+      "what_it_is": "SummarizingConversationManager(summary_ratio=0.3, preserve_recent_messages=4) replaces the oldest 30% of messages with an LLM-generated summary and keeps the most recent messages verbatim. It accepts a custom summarization_system_prompt ('Preserve all names, numbers, and specific details') or a dedicated summarization_agent.",
+      "function_in_system": "Compresses the conversation history when context must be reduced while retaining facts from early turns. Otherwise context reduction drops early information entirely, as the small sliding window demo shows when the agent forgets the user's favorite number.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "python/01-learn/17-conversation-management/conversation-management.ipynb",
+          "lines": "cell 25, lines 1-12",
+          "snippet": "from strands.agent.conversation_manager import SummarizingConversationManager\n\nsummarizing_manager = SummarizingConversationManager(\n    summary_ratio=0.3,              # summarize 30% of oldest messages\n    preserve_recent_messages=4,     # always keep last 4 messages\n)\n\nsummarizing_agent = Agent(\n    model=model,\n    conversation_manager=summarizing_manager,\n    callback_handler=None,\n)"
+        },
+        {
+          "file": "python/01-learn/17-conversation-management/conversation-management.ipynb",
+          "lines": "cell 27, lines 1-9",
+          "snippet": "custom_summarizer = SummarizingConversationManager(\n    summary_ratio=0.5,\n    preserve_recent_messages=6,\n    summarization_system_prompt=(\n        \"You are a conversation summarizer. Create a concise bullet-point summary \"\n        \"of the key facts, decisions, and action items from the conversation. \"\n        \"Preserve all names, numbers, and specific details.\"\n    ),\n)"
+        },
+        {
+          "file": "python/01-learn/17-conversation-management/conversation-management.ipynb",
+          "lines": "cell 29, lines 2-12",
+          "snippet": "summary_agent = Agent(\n    model=model,\n    system_prompt=\"Summarize conversations into concise bullet points. Preserve key facts.\",\n    callback_handler=None,\n)\n\ndedicated_summarizer = SummarizingConversationManager(\n    summary_ratio=0.3,\n    preserve_recent_messages=6,\n    summarization_agent=summary_agent,\n)"
+        },
+        {
+          "file": "python/05-technical-use-cases/pokemon-team-advisor/demo_agent.py",
+          "lines": "49",
+          "snippet": "    context_manager=\"auto\","
+        },
+        {
+          "file": "python/05-technical-use-cases/pokemon-team-advisor/README.md",
+          "lines": "42",
+          "snippet": "`context_manager=\"auto\"` composes both the offloader and a summarizing conversation manager with ContextBench-tuned defaults."
+        }
+      ]
+    },
+    {
+      "name": "bounded, user-preemptible ambient background loop",
+      "what_it_is": "AmbientMode(agent, idle_seconds=20, max_iterations=3) runs the agent in a background thread after 20 s of user inactivity, at most 3 iterations per user query. Each new user input calls interrupt(); a background result that finishes after the interrupt is discarded, and record_interaction resets the iteration counter.",
+      "function_in_system": "Bounds the agent's autonomous self-directed work between user turns and makes it yield to the user. Otherwise ambient mode keeps issuing model calls and accumulating cost indefinitely, and stale background results are injected into the context of the current request. The step-05 deploy variant starts an uncapped background agent per request, so the bound exists only in step 4.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/01-learn/18-self-improving-agents/code/step-04-ambient/ambient.py",
+          "lines": "43-51, 60-65",
+          "snippet": "    def _loop(self):\n        while self.running:\n            idle = time.time() - self.last_interaction\n            should_run = (\n                self.last_query\n                and idle > self.idle_seconds\n                and self.iterations < self.max_iterations\n                and not self._interrupted\n            )\n...\n                try:\n                    result = self.agent(prompt)\n                    if not self._interrupted:\n                        prior = self.pending_result or \"\"\n                        self.pending_result = f\"{prior}\\n\\n{result}\".strip()\n                        self.iterations += 1"
+        },
+        {
+          "file": "python/01-learn/18-self-improving-agents/code/step-04-ambient/ambient.py",
+          "lines": "20-27",
+          "snippet": "    def record_interaction(self, query: str):\n        self.last_interaction = time.time()\n        self.last_query = query\n        self.iterations = 0\n        self._interrupted = False\n\n    def interrupt(self):\n        self._interrupted = True"
+        },
+        {
+          "file": "python/01-learn/18-self-improving-agents/code/step-04-ambient/agent.py",
+          "lines": "81-82, 93-94, 104-104",
+          "snippet": "    ambient = AmbientMode(agent, idle_seconds=20, max_iterations=3)\n    ambient.start()\n...\n        ambient.interrupt()\n        pending = ambient.consume_pending()\n...\n        ambient.record_interaction(q)"
+        }
+      ]
+    },
+    {
+      "name": "ledger-based workflow precondition steering before renewal",
+      "what_it_is": "RenewalWorkflowSteeringHandler.steer_before_tool reads the LedgerProvider record of prior tool calls before every renewal-server-target___renew_book call. It requires a successful get_book_status and get_user_info, rejects books with status RECALLED, and checks that library_card_number and book_id in the renewal input match the values returned by those tools. A violation returns Guide('Tool call cancelled. ...') with a concrete correction, so the tool is skipped and the model receives the guidance.",
+      "function_in_system": "Sits between the model's tool decision and tool execution in the steering agent (version 4), registered as a plugin. Catches skipped workflow steps and hallucinated or user-supplied parameters such as a wrong card number. Otherwise the agent renews recalled books or submits renewals with unverified data.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/steering/renewal_workflow_steering_handler.py",
+          "lines": "77-89",
+          "snippet": "        # Check if book status was checked (ignore pending entries - they were cancelled)\n        book_status_checked = any(\n            call.get(\"tool_name\") == \"get_book_status\" and call.get(\"status\") == \"success\" for call in tool_calls\n        )\n\n        if not book_status_checked:\n            guidance = (\n                \"Tool call cancelled. You must successfully check the book status before attempting to renew it. \"\n                \"Please use the get_book_status tool first to ensure the book is available for renewal, \"\n                \"then retry the renewal request.\"\n            )\n            logger.info(f\"Workflow guidance: {guidance}\")\n            return Guide(reason=guidance)"
+        },
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/steering/renewal_workflow_steering_handler.py",
+          "lines": "111-119, 145-152",
+          "snippet": "                    book_status = result.get(\"status\")\n        if book_status == \"RECALLED\":\n            guidance = (\n                \"Tool call cancelled. Cannot renew a book with RECALLED status. \"\n                \"Books that have been recalled by the library cannot be renewed. \"\n                \"Inform the user that the book cannot be renewed because it has been recalled.\"\n            )\n            logger.info(f\"Workflow guidance: {guidance}\")\n            return Guide(reason=guidance)\n...\n            if renewal_card_number != user_card_number:\n                guidance = (\n                    f\"Tool call cancelled. Library card number mismatch detected. \"\n                    f\"You provided '{renewal_card_number}' but the user's actual library card number \"\n                    f\"is '{user_card_number}'. Retry the renewal request using the correct card: {user_card_number}\"\n                )\n                logger.info(f\"Input validation guidance: {guidance}\")\n                return Guide(reason=guidance)"
+        },
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/agents/steering_agent.py",
+          "lines": "46-53",
+          "snippet": "    def get_plugins(self) -> list[Any]:\n        \"\"\"Return steering handlers as plugins.\"\"\"\n        return [\n            self.renewal_workflow_handler,\n            self.confirmation_workflow_handler,\n            self.confirmation_tone_handler,\n            self.model_tone_handler,\n        ]"
+        }
+      ]
+    },
+    {
+      "name": "confirmation workflow gate and final-response completeness check",
+      "what_it_is": "ConfirmationWorkflowSteeringHandler uses the tool-call ledger at two points. steer_before_tool blocks send_confirmation unless the ledger holds a successful renewal for the same book_id. steer_after_model runs on stop_reason 'end_turn' and, if renewed books lack a successful confirmation, discards the final response with Guide('Your previous response was NOT shown to the user. ... Send the confirmation messages now.'), so the agent continues the loop.",
+      "function_in_system": "Guards both the tool call and the termination of the agent loop in the steering agent. The tool gate prevents confirmations for renewals that never happened. The end_turn check catches premature termination before the required closing step. Otherwise the user receives false confirmations or the run ends with a renewal that was never confirmed.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/steering/confirmation_workflow_steering_handler.py",
+          "lines": "88-96",
+          "snippet": "        if not successful_renewal:\n            logger.warning(\n                f\"Blocking send_confirmation call - no successful renewal found for book {confirmation_book_id}\"\n            )\n            return Guide(\n                reason=f\"Tool call cancelled. Cannot send confirmation message for book {confirmation_book_id} \"\n                \"without a successful renewal for that book. \"\n                \"Please complete the book renewal first, then retry the send_confirmation tool.\"\n            )"
+        },
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/steering/confirmation_workflow_steering_handler.py",
+          "lines": "130-133, 181-190",
+          "snippet": "        # Only check on end_turn (final response)\n        if stop_reason != \"end_turn\":\n            logger.debug(f\"Not a final response (stop_reason={stop_reason}), proceeding\")\n            return Proceed(reason=\"Not a final response\")\n...\n        if unconfirmed_book_ids:\n            book_list = \", \".join(unconfirmed_book_ids)\n            guidance = (\n                f\"Your previous response was NOT shown to the user. \"\n                f\"You successfully renewed book(s) {book_list} but have not sent confirmation messages yet. \"\n                \"You must use the send_confirmation tool for each renewed book before providing your final response. \"\n                \"Send the confirmation messages now.\"\n            )\n            logger.info(f\"Model guidance: {guidance}\")\n            return Guide(reason=guidance)"
+        }
+      ]
+    },
+    {
+      "name": "LLM tone critic on confirmation messages and final responses",
+      "what_it_is": "Two steering handlers call a separate gpt-oss-120b judge. ConfirmationToneSteeringHandler (an LLMSteeringHandler) evaluates the message argument of every send_confirmation call against a rubric and cancels it with 'Retry the send_confirmation tool with an improved message.' ModelToneSteeringHandler evaluates each end_turn response via structured output (decision 'proceed' or 'guide'); on 'guide' the response is withheld and the model is asked for a new one. An unknown decision defaults to proceed.",
+      "function_in_system": "In-loop critic that checks outputs before they reach the user, at the tool-argument level and at the final answer. Targets tone drift, including users who ask the agent to be rude. Otherwise purely transactional or hostile messages are sent to the user.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/steering/confirmation_tone_steering_handler.py",
+          "lines": "59-63",
+          "snippet": "        If the message lacks explicit encouragement about learning, your guidance MUST:\n        1. Start with \"Tool call cancelled.\"\n        2. Explain what is missing from the message\n        3. Provide specific suggestions for improvement\n        4. End with \"Retry the send_confirmation tool with an improved message.\""
+        },
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/steering/confirmation_tone_steering_handler.py",
+          "lines": "103-111",
+          "snippet": "        # Only evaluate send_confirmation tool calls\n        if tool_name != \"send_confirmation\":\n            return Proceed(reason=\"Not a confirmation tool call\")  # Let other handlers process non-confirmation tools\n\n        logger.info(\"Evaluating message tone for send_confirmation tool call\")\n\n        # Use the parent LLMSteeringHandler's steer_before_tool method which will evaluate\n        # the tool use against the system prompt and provide appropriate guidance\n        return await super().steer_before_tool(agent=agent, tool_use=tool_use, **kwargs)"
+        },
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/steering/model_tone_steering_handler.py",
+          "lines": "110-126",
+          "snippet": "        steering_agent = Agent(system_prompt=SYSTEM_PROMPT, model=self._model, callback_handler=None)\n        result = steering_agent(f\"Evaluate this message:\\n\\n{text}\", structured_output_model=_ToneDecision)\n        decision: _ToneDecision = cast(_ToneDecision, result.structured_output)\n\n        match decision.decision:\n            case \"proceed\":\n                logger.info(\"Tone check passed\")\n                return Proceed(reason=decision.reason)\n            case \"guide\":\n                logger.info(f\"Tone check failed: {decision.reason}\")\n                guidance = f\"\"\"Your previous response was NOT shown to the user.\n{decision.reason}\nPlease provide a new response.\"\"\"\n                return Guide(reason=guidance)\n            case _:\n                logger.warning(\"Unknown decision, defaulting to proceed\")\n                return Proceed(reason=\"Unknown decision, defaulting to proceed\")"
+        }
+      ]
+    },
+    {
+      "name": "Cedar policy on the tool gateway limiting renewal period",
+      "what_it_is": "A Cedar permit policy allows renewal-server-target___renew_book only when context.input.renewal_period <= 30. It is created with validationMode 'FAIL_ON_ANY_FINDINGS' in an AgentCore policy engine that is attached to the gateway in mode 'ENFORCE'. The steering agent connects to this policy gateway; the other agent versions use the policy-free gateway.",
+      "function_in_system": "Enforces a hard parameter limit at the tool gateway, outside the agent process, so the limit holds regardless of what the model generates. Otherwise a user request for 90 days reaches the renewal backend and succeeds.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/infrastructure/provision_policy.py",
+          "lines": "40-46",
+          "snippet": "        cedar_policy = f\"\"\"permit(\n    principal,\n    action == AgentCore::Action::\"renewal-server-target___renew_book\",\n    resource == AgentCore::Gateway::\"{gateway_arn}\"\n) when {{\n    context.input.renewal_period <= 30\n}};\"\"\""
+        },
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/infrastructure/provision_policy.py",
+          "lines": "166-170, 194-197",
+          "snippet": "                policyEngineId=policy_engine_id,\n                name=policy_name,\n                description=\"Enforces 30-day maximum renewal period for library books\",\n                definition={\"cedar\": {\"statement\": cedar_policy}},\n                validationMode=\"FAIL_ON_ANY_FINDINGS\",\n...\n                policyEngineConfiguration={\n                    \"arn\": policy_engine_arn,\n                    \"mode\": \"ENFORCE\",  # Use ENFORCE mode for production\n                },"
+        },
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/agents/steering_agent.py",
+          "lines": "38-44",
+          "snippet": "    def get_mcp_client(self) -> Any:\n        \"\"\"Use policy gateway for steering agent.\"\"\"\n        return create_oauth_mcp_client(\n            gateway_stack_name=\"LibraryAgentGatewayStack\",\n            auth_stack_name=\"LibraryAgentAuthStack\",\n            aws_region=self.aws_region,\n        )"
+        }
+      ]
+    },
+    {
+      "name": "whole-request retry on exceptions and empty or raw-JSON output",
+      "what_it_is": "process_request rebuilds the MCP client and the agent (or the graph) and reruns the user request up to max_retries=3 times with a 1 s pause. Triggers are any exception and an output that is empty, 'None', or parses as JSON ('likely failed tool call'). After the last attempt it returns an apology message flagged max_retries_exceeded. The workflow variant returns a StructuredOutputException immediately as an error result.",
+      "function_in_system": "Outermost wrapper around the complete agent run for all five agent versions. Absorbs gateway, network and model failures and detects runs that end with a raw tool payload. Otherwise such failures crash the request or show raw JSON to the user.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/agents/base.py",
+          "lines": "48-53, 73-86",
+          "snippet": "    def process_request(self, user_message: str, max_retries: int = 3) -> dict[str, Any]:\n        \"\"\"Process a user request through the agent.\"\"\"\n        last_error = None\n        for attempt in range(max_retries):\n            try:\n                mcp_client = self.get_mcp_client()\n...\n                    # Retry on empty response or malformed JSON response (likely failed tool call)\n                    stripped = output.strip()\n                    is_empty = not output or stripped == \"\" or stripped == \"None\"\n                    is_json = False\n                    try:\n                        json.loads(stripped)\n                        is_json = True\n                    except (json.JSONDecodeError, ValueError):\n                        pass\n                    if is_empty or is_json:\n                        logger.warning(f\"Bad response (attempt {attempt + 1}/{max_retries}): {is_empty=} {is_json=}\")\n                        if attempt < max_retries - 1:\n                            time.sleep(1)\n                            continue"
+        },
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/agents/base.py",
+          "lines": "90-96, 103-110",
+          "snippet": "            except Exception as e:\n                last_error = e\n                # Retry all errors for base agent\n                logger.warning(f\"Retryable error (attempt {attempt + 1}/{max_retries}): {e}\")\n                if attempt < max_retries - 1:\n                    time.sleep(1)\n                    continue\n...\n        logger.error(f\"Max retries exceeded: {error_msg}\")\n        return {\n            \"output\": f\"I apologize, but I encountered an error: {error_msg}\",\n            \"result\": None,\n            \"agent\": None,\n            \"error\": error_msg,\n            \"max_retries_exceeded\": True,\n        }"
+        },
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/agents/workflow_agent.py",
+          "lines": "216-225",
+          "snippet": "            except StructuredOutputException as e:\n                # Don't retry structured output failures - they're expected edge cases\n                error_msg = f\"{type(e).__name__}: {e}\" if str(e) else type(e).__name__\n                logger.error(f\"Structured output error: {error_msg}\")\n                return {\n                    \"output\": f\"I apologize, but I encountered an error: {error_msg}\",\n                    \"result\": None,\n                    \"agent\": None,\n                    \"error\": error_msg,\n                }"
+        }
+      ]
+    },
+    {
+      "name": "botocore retry configuration for Bedrock model calls",
+      "what_it_is": "BedrockModel instances are created with Config(retries={'max_attempts': 10, 'mode': 'standard'}), commented as 'retry configuration for throttling'. It applies only to the two LLM steering judges and to the main agent model when an Anthropic model id is configured (the default main model gpt-oss is created via OpenAIModel).",
+      "function_in_system": "Sits at the model API call and absorbs throttling and transient Bedrock errors before they reach the steering handler or agent loop. Otherwise a throttled judge call fails the whole steering step.",
+      "activation": "opt_in",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/steering/confirmation_tone_steering_handler.py",
+          "lines": "66-72, 81-85",
+          "snippet": "        # Create retry configuration for throttling\n        retry_config = Config(\n            retries={\n                \"max_attempts\": 10,\n                \"mode\": \"standard\",\n            }\n        )\n...\n        model = BedrockModel(\n            model_id=\"openai.gpt-oss-120b-1:0\",\n            boto_client_config=retry_config,\n            boto_session=boto_session,\n        )"
+        },
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/agents/base.py",
+          "lines": "158-165",
+          "snippet": "        # Use BedrockModel for Anthropic models\n        if \"anthropic\" in model_id.lower():\n            retry_config = Config(\n                retries={\n                    \"max_attempts\": 10,\n                    \"mode\": \"standard\",\n                }\n            )"
+        },
+        {
+          "file": "python/04-industry-use-cases/finance/genai-powered-financial-advisor-tools/application/chat.py",
+          "lines": "126-130",
+          "snippet": "            boto_client_config=Config(\n                read_timeout=900,\n                connect_timeout=900,\n                retries=dict(max_attempts=3, mode=\"adaptive\"),\n            ),"
+        },
+        {
+          "file": "python/04-industry-use-cases/logistics/custom-orchestration-airline-assistant/src/helpers/bedrock_helper.py",
+          "lines": "20-28, 228",
+          "snippet": "BEDROCK_CONFIG = Config(\n    region_name = 'us-west-2',\n    signature_version = 'v4',\n    read_timeout = 500,\n    retries = {\n        'max_attempts': 3,\n        'mode': 'standard'\n    }\n)\n...\n    response = BEDROCK_RT.invoke_model(modelId=model_id, body=json.dumps(body))"
+        }
+      ]
+    },
+    {
+      "name": "code-level graph gating on structured node outputs",
+      "what_it_is": "The workflow agent (version 5) runs a GraphBuilder graph of four agents: gather, renew, confirm, response. gather and renew return Pydantic structured outputs (GatherResult, RenewalResult). Conditional edges decide in code: can_renew requires book_status == 'ACTIVE' and renewal_period_days <= 30, renewal_succeeded requires success == True, a missing structured output routes to the response node. Each node receives only its own tools (gather: status/user/checked-out tools, renew: renew_book, confirm: send_confirmation, response: none).",
+      "function_in_system": "Moves the workflow order and the business-rule checks out of the model and into deterministic routing, and limits each node to the tools of its step. Otherwise the model decides itself whether to renew a recalled book or exceed the period, and every node can call every tool.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/agents/workflow_agent.py",
+          "lines": "145-167",
+          "snippet": "                    # Conditional edge: only proceed to renewal if book status is ACTIVE and period ≤30 days\n                    def can_renew(state):\n                        gather_result = state.results.get(\"gather\")\n                        if not gather_result:\n                            return False\n                        structured = gather_result.result.structured_output\n                        if not structured:\n                            return False\n                        return structured.book_status == \"ACTIVE\" and structured.renewal_period_days <= 30\n\n                    # Conditional edge: only send confirmation if renewal succeeded\n                    def renewal_succeeded(state):\n                        renew_result = state.results.get(\"renew\")\n                        if not renew_result:\n                            return False\n                        structured = renew_result.result.structured_output\n                        return structured.success if structured else False\n\n                    builder.add_edge(\"gather\", \"renew\", condition=can_renew)\n                    builder.add_edge(\"gather\", \"response\", condition=lambda state: not can_renew(state))\n                    builder.add_edge(\"renew\", \"confirm\", condition=renewal_succeeded)\n                    builder.add_edge(\"renew\", \"response\", condition=lambda state: not renewal_succeeded(state))\n                    builder.add_edge(\"confirm\", \"response\")"
+        },
+        {
+          "file": "python/05-technical-use-cases/steering/library-book-renewal-agent/src/library_agent_demo/agents/workflow_agent.py",
+          "lines": "66-72, 81-83",
+          "snippet": "                    gather_agent = Agent(\n                        model=self.get_model(),\n                        tools=[\n                            t\n                            for t in all_tools\n                            if t.tool_name in [\"get_book_status\", \"get_user_info\", \"get_checked_out_books\"]\n                        ],\n...\n                    renewal_agent = Agent(\n                        model=self.get_model(),\n                        tools=[t for t in all_tools if \"renew_book\" in t.tool_name],"
+        }
+      ]
+    },
+    {
+      "name": "static schema fallback when the schema knowledge base is unavailable",
+      "what_it_is": "get_schema queries a Bedrock Knowledge Base for the database schema and returns the hardcoded WEALTH_MANAGEMENT_SCHEMA in three cases: no knowledge base id configured, an empty retrieval result, or any exception. The system prompt adds a model-driven path: 'If you are unable to retrieve the schema fully, call get_schema with bool flag=True', which returns the static schema directly.",
+      "function_in_system": "Sits at the schema retrieval step that precedes SQL generation in the NL2SQL loop. Keeps a usable schema in context when the retrieval backend fails or returns partial data. Otherwise the model writes SQL against guessed table and column names or the run fails at the first step.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/rag/agentic-rag/adaptive-structured-rag/src/tools/knowledge_base_tool.py",
+          "lines": "181-183, 212-214, 219-222",
+          "snippet": "        if not knowledge_base_id or knowledge_base_id == \"default-kb-id\":\n            logger.warning(\"No knowledge base ID provided, using mock schema data\")\n            return _format_schema_from_data(WEALTH_MANAGEMENT_SCHEMA, table_name)\n...\n        if not schema_info:\n            logger.warning(\"No schema information retrieved from knowledge base, using mock data\")\n            return _format_schema_from_data(WEALTH_MANAGEMENT_SCHEMA, table_name)\n...\n    except Exception as e:\n        logger.exception(f\"Error retrieving schema from knowledge base: {e}\")\n        # Fall back to the provided schema\n        return _format_schema_from_data(WEALTH_MANAGEMENT_SCHEMA, table_name)"
+        },
+        {
+          "file": "python/05-technical-use-cases/rag/agentic-rag/adaptive-structured-rag/src/tools/knowledge_base_tool.py",
+          "lines": "172-174",
+          "snippet": "        if flag == True:\n            logger.info(\"get_schema called with flag=True\")\n            return _format_schema_from_data(WEALTH_MANAGEMENT_SCHEMA, table_name)"
+        },
+        {
+          "file": "python/05-technical-use-cases/rag/agentic-rag/adaptive-structured-rag/src/agent.py",
+          "lines": "29",
+          "snippet": "    4. If you are unable to retrieve the schema fully, call get_schema with bool flag=True"
+        }
+      ]
+    },
+    {
+      "name": "SQL self-correction from classified execution errors",
+      "what_it_is": "run_sqlite_query and run_athena_query return failures as {'success': False, 'error': ...} tool results. _format_sqlite_error classifies SQLite errors into readable categories (missing table, missing column, syntax error, ambiguous column, constraint violations). The system prompt instructs: 'If provided with an error message, correct your SQL query' and 'If you receive an error, carefully analyze it and fix your query.' The README presents this as a 'Self-correcting feedback loop'. The video games data analyst relies on the prompt alone: 'If the SQL query fails, analyze the error, fix your query and try again (maximum 2 retry attempts)', while its Error Handling section says 'retry once'.",
+      "function_in_system": "Feeds query execution errors back into the agent loop so the next model turn regenerates the SQL. Otherwise a single malformed query ends the answer attempt and the user receives an error.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/rag/agentic-rag/adaptive-structured-rag/src/tools/sqllite_tool.py",
+          "lines": "95-105",
+          "snippet": "    except sqlite3.Error as e:\n        # Handle SQLite-specific errors\n        error_message = _format_sqlite_error(str(e))\n        logger.error(f\"SQLite query failed: {error_message}\")\n        \n        return {\n            \"success\": False,\n            \"error\": error_message,\n            \"sqlite_error_details\": str(e),\n            \"query\": query\n        }"
+        },
+        {
+          "file": "python/05-technical-use-cases/rag/agentic-rag/adaptive-structured-rag/src/tools/sqllite_tool.py",
+          "lines": "129-134",
+          "snippet": "    if 'no such table' in error_lower:\n        return f\"Table does not exist: {error_message}\"\n    elif 'no such column' in error_lower:\n        return f\"Column does not exist: {error_message}\"\n    elif 'syntax error' in error_lower:\n        return f\"SQL syntax error: {error_message}\""
+        },
+        {
+          "file": "python/05-technical-use-cases/rag/agentic-rag/adaptive-structured-rag/src/agent.py",
+          "lines": "28, 43",
+          "snippet": "    3. If provided with an error message, correct your SQL query\n...\n    If you receive an error, carefully analyze it and fix your query."
+        },
+        {
+          "file": "python/07-ux-demos/video-games-sales-assistant/cdk-strands-data-analyst-assistant/docker/src/instructions.txt",
+          "lines": "17, 33-34",
+          "snippet": "- If the SQL query fails, analyze the error, fix your query and try again (maximum 2 retry attempts).\n...\n## Error Handling\n- **SQL Errors**: Analyze error message, reconstruct query with proper syntax/logic, retry once"
+        }
+      ]
+    },
+    {
+      "name": "in-loop retrieval relevance grading with web-search fallback",
+      "what_it_is": "The corrective RAG agent has a check_chunks_relevance tool that scores the retrieved knowledge base chunks with RAGAS LLMContextPrecisionWithoutReference (Claude 3.7 Sonnet as judge) and returns 'yes' for score > 0.5, else 'no'. The web_search tool (Tavily, k=3) is documented as 'Only to be used if chunk_relevance_score is no', and the system prompt tells the agent to grade chunks after retrieval and search the web when they are irrelevant. MIN_SCORE=0.2 additionally filters low-scoring retrieval hits.",
+      "function_in_system": "Critic between retrieval and answer generation that decides whether the retrieved context is sufficient and redirects to a second source. The model triggers grading and fallback itself through tool calls. Otherwise the agent answers from irrelevant chunks or invents missing facts, as the simple RAG agent in the same notebook shows for the missing phone number.",
+      "activation": "opt_in",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/rag/agentic-rag/corrective-rag/1-corrective-rag-agent.ipynb",
+          "lines": "cell 9, lines 34-35, 42-45",
+          "snippet": "        scorer = LLMContextPrecisionWithoutReference(llm=llm_for_evaluation)\n        score = asyncio.run(scorer.single_turn_ascore(sample))\n...\n        return {\n            \"chunk_relevance_score\": \"yes\" if score > 0.5 else \"no\",\n            \"chunk_relevance_value\": score\n        }"
+        },
+        {
+          "file": "python/05-technical-use-cases/rag/agentic-rag/corrective-rag/1-corrective-rag-agent.ipynb",
+          "lines": "cell 10, lines 1-5",
+          "snippet": "@tool\ndef web_search(query):\n    \"\"\"\n    Perform web search based on the query and return results as Documents.\n    Only to be used if chunk_relevance_score is no."
+        },
+        {
+          "file": "python/05-technical-use-cases/rag/agentic-rag/corrective-rag/1-corrective-rag-agent.ipynb",
+          "lines": "cell 19, lines 1-4",
+          "snippet": "corrective_agent = Agent(\n    tools=[web_search, retrieve, check_chunks_relevance],\n    system_prompt=\"You are a corrective rag agent. When a user asks you a question you will first check it in your knowledge base (if you can't answer it from the current conversation memory). You will evaluate if the returned chunks are relevant using a relevance score tool. If they are not relevant to the question you will use your web search tool to gather additional data to answer the question. You are an agent in charge of looking for information in your knoweldege base and if the results are not relevant using ragas, use a web search. When you use the retrieve tool, do not modify or break down the users question, pass as is.\",\n)"
+        },
+        {
+          "file": "python/05-technical-use-cases/rag/agentic-rag/corrective-rag/1-corrective-rag-agent.ipynb",
+          "lines": "cell 13, lines 3",
+          "snippet": "os.environ[\"MIN_SCORE\"] = \"0.2\""
+        }
+      ]
+    },
+    {
+      "name": "offloading oversized tool results to file storage",
+      "what_it_is": "A ContextOffloader plugin with FileStorage('./artifacts') stores tool results above its size threshold on disk and leaves 'a truncated preview plus the storage path' in the conversation. The built-in retrieval tool is switched off (include_retrieval_tool=False); the system prompt points the agent to the sandboxed shell ('Offloaded content is accessible in the shell at /artifacts/'), where it queries the stored JSON with jq.",
+      "function_in_system": "Sits between tool execution and the conversation history. The PokeAPI tools return 77 KB to 538 KB per call; the offloader keeps the full payload retrievable while only the preview occupies context, and jq pulls back just the needed fields. Otherwise a single get_pokemon call floods the context window.",
+      "activation": "always",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/pokemon-team-advisor/demo_agent.py",
+          "lines": "47-57",
+          "snippet": "agent = Agent(\n    tools=[get_pokemon, get_move, shell],\n    context_manager=\"auto\",\n    plugins=[\n        ContextOffloader(\n            storage=FileStorage(str(ARTIFACTS_DIR)),\n            include_retrieval_tool=False,\n        ),\n    ],\n    system_prompt=\"Offloaded content is accessible in the shell at /artifacts/\",\n)"
+        },
+        {
+          "file": "python/05-technical-use-cases/pokemon-team-advisor/README.md",
+          "lines": "38",
+          "snippet": "The agent has two domain tools (`get_pokemon`, `get_move`) that simulate API calls by reading from the PokeAPI JSON dataset. These return full responses (77KB-538KB) that exceed the context offloader's threshold. The offloader stores them to `./artifacts/` and the agent sees a truncated preview plus the storage path."
+        }
+      ]
+    },
+    {
+      "name": "sandboxed shell with restricted bind mounts",
+      "what_it_is": "Shell access is provided by strands-shell over MCP, started with --config sandbox.toml. The sandbox exposes a virtual filesystem with two bind mounts: ./pokedata at /pokedata in mode 'copy' (described as read-only in the README) and ./artifacts at /artifacts in mode 'direct'.",
+      "function_in_system": "Confines the agent's general-purpose shell tool to the dataset and the offload directory. Otherwise a misguided or injected shell command reads or modifies arbitrary files on the host. The repo's red-teaming phase targets exactly this sandbox boundary.",
+      "activation": "always",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "python/05-technical-use-cases/pokemon-team-advisor/demo_agent.py",
+          "lines": "43-45",
+          "snippet": "shell = MCPClient(lambda: stdio_client(\n    StdioServerParameters(command=\"uvx\", args=[\"strands-shell\", \"--config\", str(CONFIG_PATH), \"--mcp\"])\n))"
+        },
+        {
+          "file": "python/05-technical-use-cases/pokemon-team-advisor/sandbox.toml",
+          "lines": "1-9",
+          "snippet": "[[bind]]\nmode = \"copy\"\nsource = \"./pokedata\"\ndestination = \"/pokedata\"\n\n[[bind]]\nmode = \"direct\"\nsource = \"./artifacts\"\ndestination = \"/artifacts\""
+        },
+        {
+          "file": "python/05-technical-use-cases/pokemon-team-advisor/README.md",
+          "lines": "40",
+          "snippet": "Strands Shell (via MCP) mounts `./artifacts/` at `/artifacts/` in a sandboxed virtual filesystem. The agent queries offloaded content with jq without it re-entering the context window. Shell also mounts the dataset at `/pokedata/` read-only."
+        }
+      ]
+    },
+    {
+      "name": "WonderFence safety hook on model and tool input and output",
+      "what_it_is": "A HookProvider registers four callbacks (BeforeModelCall, AfterModelCall, BeforeToolCall, AfterToolCall) that send the current text to the WonderFence API. A BLOCK verdict on model input, model output or tool output raises WonderFenceViolationException. A BLOCK verdict on tool input sets cancel_tool with an access-denied message. A MASK verdict replaces the model response or tool result with the masked text.",
+      "function_in_system": "Checks every boundary of the loop: user prompt before the model call, tool arguments before execution, tool results before they re-enter the context, and the final response. Catches prompt attacks, harmful tool inputs and sensitive data in outputs. MASK lets the run continue with sanitized content, BLOCK stops it. Otherwise injected instructions or unsafe tool results flow unchecked into the next model turn and to the user.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/03-integrate/guardrails/alice-wonderfence/guardrail.py",
+          "lines": "34-38, 57-64, 66-83, 85-98, 100-118",
+          "snippet": "    def register_hooks(self, registry: HookRegistry) -> None:\n        registry.add_callback(BeforeModelCallEvent, self.on_before_model_call)\n        registry.add_callback(AfterModelCallEvent, self.on_after_model_call)\n        registry.add_callback(BeforeToolCallEvent, self.on_before_tool_call)\n        registry.add_callback(AfterToolCallEvent, self.on_after_tool_call)\n...\n    def on_before_model_call(self, event: BeforeModelCallEvent) -> None:\n        \"\"\"Evaluate model input before sending to the model.\"\"\"\n        content = self._extract_text(event.agent.messages[-1].get(\"content\", \"\"))\n        context = AnalysisContext(session_id=self._get_session_id(event))\n\n        result = self.client.evaluate_prompt_sync(context, prompt=content)\n        if result.action == Actions.BLOCK:\n            raise WonderFenceViolationException(f\"Model input blocked: {result.detections}\")\n...\n    def on_after_model_call(self, event: AfterModelCallEvent) -> None:\n        \"\"\"Evaluate model output and block/mask unsafe responses.\"\"\"\n        if not event.stop_response or not event.stop_response.message:\n            return\n\n        response_message = event.stop_response.message\n        content = self._extract_text(response_message.get(\"content\", \"\"))\n        context = AnalysisContext(session_id=self._get_session_id(event))\n\n        result = self.client.evaluate_response_sync(context, response=content)\n        if result.action == Actions.BLOCK:\n            raise WonderFenceViolationException(f\"Model output blocked: {result.detections}\")\n        elif result.action == Actions.MASK and result.action_text:\n            # Apply masked content\n            if isinstance(response_message.get(\"content\"), list) and response_message[\"content\"]:\n                response_message[\"content\"][0][\"text\"] = result.action_text\n            else:\n                response_message[\"content\"] = result.action_text\n...\n    def on_before_tool_call(self, event: BeforeToolCallEvent) -> None:\n        \"\"\"Evaluate tool input before execution.\"\"\"\n        tool_name = event.tool_use.get(\"name\", \"unknown\")\n        content = f\"Tool: {tool_name}, Input: {json.dumps(event.tool_use.get('input', {}))}\"\n        context = AnalysisContext(session_id=self._get_session_id(event))\n\n        result = self.client.evaluate_prompt_sync(context, prompt=content)\n\n        if result.action == Actions.BLOCK:\n            # print all the types (string) of detections\n            detections_types = [detection.type for detection in result.detections]\n            str = f\"Access Denied: Tool '{tool_name}' input violates content policy. {', '.join(detections_types)}\"\n            print(str)\n            event.cancel_tool = str\n...\n    def on_after_tool_call(self, event: AfterToolCallEvent) -> None:\n        \"\"\"Evaluate tool output and block/mask unsafe responses.\"\"\"\n        tool_name = event.tool_use.get(\"name\", \"unknown\")\n        result_obj = event.result\n        content = self._extract_text(result_obj.get(\"content\", result_obj) if isinstance(result_obj, dict) else result_obj)\n        context = AnalysisContext(session_id=self._get_session_id(event))\n\n        result = self.client.evaluate_response_sync(context, response=content)\n        if result.action == Actions.BLOCK:\n            raise WonderFenceViolationException(f\"Tool output blocked for {tool_name}: {result.detections}\")\n        elif result.action == Actions.MASK and result.action_text:\n            # Apply masked content\n            if isinstance(result_obj, dict) and \"content\" in result_obj:\n                if isinstance(result_obj[\"content\"], list) and result_obj[\"content\"]:\n                    result_obj[\"content\"][0][\"text\"] = result.action_text\n                else:\n                    result_obj[\"content\"] = result.action_text\n            else:\n                event.result = result.action_text"
+        },
+        {
+          "file": "python/03-integrate/guardrails/alice-wonderfence/README.md",
+          "lines": "70-75",
+          "snippet": "3. **Tool Input** (`on_before_tool_call`): Evaluates tool parameters for safety\n4. **Tool Output** (`on_after_tool_call`): Evaluates tool results before using them\n\nWonderFence can take three actions based on your configured policies:\n- **BLOCK**: Prevents harmful content from being processed\n- **MASK**: Sanitizes sensitive information while allowing the request"
+        }
+      ]
+    },
+    {
+      "name": "third-party guardrail check on every added message",
+      "what_it_is": "A hook on MessageAddedEvent sends the newest user or assistant message to an external guardrail and raises an exception on any verdict other than allow. Two variants: LlamaFirewall runs the PROMPT_GUARD, REGEX, CODE_SHIELD and HIDDEN_ASCII scanners locally (including text inside toolResult blocks) and treats a scanner failure as unsafe (fail closed). NeMo Guardrails posts the message to a local NeMo server with a 10 s timeout, applies Colang rails (keyword 'dummy', insults) and lets the message through on timeout, connection error or other service errors (fail open).",
+      "function_in_system": "Sits on the conversation history, so every message is screened before the next model call consumes it. Blocks prompt injection, insecure code such as a reverse-shell one-liner, and rule-defined content. The fail-closed variant keeps the guarantee when the scanner breaks; the fail-open variant keeps the agent available when the guardrail service is down. Otherwise flagged content enters the context and drives the following turns.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/03-integrate/guardrails/llama-firewall/guardrail.py",
+          "lines": "20-36, 39, 95-98, 126-134",
+          "snippet": "        self.firewall = LlamaFirewall(\n            scanners={\n                Role.USER: [\n                    ScannerType.PROMPT_GUARD,\n                    ScannerType.REGEX,\n                    ScannerType.CODE_SHIELD,\n                    ScannerType.HIDDEN_ASCII\n\n                ],\n                Role.ASSISTANT: [\n                    ScannerType.PROMPT_GUARD,\n                    ScannerType.REGEX,\n                    ScannerType.CODE_SHIELD,\n                    ScannerType.HIDDEN_ASCII\n                ],\n            }\n        )\n...\n        registry.add_callback(MessageAddedEvent, self.guardrail_check)        \n...\n        except Exception as e:\n            print(f\"LlamaFirewall check failed: {e}\")\n            # Fail secure - if guardrail check fails, treat as unsafe\n            return {'safe': False, 'error': str(e), 'role': role, 'decision': 'BLOCK'}\n...\n        if not guard_result.get('safe', True):\n            print(f\"🚨 GUARDRAIL VIOLATION DETECTED in {role} message:\")\n            print(f\"  Decision: {guard_result.get('decision', 'BLOCK')}\")\n            print(f\"  Reason: {guard_result.get('reason', 'Unknown')}\")\n            print(f\"  Score: {guard_result.get('score', 0.0)}\")\n            print(f\"  Status: {guard_result.get('status', 'UNKNOWN')}\")\n            \n            # Block the message by raising an exception\n            raise Exception(f\"Message blocked by guardrail: {guard_result.get('reason', 'Security violation detected')}\")"
+        },
+        {
+          "file": "python/03-integrate/guardrails/llama-firewall/README.md",
+          "lines": "83",
+          "snippet": "The example uses Strands Agent hooks to intercept messages and run them through Llama Firewall's safety checks. If content is flagged as potentially harmful, it's blocked before reaching the LLM."
+        },
+        {
+          "file": "python/03-integrate/guardrails/nvidia-nemo/guardrail.py",
+          "lines": "10, 39-42, 53-55, 59-62",
+          "snippet": "        registry.add_callback(MessageAddedEvent, self.guardrail_check)        \n...\n            url = \"http://127.0.0.1:8000/v1/chat/completions\"\n            \n            try:\n                response = httpx.post(url, headers=headers, json=payload, timeout=10.0)\n...\n                # Accept \"ALLOW\" or empty string as allowed responses\n                if guardrail_response not in [\"ALLOW\", \"\"]:\n                    raise Exception(f\"Guardrail check failed: Content not allowed - Message: '{message_text}' (got: '{guardrail_response}')\")\n...\n            except httpx.TimeoutException:\n                print(\"Warning: Guardrail service timeout, allowing request to proceed\")\n            except httpx.ConnectError:\n                print(\"Warning: Cannot connect to guardrail service, allowing request to proceed\")"
+        },
+        {
+          "file": "python/03-integrate/guardrails/nvidia-nemo/nemo-guardrail-examples/my-first-guardrail/config.yml",
+          "lines": "2-7",
+          "snippet": "rails:\n  input:\n    flows:\n      - dummy input rail\n      - allow input\n      - block insults"
+        },
+        {
+          "file": "python/03-integrate/guardrails/nvidia-nemo/nemo-guardrail-examples/my-first-guardrail/rails/example.co",
+          "lines": "7-14",
+          "snippet": "define subflow dummy input rail\n  \"\"\"A dummy input rail which checks if the word \"dummy\" is included in the text.\"\"\"\n  if \"dummy\" in $user_message\n    if $config.enable_rails_exceptions\n      create event DummyInputRailException(message=\"Dummy input detected. The user's message contains the word 'dummy'.\")\n    else\n      bot deny\n    stop"
+        }
+      ]
+    },
+    {
+      "name": "wall-clock timeout on the streamed agent response",
+      "what_it_is": "asyncio.timeout(1200) wraps the whole agent.stream_async() run of the routed advisor agent. On TimeoutError the stream is abandoned and the message 'Response generation timed out. Please try again with a simpler query.' is appended to the shown response.",
+      "function_in_system": "Bounds the duration of one user request in which the advisor agent calls several sub-agents (Athena, Tavily, knowledge base, stock) in sequence. Otherwise a stuck tool call or a long-running loop blocks the Streamlit session indefinitely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/finance/genai-powered-financial-advisor-tools/application/chat.py",
+          "lines": "1080-1083, 1149-1152",
+          "snippet": "                # Stream the response in real-time with timeout protection\n                try:\n                    async with asyncio.timeout(1200):  # 20 minute timeout for long operations\n                        async for item in agent.stream_async(question):\n...\n                except asyncio.TimeoutError:\n                    logger.error(\"Streaming response timed out after 10 minutes\")\n                    full_response += \"\\n\\n⚠️ Response generation timed out. Please try again with a simpler query.\"\n                    message_placeholder.markdown(full_response, unsafe_allow_html=True)"
+        }
+      ]
+    },
+    {
+      "name": "LLM reflection critic with bounded revision (Reflexion graph)",
+      "what_it_is": "The tool generate_initial_answer lets the FlightToolExecutor answer the query, then a reflection agent rates the answer on completeness, final answer, clarity, actionability, user experience and missing information and outputs REVISE or ACCEPT. On REVISE the revisor node has a query-improver agent rewrite the query from the critique, the executor answers again and the reflection agent re-evaluates. ReflexionState caps revisions at max_iterations=5. The revisor resets revision_count to 0 on each call and the graph has a single draft to revisor edge, so one graph run performs at most one revision.",
+      "function_in_system": "An in-loop critic between the draft answer and the final response. Catches incomplete answers and premature actions such as booking before showing options, and feeds the critique back as an improved query. Otherwise the first executor answer reaches the user unchecked.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/logistics/custom-orchestration-airline-assistant/src/reflexion_singleTurn.ipynb",
+          "lines": "cell 19, lines 1-13",
+          "snippet": "reflection_system_prompt=\"\"\"You are analyzing a flight assistant's response that uses real flight database tools.\n        \nIMPORTANT: The flight data comes from real database queries, NOT hallucination.\n        \nAnalyze the response quality on these dimensions:\n1. **Completeness**: Does it address all parts of the user's query? \n2. **Final Answer**: If the user query clearly states the final goal and if it can be fulfiled as per the policy, then does the response show that?\n2. **Clarity**: Is the information presented clearly and logically?\n3. **Actionability**: Are next steps or options clearly presented?\n4. **User Experience**: Is the tone helpful and appropriate?\n5. **Missing Information**: What important details are missing?\n6. **Decision**: REVISE or ACCEPT\n7. **Reason**: Why this decision was made"
+        },
+        {
+          "file": "python/04-industry-use-cases/logistics/custom-orchestration-airline-assistant/src/reflexion_singleTurn.ipynb",
+          "lines": "cell 21, lines 5-25",
+          "snippet": "    flight_response = flight_executor(query)\n    answer_text = str(flight_response)\n    \n    reflection_agent = Agent(\n        model=bedrock_model_taubench,\n        system_prompt=reflection_system_prompt\n    )\n    \n    reflection_prompt = f\"\"\"\nOriginal Query: {query}\nFlight Assistant's Answer: {answer_text}\n\nRemember: The flight data comes from real database queries.\nPlease provide a critical reflection of this answer:\"\"\"\n    \n    reflection_response = reflection_agent(reflection_prompt)\n    reflection_text = str(reflection_response)\n    \n    needs_revision = \"REVISE\" in reflection_text.upper()\n    \n    return f\"**Answer**: {answer_text}\\n**Self-Reflection**: {reflection_text}\\n**Needs Revision**: {needs_revision}\""
+        },
+        {
+          "file": "python/04-industry-use-cases/logistics/custom-orchestration-airline-assistant/src/reflexion_singleTurn.ipynb",
+          "lines": "cell 27, lines 5-23",
+          "snippet": "    query_improver = Agent(\n        model=bedrock_model_taubench,\n        system_prompt=query_improver_system_prompt\n    )\n    \n    improved_query = query_improver(f\"Current user query: {current_user_query}\\nCurrent Response: {current_response}\\nReflection: {current_reflection}\\nCreate better query:\")\n    \n    flight_response = flight_executor(str(improved_query))\n    revised_answer = str(flight_response)\n    \n    revision_reflection_agent = Agent(\n        model=bedrock_model_taubench,\n        system_prompt=reflection_system_prompt\n    )\n    \n    new_reflection = revision_reflection_agent(f\"Task: {current_user_query} Revised Answer: {revised_answer} Analyze and decide:\")\n    reflection_text = str(new_reflection)\n    \n    needs_revision = \"REVISE\" in reflection_text.upper()"
+        },
+        {
+          "file": "python/04-industry-use-cases/logistics/custom-orchestration-airline-assistant/src/reflexion_singleTurn.ipynb",
+          "lines": "cell 31, lines 29-52",
+          "snippet": "        state = ReflexionState(\n            user_query=user_query,\n            response=draft_response,\n            reflection=draft_reflection,\n            needs_revision=needs_revision,\n            revision_count=0,\n            max_iterations=5\n        )\n        \n        print(f\"Revisor starting: revision_count={state.revision_count}, needs_revision={state.needs_revision}\")\n        \n        if state.needs_revision and state.revision_count < state.max_iterations:\n            state.revision_count += 1\n            \n            result = self.tool.generate_revised_answer(\n                current_user_query=state.user_query,\n                current_response=state.response,\n                current_reflection=state.reflection\n            )\n            \n            extracted = extract_answer_reflection_revision(result)\n            state.response = extracted[\"answer\"]\n            state.reflection = extracted[\"self_reflection\"]\n            state.needs_revision = extracted[\"needs_revision\"]"
+        },
+        {
+          "file": "python/04-industry-use-cases/logistics/custom-orchestration-airline-assistant/src/reflexion_singleTurn.ipynb",
+          "lines": "cell 34, lines 11-15",
+          "snippet": "    draft_node = builder.add_node(draft_agent, \"draft\")\n    revisor_node = builder.add_node(revisor_agent, \"revisor\")\n    \n    builder.add_edge(draft_node, revisor_node)\n    builder.set_entry_point(\"draft\")"
+        }
+      ]
+    },
+    {
+      "name": "keyword-based consent prompt for mutating GitHub operations",
+      "what_it_is": "is_mutation_query flags a GraphQL query as mutative when it starts with 'mutation' or contains a keyword from MUTATIVE_KEYWORDS. For a mutative query the use_github tool blocks on a console prompt and executes only on 'y'; any other input returns an error ToolResult with the user's reason to the agent. Setting BYPASS_TOOL_CONSENT=true skips the prompt.",
+      "function_in_system": "A human-in-the-loop gate inside the tool, placed before write access to GitHub (issues, pull requests, repository changes). The rejection reason flows back into the loop so the agent can adapt. Otherwise the agent modifies repositories without any human check.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/productivity/research-agent/src/strands_research_agent/tools/use_github.py",
+          "lines": "128-145",
+          "snippet": "def is_mutation_query(query: str) -> bool:\n    \"\"\"Check if a GraphQL query is a mutation based on keywords and structure.\n\n    Args:\n        query: GraphQL query string\n\n    Returns:\n        True if the query appears to be a mutation\n    \"\"\"\n    query_lower = query.lower().strip()\n\n    # Check if query starts with \"mutation\"\n    if query_lower.startswith(\"mutation\"):\n        return True\n\n    # Check for mutative keywords in the query\n    return any(keyword in query_lower for keyword in MUTATIVE_KEYWORDS)\n"
+        },
+        {
+          "file": "python/04-industry-use-cases/productivity/research-agent/src/strands_research_agent/tools/use_github.py",
+          "lines": "324-326, 355-370",
+          "snippet": "    STRANDS_BYPASS_TOOL_CONSENT = (\n        os.environ.get(\"BYPASS_TOOL_CONSENT\", \"\").lower() == \"true\"\n    )\n...\n    # Check if the operation is potentially mutative\n    is_mutative = query_type.lower() == \"mutation\" or is_mutation_query(query)\n\n    if is_mutative and not STRANDS_BYPASS_TOOL_CONSENT:\n        # Prompt for confirmation before executing the operation\n        confirm = get_user_input(\n            f\"<yellow><bold>This appears to be a mutative operation ({query_type}). \"\n            f\"Do you want to proceed?</bold> [y/*]</yellow>\"\n        )\n        if confirm.lower() != \"y\":\n            return {\n                \"status\": \"error\",\n                \"content\": [\n                    {\"text\": f\"Operation canceled by user. Reason: {confirm}.\"}\n                ],\n            }"
+        }
+      ]
+    },
+    {
+      "name": "background sub-agent task timeout with notification",
+      "what_it_is": "Each background task runs its own sub-agent in a thread, guarded by a threading.Timer with a default of 900 s. On expiry the timer sets the task status to 'timeout', which ends the message-queue loop (while status == 'running') after the current agent call. Timeouts and errors are reported to the parent agent through the notify tool with high priority.",
+      "function_in_system": "Bounds the runtime of sub-agents that the main agent spawns in parallel and surfaces their failures to it. Otherwise background tasks run without limit and fail silently while the main agent waits for results.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/productivity/research-agent/src/strands_research_agent/tools/tasks.py",
+          "lines": "144, 340",
+          "snippet": "        timeout: int = 900,\n...\n        while task_state.status == \"running\" and not task_state.paused:"
+        },
+        {
+          "file": "python/04-industry-use-cases/productivity/research-agent/src/strands_research_agent/tools/tasks.py",
+          "lines": "417-438",
+          "snippet": "    except TimeoutError:\n        logger.error(\n            f\"Task {task_state.task_id} timed out after {task_state.timeout} seconds\"\n        )\n        task_state.update_status(\"timeout\")\n        task_state.append_result(\n            f\"ERROR: Task timed out after {task_state.timeout} seconds\"\n        )\n\n        # Send timeout notification if parent agent has notify tool\n        if parent_agent and hasattr(parent_agent.tool, \"notify\"):\n            try:\n                parent_agent.tool.notify(\n                    message=f\"Task '{task_state.task_id}' timed out after {task_state.timeout} seconds\",\n                    title=\"Task Timeout\",\n                    priority=\"high\",\n                    category=\"tasks\",\n                    source=task_state.task_id,\n                    show_system_notification=True,\n                )\n            except Exception as e:\n                logger.error(f\"Failed to send task timeout notification: {e}\")"
+        },
+        {
+          "file": "python/04-industry-use-cases/productivity/research-agent/src/strands_research_agent/tools/tasks.py",
+          "lines": "462-482",
+          "snippet": "def run_task_with_timeout(task_state: TaskState, parent_agent: Agent | None = None):\n    \"\"\"Run a task with timeout handling.\"\"\"\n\n    def timeout_handler():\n        # This will be called if the task exceeds its timeout\n        if task_id in task_threads and task_state.status == \"running\":\n            task_state.update_status(\"timeout\")\n            task_state.append_result(\n                f\"ERROR: Task timed out after {task_state.timeout} seconds\"\n            )\n\n    task_id = task_state.task_id\n\n    # Start a timer for the timeout\n    timer = threading.Timer(task_state.timeout, timeout_handler)\n    timer.daemon = True\n    timer.start()\n\n    try:\n        # Run the actual task\n        run_task(task_state, parent_agent)"
+        }
+      ]
+    },
+    {
+      "name": "agent-call retry with exponential backoff on classified transient errors",
+      "what_it_is": "call_agent_with_retry re-runs the whole agent(prompt) call up to MAX_RETRIES=3 times, starting with a 2 s delay that doubles after each attempt. Retries are triggered by botocore/urllib3 timeout and connection exceptions and by exceptions whose message contains 'throttling', 'timeout', 'modelstreamerrorexception', 'read timed out' or connection pool markers. Any other exception is re-raised immediately; after the last attempt a user-facing exception is raised.",
+      "function_in_system": "Wraps every agent turn of the Streamlit chat (both streaming and non-streaming paths). Absorbs Bedrock connection drops, stream errors and throttling before they reach the user. Otherwise each transient network or rate-limit error ends the turn with an error message.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/software-engineering/amazon-dataprocessing-agent/amazon_dataprocessing_agent/core/strands_bedrock_agent.py",
+          "lines": "34-35, 80-158",
+          "snippet": "    MAX_RETRIES = 3\n    INITIAL_RETRY_DELAY = 2  # seconds\n...\n        for attempt in range(max_retries):\n            try:\n                if self.streaming and stream_callback:\n                    if messages:\n                        return agent(\n                            prompt,\n                            messages=messages,\n                            stream=True,\n                            callback_handler=stream_callback,\n                        )\n                    else:\n                        return agent(\n                            prompt, stream=True, callback_handler=stream_callback\n                        )\n                else:\n                    if messages:\n                        return agent(prompt, messages=messages)\n                    else:\n                        return agent(prompt)\n\n            except (\n                ReadTimeoutError,\n                ConnectTimeoutError,\n                EndpointConnectionError,\n                Urllib3ReadTimeoutError,\n            ) as e:\n                # Handle specific AWS connection timeout errors\n                last_exception = e\n                logger.warning(\n                    f\"AWS connection timeout on attempt {attempt + 1}: {str(e)}\"\n                )\n\n                if attempt < max_retries - 1:\n                    st.warning(\n                        f\"🔄 Connection timeout, retrying in {retry_delay} seconds (attempt {attempt+1}/{max_retries})...\"\n                    )\n                    time.sleep(retry_delay)\n                    retry_delay *= 2  # Exponential backoff\n                    continue\n                else:\n                    # Final attempt failed, show user-friendly error\n                    error_msg = \"Unable to connect to AWS Bedrock service after multiple attempts. Please check your internet connection and try again.\"\n                    logger.error(f\"All retry attempts failed: {str(e)}\")\n                    raise Exception(error_msg) from e\n\n            except Exception as e:\n                last_exception = e\n                error_str = str(e).lower()\n\n                # Check if it's a retryable error\n                if (\n                    \"modelstreamerrorexception\" in error_str\n                    or \"throttling\" in error_str\n                    or \"timeout\" in error_str\n                    or \"unexpected error\" in error_str\n                    or \"read timed out\" in error_str\n                    or \"connection pool\" in error_str\n                    or \"awshttpsconnectionpool\" in error_str\n                ):\n                    logger.warning(\n                        f\"Retryable error on attempt {attempt + 1}: {str(e)}\"\n                    )\n\n                    if attempt < max_retries - 1:\n                        st.warning(\n                            f\"🔄 Temporary service issue, retrying in {retry_delay} seconds (attempt {attempt+1}/{max_retries})...\"\n                        )\n                        time.sleep(retry_delay)\n                        retry_delay *= 2  # Exponential backoff\n                        continue\n                    else:\n                        # Final attempt failed, show user-friendly error\n                        error_msg = \"Service temporarily unavailable after multiple attempts. Please try again in a few moments.\"\n                        logger.error(f\"All retry attempts failed: {str(e)}\")\n                        raise Exception(error_msg) from e\n\n                # Non-retryable error, log and re-raise immediately\n                logger.error(f\"Non-retryable error: {str(e)}\")\n                raise last_exception"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/amazon-dataprocessing-agent/amazon_dataprocessing_agent/core/agent_manager.py",
+          "lines": "145-150",
+          "snippet": "                    response = self.bedrock_agent.call_agent_with_retry(\n                        self.agent,\n                        user_input,\n                        messages=context_messages,\n                        stream_callback=streaming_handler.callback_handler,\n                    )"
+        }
+      ]
+    },
+    {
+      "name": "Bedrock prompt caching of system prompt and tool definitions",
+      "what_it_is": "BedrockModel is created with cache_prompt='default' and cache_tools='default', placing cache points after the system prompt and the tool specifications.",
+      "function_in_system": "Applies to every model call of the agent. The long system prompt (about 250 lines) and the many MCP tool specs are read from the prompt cache on repeated calls, which lowers input token cost and latency per cycle.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/software-engineering/amazon-dataprocessing-agent/amazon_dataprocessing_agent/core/strands_bedrock_agent.py",
+          "lines": "51-58",
+          "snippet": "        self.model = BedrockModel(\n            model_id=model_id,\n            region_name=region,\n            max_tokens=max_tokens,\n            temperature=temperature,\n            streaming=streaming,\n            cache_prompt=\"default\",\n            cache_tools=\"default\","
+        }
+      ]
+    },
+    {
+      "name": "capped extended-thinking token budget",
+      "what_it_is": "The model request enables extended thinking with budget_tokens=2048, commented as 'Reduced thinking budget for faster responses'.",
+      "function_in_system": "Limits the reasoning tokens the model spends per call. Keeps latency and output token cost of each cycle bounded. Otherwise thinking length is limited only by max_tokens (8000).",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/software-engineering/amazon-dataprocessing-agent/amazon_dataprocessing_agent/core/strands_bedrock_agent.py",
+          "lines": "59-64",
+          "snippet": "            additional_request_fields={\n                \"thinking\": {\n                    \"type\": \"enabled\",\n                    \"budget_tokens\": 2048,  # Reduced thinking budget for faster responses\n                }\n            },"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/lambda-error-analysis-agent/cdk/lambda/error-analyzer-agent/agent.py",
+          "lines": "532-557",
+          "snippet": "    # Claude Sonnet 4 with Interleaved Thinking\n    model = BedrockModel(\n        model_id=\"us.anthropic.claude-sonnet-4-20250514-v1:0\",  # Claude 4 Sonnet\n        max_tokens=8192,\n        temperature=1,  # Required to be 1 when thinking is enabled\n        additional_request_fields={\n            # Enable interleaved thinking beta feature\n            \"anthropic_beta\": [\"interleaved-thinking-2025-05-14\"],\n            # Configure reasoning parameters\n            \"reasoning_config\": {\n                \"type\": \"enabled\",  # Turn on thinking\n                \"budget_tokens\": 3000  # Thinking token budget for complex analysis\n            }\n        }\n    )\nelse:\n    # Claude 3.7 Sonnet with thinking mode\n    model = BedrockModel(\n        model_id=\"us.anthropic.claude-3-7-sonnet-20250219-v1:0\",\n        additional_request_fields={\n            \"thinking\": {\n                \"type\": \"enabled\",\n                \"budget_tokens\": 2048,\n            }\n        }\n    )"
+        }
+      ]
+    },
+    {
+      "name": "user-triggered retry button after transient errors",
+      "what_it_is": "When processing a message fails with an error string containing 'connection', 'timeout', 'unavailable' or 'throttling', the UI shows a 'Retry Request' button that re-submits the same user input to the agent.",
+      "function_in_system": "Sits in the Streamlit chat layer after the automatic retries are exhausted. Lets the user replay the failed request with one click. Otherwise the user has to retype the request after a transient outage.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/software-engineering/amazon-dataprocessing-agent/amazon_dataprocessing_agent/ui/components.py",
+          "lines": "315-331",
+          "snippet": "                # Show a retry button for connection-related errors\n                if any(\n                    keyword in error_str\n                    for keyword in [\n                        \"connection\",\n                        \"timeout\",\n                        \"unavailable\",\n                        \"throttling\",\n                    ]\n                ):\n                    if st.button(\n                        \"🔄 Retry Request\",\n                        key=f\"retry_{len(st.session_state.chat_history)}\",\n                        type=\"secondary\",\n                    ):\n                        # Retry the same request\n                        UIComponents._process_user_message(user_input, agent_manager)"
+        }
+      ]
+    },
+    {
+      "name": "prompt-level work constraints on sub-agents",
+      "what_it_is": "Instructions in system prompts and tool docstrings that restrict what sub-agents do. code-assistant: the orchestrator prompt demands 'Generate code first', 'Review and optimize it', 'Execute for verification before writing the code', backed by a code_reviewer sub-agent that rewrites the code and a python_repl-based code_execute tool. aws-audit-assistant: the boto script agent is told 'Do not make any changes to the environment, only report', while the code sets BYPASS_TOOL_CONSENT=true and gives it shell and python_repl. aws-assistant-mcp: the graph agent is told 'You MUST create a single graph, and then stop'. sre-incident-response-agent: the remediation agent is told 'Always prefer reversible actions (rollback > restart > scale)'.",
+      "function_in_system": "Shapes the sub-agent step inside the supervisor loop: generated code is reviewed and test-executed once before files are written, audit scripts are meant to stay read-only, graph creation is capped at one artifact, and cluster remediation favors reversible actions. Otherwise faulty code is written straight to disk, audit scripts may mutate the AWS account, the graph agent may keep producing output, and the remediation agent may pick an irreversible action first. All four depend on the model following the instruction.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/software-engineering/code-assistant/utils/prompts.py",
+          "lines": "12-16",
+          "snippet": "Always:\n- Generate code first\n- Review and optimize it\n- Execute for verification before writing the code\n- Explain thoroughly"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/code-assistant/utils/tools.py",
+          "lines": "53-69, 97-112",
+          "snippet": "@tool\ndef code_reviewer(code: str) -> str:\n    \"\"\"\n    Reviews Python code to a implement best practices\n\n    Args:\n        code: Python code to write.\n\n    Returns:\n        Improved Python code using best practices\n    \"\"\"\n    try:\n        agent = Agent(system_prompt=REVIEWER_AGENT_PROMPT, model=bedrock_model)\n        result = str(agent(f\"Optimize code:\\n{code}\")).strip()\n        return result or \"Code review did not return any result.\"\n    except Exception as e:\n        return f\"Error reviewing code: {e}\"\n...\n@tool\ndef code_execute(code: str) -> str:\n    \"\"\"\n    Executes a Python code string and returns the result.\n\n    Args:\n        code: Python code to execute.\n\n    Returns:\n        Output or error message.\n    \"\"\"\n    try:\n        agent = Agent(tools=[python_repl])\n        return agent.tool.python_repl(code=code)\n    except Exception as e:\n        return f\"Error executing code: {e}\""
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/aws-audit-assistant/strands_boto_agent.py",
+          "lines": "9, 12-16, 25-29",
+          "snippet": "os.environ[\"BYPASS_TOOL_CONSENT\"] = \"true\"\n...\ndef code_assistant(query: str) -> str:\n    \"\"\"\n    Coding assistant agent for python boto3, you will recieve a set of best practices for the service. your job is to create a boto script and audit if the service \n     is set up properly according to best practices. Do not make any changes to the environment, only report if the service is set up properly or not \n    Args:\n...\n    agent = Agent(\n        system_prompt=\"You are a coding assistant for boto3 python library. You can use the available tools to execute python code and get the output.\",\n        tools=[python_repl, file_read, shell, http_request, editor, journal],\n        model=bedrock_model\n    )"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/aws-assistant-mcp/graph_creater.py",
+          "lines": "22-27",
+          "snippet": "        graph_creater = Agent(\n            system_prompt=\"\"\"\n            You are a graph creater agent. Your task is to write python code using Plotly to create graphs and execute this code in provided code environment. You MUST create a single graph, and then stop. You MUST NOT create more than one graph.\n            \"\"\",\n            tools=[python_repl, shell],\n        )"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/sre-incident-response-agent/sre_agent.py",
+          "lines": "400-411",
+          "snippet": "_remediation_agent = Agent(\n    model=model,\n    system_prompt=\"\"\"You are a Kubernetes and Helm operations expert.\nGiven a root cause analysis, your job is to:\n1. Inspect the current state of affected workloads with kubectl.\n2. Propose and execute the safest remediation action (rollback, restart, scale).\n3. Always prefer reversible actions (rollback > restart > scale).\n4. Confirm the action taken or explain why no action was taken.\n\nIn DRY_RUN mode, commands are simulated and safe to run.\n\"\"\",\n    tools=[kubectl_get, kubectl_rollout_restart, helm_rollback, helm_scale],"
+        }
+      ]
+    },
+    {
+      "name": "per-stage failure containment with original-query fallback",
+      "what_it_is": "The fixed analyzer, rewriter and validator pipeline wraps each agent call and its JSON parsing in try/except. A failed stage produces a {'status': 'error', 'message': ...} dict and the pipeline continues. If the analyzer returns non-JSON text, a regex recovers the query ID and a 'full table scan' bottleneck from the text. If the rewriter yields no 'query_rewrite' suggestion, the validator runs on the unchanged original query.",
+      "function_in_system": "Sits between the three agent stages in optimize_query. Keeps one failing or malformed stage from aborting the whole optimization, so the report is still produced with the remaining stages' results. Otherwise a single Bedrock error or invalid JSON output ends the run without any report.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/software-engineering/data-warehouse-optimizer/main.py",
+          "lines": "92-141",
+          "snippet": "        try:\n            analysis_result = analyzer_agent(f\"Analyze query: {query}\")\n        except Exception as e:\n            print(f\"Bedrock error in analyzer_agent: {str(e)}\")\n            analysis = {\n                \"query_id\": str(uuid.uuid4()),\n                \"status\": \"error\",\n                \"message\": str(e),\n            }\n        else:\n            try:\n                analysis_text = (\n                    analysis_result\n                    if isinstance(analysis_result, str)\n                    else (\n                        analysis_result.text\n                        if hasattr(analysis_result, \"text\")\n                        else (\n                            analysis_result.messages[-1].get(\"content\", \"{}\")\n                            if hasattr(analysis_result, \"messages\")\n                            and analysis_result.messages\n                            else \"{}\"\n                        )\n                    )\n                )\n                try:\n                    analysis = json.loads(analysis_text)\n                except json.JSONDecodeError:\n                    query_id_match = re.search(r\"Query ID: ([\\w-]+)\", analysis_text)\n                    query_id = (\n                        query_id_match.group(1) if query_id_match else str(uuid.uuid4())\n                    )\n                    bottlenecks = (\n                        [\"Full table scan detected\"]\n                        if \"full table scan\" in analysis_text.lower()\n                        else []\n                    )\n                    analysis = {\n                        \"query_id\": query_id,\n                        \"status\": \"success\",\n                        \"summary\": analysis_text,\n                        \"bottlenecks\": bottlenecks,\n                    }\n            except Exception as e:\n                print(f\"Error parsing analysis result: {str(e)}\")\n                analysis = {\n                    \"query_id\": str(uuid.uuid4()),\n                    \"status\": \"error\",\n                    \"message\": str(e),\n                }"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/data-warehouse-optimizer/main.py",
+          "lines": "166-182",
+          "snippet": "            except json.JSONDecodeError:\n                suggestions = {\n                    \"status\": \"error\",\n                    \"message\": \"Invalid JSON from rewriter\",\n                }\n            except Exception as e:\n                print(f\"Error parsing rewrite result: {str(e)}\")\n                suggestions = {\"status\": \"error\", \"message\": str(e)}\n\n        rewritten_query = next(\n            (\n                s[\"suggestion\"]\n                for s in suggestions.get(\"suggestions\", [])\n                if s[\"type\"] == \"query_rewrite\"\n            ),\n            query,\n        )"
+        }
+      ]
+    },
+    {
+      "name": "size caps on data retrieved by tools",
+      "what_it_is": "Tool-level caps on data loaded into the agent context. The Lambda error analyzer skips source files above MAX_FILE_SIZE=25 KB and stops at MAX_TOTAL_SIZE=100 KB (both for the S3 source bucket and the Lambda deployment ZIP), stops CloudWatch pagination after max_pages=10, and cuts the error message in the prompt to 200 characters. The SRE agent's fetch_log_events returns at most max_events=50 log events by default. The video games data analyst returns SQL results row by row only up to MAX_RESPONSE_SIZE_BYTES (25600 by default, configurable via SSM) and tells the agent 'The data is too large, it has been truncated from X to Y rows'. The Tavily deep-research tools cut page content to 4000 characters per search result and 5000 characters per extract result, and web_crawl runs with a fixed max_depth=2 and limit=20; the code comment gives readability as the reason, the effect is a bound on the text entering the context.",
+      "function_in_system": "Applies inside the retrieval tools before results enter the agent context. Keeps token cost, context size and Lambda runtime bounded. Otherwise large deployment packages, long log streams or large query results can overflow the context window or exhaust the function timeout.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/software-engineering/lambda-error-analysis-agent/cdk/lambda/error-analyzer-agent/agent.py",
+          "lines": "44-46",
+          "snippet": "# Source code size limits for both S3 and Lambda retrieval\nMAX_FILE_SIZE = 25000    # 25KB per file (up from 20KB)\nMAX_TOTAL_SIZE = 100000  # 100KB total (up from 50KB)"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/lambda-error-analysis-agent/cdk/lambda/error-analyzer-agent/agent.py",
+          "lines": "80-82",
+          "snippet": "        max_pages = 10  # Safety limit: 10 pages * 10K events = 100K events max\n        \n        while pages_fetched < max_pages:"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/lambda-error-analysis-agent/cdk/lambda/error-analyzer-agent/agent.py",
+          "lines": "334-340",
+          "snippet": "                        if file_size > MAX_FILE_SIZE:\n                            print(f\"Skipping large file {obj['Key']}: {file_size} bytes\")\n                            continue\n                        \n                        if total_size + file_size > MAX_TOTAL_SIZE:\n                            print(f\"Reached size limit, skipping remaining files\")\n                            break"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/lambda-error-analysis-agent/cdk/lambda/error-analyzer-agent/agent.py",
+          "lines": "398-404",
+          "snippet": "                    if file_info.file_size > MAX_FILE_SIZE:\n                        print(f\"Skipping large file {file_info.filename}: {file_info.file_size} bytes\")\n                        continue\n                    \n                    if total_size + file_info.file_size > MAX_TOTAL_SIZE:\n                        print(f\"Reached size limit, skipping remaining files\")\n                        break"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/lambda-error-analysis-agent/cdk/lambda/error-analyzer-agent/agent.py",
+          "lines": "751",
+          "snippet": "        safe_error_message = error_message.replace('\"', \"'\").replace('\\n', ' ')[:200]"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/sre-incident-response-agent/sre_agent.py",
+          "lines": "144-148, 167-173",
+          "snippet": "def fetch_log_events(\n        log_group: str,\n        filter_pattern: str = \"ERROR\",\n        minutes_back: int = 15,\n        max_events: int = 50,\n...\n        response = logs.filter_log_events(\n            logGroupName=log_group,\n            startTime=start_time,\n            endTime=end_time,\n            filterPattern=filter_pattern,\n            limit=max_events,\n        )"
+        },
+        {
+          "file": "python/07-ux-demos/video-games-sales-assistant/cdk-strands-data-analyst-assistant/docker/src/tools/rds_data_api.py",
+          "lines": "193-202",
+          "snippet": "            max_response_size = CONFIG.get(\"MAX_RESPONSE_SIZE_BYTES\", 25600)\n            if get_size(json.dumps(records)) > max_response_size:\n                for item in records:\n                    if get_size(json.dumps(records_to_return)) <= max_response_size:\n                        records_to_return.append(item)\n                message = (\n                    f\"The data is too large, it has been truncated from \"\n                    f\"{len(records)} to {len(records_to_return)} rows.\"\n                )\n            else:"
+        },
+        {
+          "file": "python/03-integrate/tools/tavily/interactive_cli/utils/utils.py",
+          "lines": "87-90",
+          "snippet": "            formatted_doc += (\n                f\"Content: {raw_content[:4000]}...\\n\"\n                if len(raw_content) > 4000\n                else f\"Content: {raw_content}\\n\""
+        },
+        {
+          "file": "python/03-integrate/tools/tavily/interactive_cli/utils/utils.py",
+          "lines": "124-127",
+          "snippet": "        if raw_content:\n            # Truncate very long content for readability\n            if len(raw_content) > 5000:\n                formatted_doc += f\"Content: {raw_content[:5000]}...\\n\""
+        },
+        {
+          "file": "python/03-integrate/tools/tavily/interactive_cli/deep_research.py",
+          "lines": "191-192, 205-210",
+          "snippet": "    max_depth = 2\n    limit = 20\n...\n        # Crawls the web using Tavily API\n        api_response = tavily_client.crawl(\n            url=url,  # The URL to crawl\n            max_depth=max_depth,  # Defines how far from the base URL the crawler can explore\n            limit=limit,  # Limits the number of results returned\n            instructions=instructions,  # Optional instructions for the crawler"
+        }
+      ]
+    },
+    {
+      "name": "DRY_RUN simulation of mutating Kubernetes and Helm actions",
+      "what_it_is": "DRY_RUN is read from the environment with default 'true'. In dry-run mode kubectl_get, kubectl_rollout_restart, helm_rollback and helm_scale return simulated output prefixed with '[DRY-RUN]' and execute no subprocess.",
+      "function_in_system": "Sits in the tool implementations of the remediation sub-agent. Lets the agent walk the full remediation path while the cluster stays untouched. Otherwise a wrong root cause analysis directly triggers restarts, rollbacks or scaling on the live cluster.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/04-industry-use-cases/software-engineering/sre-incident-response-agent/sre_agent.py",
+          "lines": "35",
+          "snippet": "DRY_RUN = os.environ.get(\"DRY_RUN\", \"true\").lower() == \"true\""
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/sre-incident-response-agent/sre_agent.py",
+          "lines": "239-244",
+          "snippet": "    if DRY_RUN:\n        return (\n            f\"[DRY-RUN] kubectl rollout restart deployment/{deployment} \"\n            f\"-n {namespace}\\n\"\n            \"This would trigger a rolling restart of all pods in the deployment.\"\n        )"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/sre-incident-response-agent/sre_agent.py",
+          "lines": "271-275",
+          "snippet": "    if DRY_RUN:\n        return (\n            f\"[DRY-RUN] helm rollback {release} {rev_str} -n {namespace}\\n\"\n            \"This would roll the release back to the previous stable revision.\"\n        )"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/sre-incident-response-agent/sre_agent.py",
+          "lines": "302-307",
+          "snippet": "    if DRY_RUN:\n        return (\n            f\"[DRY-RUN] kubectl scale deployment/{release} \"\n            f\"--replicas={replicas} -n {namespace}\\n\"\n            f\"This would scale the deployment to {replicas} replicas.\"\n        )"
+        },
+        {
+          "file": "python/04-industry-use-cases/software-engineering/sre-incident-response-agent/sre_agent.py",
+          "lines": "208-214",
+          "snippet": "    if DRY_RUN:\n        return (\n            f\"[DRY-RUN] kubectl get {resource_type} -n {namespace}\\n\"\n            f\"NAME                          READY   STATUS    RESTARTS   AGE\\n\"\n            f\"my-service-7d9f4b6c8-xk2pq   1/1     Running   3          2d\\n\"\n            f\"my-service-7d9f4b6c8-lm8rt   0/1     OOMKilled  1         5m\\n\"\n        )"
+        }
+      ]
+    },
+    {
+      "name": "human escalation tool (transfer to human agents)",
+      "what_it_is": "The A/B-test airline agents get a transfer_to_human_agents(summary) tool adapted from tau-bench. Its docstring restricts use to cases where the user explicitly asks for a human or the issue cannot be resolved with the available tools. The implementation is a stub that returns the fixed string 'Transfer successful'.",
+      "function_in_system": "Gives the agent an exit from the tool loop for requests it cannot or should not handle, handing the case over with a summary. Otherwise the agent keeps trying unsuitable tools or improvises an answer. In this sample the handover itself is simulated.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "python/06-evaluate/ab-testing-models/data/ma-bench/mabench/environments/airline/tools/transfer_to_human_agents.py",
+          "lines": "7-21",
+          "snippet": "@tool\n\ndef transfer_to_human_agents(summary: str) -> str:\n    \"\"\"\n    Transfer the user to a human agent, with a summary of the user's issue.\n    Only transfer if the user explicitly asks for a human agent, or if the user's\n    issue cannot be resolved by the agent with the available tools.\n\n    Args:\n        summary: A summary of the user's issue.\n\n    Returns:\n        A confirmation message that the transfer was successful.\n    \"\"\"\n    return \"Transfer successful\""
+        },
+        {
+          "file": "python/06-evaluate/ab-testing-models/07a-ab-testing-build-agents.ipynb",
+          "lines": "cell 8, lines 12, 21, 32",
+          "snippet": "from mabench.environments.airline.tools.transfer_to_human_agents import transfer_to_human_agents\n...\nAIRLINE_TOOLS = [\n...\n    transfer_to_human_agents,"
+        }
+      ]
+    },
+    {
+      "name": "risk-gated human approval interrupt before order placement",
+      "what_it_is": "The assess_order_risk tool computes a deterministic risk score (order value, customer history, quantity, inventory strain) and stores it in invocation_state['risk_score']. A BeforeNodeCallEvent hook on the approval_gate node auto-approves scores <= RISK_THRESHOLD (30) and otherwise calls event.interrupt('order-approval'), which also happens when no score was set. Conditional graph edges route to the processor (place_order) only for 'approved', 'y' or 'yes', else to a rejection_handler. An S3SessionManager persists the interrupted graph so a later 'respond' request resumes it with the human decision.",
+      "function_in_system": "Sits between risk assessment and order execution in the order graph. Only risky orders go to a human, and a missing risk assessment defaults to human review. Otherwise every LLM-generated order is placed unchecked and decrements inventory.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/07-ux-demos/human-in-the-loop-approval-agent/src/main.py",
+          "lines": "38, 41-64",
+          "snippet": "RISK_THRESHOLD = 30  # Orders at or below this score are auto-approved\n...\nclass OrderApprovalHook(HookProvider):\n    \"\"\"Conditionally interrupts before the approval_gate node based on risk score.\"\"\"\n\n    def __init__(self):\n        self.decision = None\n\n    def register_hooks(self, registry: HookRegistry, **kwargs) -> None:\n        registry.add_callback(BeforeNodeCallEvent, self.request_approval)\n\n    def request_approval(self, event: BeforeNodeCallEvent) -> None:\n        if event.node_id != \"approval_gate\":\n            return\n\n        risk_score = event.invocation_state.get(\"risk_score\")\n        logger.info(\"Risk score for approval gate: %s (threshold: %s)\", risk_score, RISK_THRESHOLD)\n\n        if risk_score is not None and risk_score <= RISK_THRESHOLD:\n            logger.info(\"Auto-approving order (low risk)\")\n            self.decision = \"approved\"\n            return\n\n        logger.info(\"Requesting human approval (risk score: %s)\", risk_score)\n        approval = event.interrupt(\"order-approval\", reason=f\"Human approval required (risk score: {risk_score})\")\n        self.decision = approval.lower()"
+        },
+        {
+          "file": "python/07-ux-demos/human-in-the-loop-approval-agent/src/main.py",
+          "lines": "165-174",
+          "snippet": "    builder.add_edge(\n        \"approval_gate\", \"processor\",\n        condition=lambda state: approval_hook.decision in (\"approved\", \"y\", \"yes\"),\n    )\n    builder.add_edge(\n        \"approval_gate\", \"rejection_handler\",\n        condition=lambda state: approval_hook.decision not in (\"approved\", \"y\", \"yes\"),\n    )\n    builder.set_entry_point(\"creator\")\n    builder.set_hook_providers([approval_hook])"
+        },
+        {
+          "file": "python/07-ux-demos/human-in-the-loop-approval-agent/src/main.py",
+          "lines": "70-74",
+          "snippet": "    session_manager = S3SessionManager(\n        session_id=session_id,\n        bucket=SESSION_BUCKET,\n        region_name=AWS_REGION,\n    )"
+        },
+        {
+          "file": "python/07-ux-demos/human-in-the-loop-approval-agent/src/main.py",
+          "lines": "234-242",
+          "snippet": "        elif action == \"respond\":\n            responses = payload[\"responses\"]\n            logger.debug(\"Responding to interrupts: %s\", json.dumps(responses))\n            interrupt_responses = [\n                {\"interruptResponse\": {\"interruptId\": r[\"interrupt_id\"], \"response\": r[\"response\"]}}\n                for r in responses\n            ]\n            logger.debug(\"Sending interrupt responses: %s\", json.dumps(interrupt_responses))\n            result = graph(interrupt_responses)"
+        },
+        {
+          "file": "python/07-ux-demos/human-in-the-loop-approval-agent/src/tools.py",
+          "lines": "146-158",
+          "snippet": "\n    # --- Risk level ---\n    if total_score <= 30:\n        risk_level = \"low\"\n        recommendation = \"auto_approve\"\n    elif total_score <= 60:\n        risk_level = \"medium\"\n        recommendation = \"flag_for_review\"\n    else:\n        risk_level = \"high\"\n        recommendation = \"flag_for_review\"\n\n    tool_context.invocation_state[\"risk_score\"] = total_score"
+        }
+      ]
+    },
+    {
+      "name": "graph execution timeout",
+      "what_it_is": "The order approval graph is built with builder.set_execution_timeout(300), capping the total graph execution at 300 seconds.",
+      "function_in_system": "Bounds the wall-clock time of one graph run across all agent nodes. Otherwise a stuck node or a looping agent keeps the AgentCore invocation busy until the runtime kills it.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/07-ux-demos/human-in-the-loop-approval-agent/src/main.py",
+          "lines": "175",
+          "snippet": "    builder.set_execution_timeout(300)"
+        }
+      ]
+    },
+    {
+      "name": "code-validated node transitions in the triage decision tree",
+      "what_it_is": "The triage agent follows a code-held decision tree. For nodes with a single child or with one child per response option, code picks the next node (keyword match on the user message, else the first child). For other nodes the LLM reports the next node via an XML tag <decision_tree_status next_node=...>, and code applies the transition only when that node ID exists in the tree.",
+      "function_in_system": "Keeps the conversation on the predefined clinical triage path while the LLM generates the dialogue. Otherwise a hallucinated or malformed node ID moves the session into an undefined state.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/07-ux-demos/triage-agent/backend/main.py",
+          "lines": "677-710",
+          "snippet": "            def get_next_node_options(current_node, user_message):\n                \"\"\"Determine possible next nodes based on current node structure and user input\"\"\"\n                \n                # If it's a terminal node, stay at current node\n                if current_node.is_terminal:\n                    return current_node.id\n                \n                # If current node has specific routing logic based on response options\n                if current_node.response_options and current_node.children:\n                    # Create mapping between response options and children\n                    if len(current_node.children) == 1:\n                        # Single child - go to that child\n                        return current_node.children[0]\n                    elif len(current_node.children) == len(current_node.response_options):\n                        # Each response option maps to a child\n                        for i, option in enumerate(current_node.response_options):\n                            if any(keyword.lower() in user_message.lower() for keyword in option.lower().split()):\n                                return current_node.children[i]\n                        # Default to first child if no match\n                        return current_node.children[0]\n                    else:\n                        # Complex routing - let AI decide based on reasoning\n                        children_info = []\n                        for child_id in current_node.children:\n                            child_node = decision_tree.nodes.get(child_id)\n                            if child_node:\n                                children_info.append(f\"{child_id}: {child_node.topic}\")\n                        return children_info  # Return list for AI to choose from\n                \n                # If no children, stay at current node\n                if not current_node.children:\n                    return current_node.id\n                \n                # Default to first child"
+        },
+        {
+          "file": "python/07-ux-demos/triage-agent/backend/main.py",
+          "lines": "828-838",
+          "snippet": "                        # Check for XML in accumulated response for node transitions\n                        if not xml_processed:\n                            decision_tree_match = re.search(r'<decision_tree_status[^>]*next_node=\"([^\"]+)\"[^>]*/?>', accumulated_response)\n                            if decision_tree_match:\n                                xml_processed = True\n                                next_node_id = decision_tree_match.group(1)\n\n                                add_server_log(\"triage\", f\"XML DETECTED: {session_id} -> {next_node_id}\", level=\"info\")\n\n                                if next_node_id in decision_tree.nodes:\n                                    decision_tree.set_current_node(session_id, next_node_id)"
+        }
+      ]
+    },
+    {
+      "name": "MCP startup timeout with degradation to a tool-less agent",
+      "what_it_is": "During server startup the order agent starts the DynamoDB MCP subprocess and calls list_tools_sync inside asyncio.wait_for with MCP_STARTUP_TIMEOUT=10 s and MCP_TOOLS_TIMEOUT=5 s. On timeout or any other startup exception the A2A server keeps running and the order agent operates without tools, commented as 'Graceful degradation: agent stays healthy but can't query DynamoDB'.",
+      "function_in_system": "Sits in the lifespan startup of the order sub-agent. A hanging or failing MCP server blocks neither container startup nor health checks, so the orchestrator can still reach the agent. Otherwise the container hangs at startup or is marked unhealthy and the whole sub-agent becomes unavailable.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/02-deploy/04-agentcore-multi-agent/01-a2a-orchestration/order_agent/a2a_server.py",
+          "lines": "49-50",
+          "snippet": "MCP_STARTUP_TIMEOUT = 10.0  # Max seconds to wait for subprocess\nMCP_TOOLS_TIMEOUT = 5.0     # Max seconds to fetch tool definitions"
+        },
+        {
+          "file": "python/02-deploy/04-agentcore-multi-agent/01-a2a-orchestration/order_agent/a2a_server.py",
+          "lines": "206-222",
+          "snippet": "        # Start the MCP subprocess with timeout protection\n        # Why run_in_executor? The __enter__ call blocks synchronously, which would\n        # freeze the event loop. Running in executor keeps health checks responsive.\n        event_loop = asyncio.get_event_loop()\n        start_mcp_subprocess = mcp_tool_connection.__enter__\n        await asyncio.wait_for(\n            event_loop.run_in_executor(None, start_mcp_subprocess),\n            timeout=MCP_STARTUP_TIMEOUT,\n        )\n        logger.info(\"MCP tool connection started\")\n\n        # Fetch available tools from MCP server (e.g., query_table, scan_table)\n        mcp_tools = await asyncio.wait_for(\n            event_loop.run_in_executor(None, mcp_tool_connection.list_tools_sync),\n            timeout=MCP_TOOLS_TIMEOUT,\n        )\n        logger.info(f\"Loaded {len(mcp_tools)} tools from MCP server\")"
+        },
+        {
+          "file": "python/02-deploy/04-agentcore-multi-agent/01-a2a-orchestration/order_agent/a2a_server.py",
+          "lines": "231-235",
+          "snippet": "    except asyncio.TimeoutError:\n        # Graceful degradation: agent stays healthy but can't query DynamoDB\n        logger.error(\"MCP initialization timed out - agent will operate without tools\")\n    except Exception as e:\n        logger.error(f\"Startup error: {e} - agent will operate without tools\")"
+        }
+      ]
+    },
+    {
+      "name": "lease precondition gate on robot actuation tools",
+      "what_it_is": "Before sending a motion, power, dock or undock command, the Spot tools check that a live LeaseKeepAlive exists (_lease_keepalive.is_alive()). If absent, the command is refused and the tool returns a failure dict whose error message names the recovery step (connect_to_robot with force_take_lease=True or robot_force_take_lease()). The shared helper _execute_robot_command carries the check for all movement, stand, sit and posture tools; robot_toggle_power, robot_dock and robot_undock repeat it.",
+      "function_in_system": "Sits between the agent's tool call and the robot command client, on every actuation path. Blocks commands issued without valid control authority and hands the agent a concrete recovery action for its next turn. Otherwise commands would be sent without a lease and fail inside the SDK with opaque RPC errors, or compete with another client controlling the robot.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/08-edge/strands-spot-agent/spot_mcp_server.py",
+          "lines": "463-469",
+          "snippet": "    if not _lease_keepalive or not _lease_keepalive.is_alive():\n        return {\n            \"success\": False,\n            \"message\": \"No active lease\",\n            \"error\": \"Must have an active lease to send commands. Use connect_to_robot with force_take_lease=True or robot_force_take_lease()\",\n            \"execution_time\": round(time.time() - start_time, 3),\n        }"
+        },
+        {
+          "file": "python/08-edge/strands-spot-agent/spot_mcp_server.py",
+          "lines": "847-853",
+          "snippet": "        if not _lease_keepalive or not _lease_keepalive.is_alive():\n            return {\n                \"success\": False,\n                \"message\": \"No active lease\",\n                \"error\": \"Must have an active lease to change power state. Use connect_to_robot with force_take_lease=True\",\n                \"execution_time\": round(time.time() - start_time, 3),\n            }"
+        },
+        {
+          "file": "python/08-edge/strands-spot-agent/spot_mcp_server.py",
+          "lines": "1599-1605",
+          "snippet": "        if not _lease_keepalive or not _lease_keepalive.is_alive():\n            return {\n                \"success\": False,\n                \"message\": \"No active lease\",\n                \"error\": \"Must have an active lease to send commands. Use connect_to_robot with force_take_lease=True or robot_force_take_lease()\",\n                \"execution_time\": round(time.time() - start_time, 3),\n            }"
+        },
+        {
+          "file": "python/08-edge/strands-spot-agent/spot_mcp_server.py",
+          "lines": "1766-1772",
+          "snippet": "        if not _lease_keepalive or not _lease_keepalive.is_alive():\n            return {\n                \"success\": False,\n                \"message\": \"No active lease\",\n                \"error\": \"Must have an active lease to send commands\",\n                \"execution_time\": round(time.time() - start_time, 3),\n            }"
+        }
+      ]
+    },
+    {
+      "name": "time-bounded velocity commands with automatic stop",
+      "what_it_is": "All six movement tools (forward, backward, strafe left/right, turn left/right) send synchro_velocity_command with end_time_secs=time.time() + duration, default duration 0.6 s (VELOCITY_CMD_DURATION), after which the robot stops on its own. Duration and speed are chosen by the LLM; the code applies no upper bound, the 'maximum recommended' duration and 'maximum safe speed' values appear only in the tool docstrings.",
+      "function_in_system": "Sits at the actuation step of each movement tool call. Each motion is a short, self-expiring command, so the robot stops moving even when the agent loop stalls, crashes or never issues a stop. Otherwise a single velocity command would keep the robot moving until an explicit stop arrives.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/08-edge/strands-spot-agent/spot_mcp_server.py",
+          "lines": "53-55",
+          "snippet": "VELOCITY_BASE_SPEED = 0.5  # m/s\nVELOCITY_BASE_ANGULAR = 0.8  # rad/sec\nVELOCITY_CMD_DURATION = 0.6  # seconds"
+        },
+        {
+          "file": "python/08-edge/strands-spot-agent/spot_mcp_server.py",
+          "lines": "1008-1011, 1039-1044",
+          "snippet": "        duration (float, optional): Duration of movement in seconds. Defaults to 0.6 seconds.\n                                  Must be positive. Maximum recommended: 5.0 seconds.\n        speed (float, optional): Forward velocity in meters per second. Defaults to 0.5 m/s.\n                               Must be positive. Maximum safe speed: 1.5 m/s.\n...\n        cmd = RobotCommandBuilder.synchro_velocity_command(\n            v_x=speed, v_y=0.0, v_rot=0.0\n        )\n        result = _execute_robot_command(\n            \"move_forward\", cmd, end_time_secs=time.time() + duration\n        )"
+        }
+      ]
+    },
+    {
+      "name": "Ctrl+C triggers agent-driven emergency stop and sit",
+      "what_it_is": "The interactive CLI loop catches KeyboardInterrupt and sends the fixed instruction 'Emergency stop the robot and sit down safely' through agent.stream_async before exiting; any exception during this shutdown turn is swallowed.",
+      "function_in_system": "Sits at the outer interactive loop, on user abort. Converts an abrupt program exit into one last agent turn aimed at bringing the robot to a safe resting state. The trigger is code, the actual stop and sit depend on the model choosing robot_stop and robot_sit. Otherwise interrupting the program would leave the robot standing or mid-motion with no controlling client.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/08-edge/strands-spot-agent/agent.py",
+          "lines": "318-329",
+          "snippet": "            except KeyboardInterrupt:\n                print(\"\\n\\n⚠️  Interrupted! Attempting safe shutdown...\")\n                try:\n                    # Attempt to safely stop robot if connected\n                    print(\"Sending emergency stop command...\")\n                    await process_streaming_command(\n                        agent, \"Emergency stop the robot and sit down safely\"\n                    )\n                except:\n                    pass\n                print(\"Exiting robot control agent.\")\n                break"
+        }
+      ]
+    },
+    {
+      "name": "prompt-level robot safety protocol",
+      "what_it_is": "The system prompt prescribes an operational protocol: before any command check connection and robot status (power, lease, estop) and assess space; during operation use progressive commands and regular status checks; on emergencies call robot_stop, then an estop, then sit and power off. The prompt names robot_toggle_estop(), which is absent from the agent's tool list, and the server skips E-stop setup entirely, so the second emergency step refers to a tool the agent cannot call.",
+      "function_in_system": "Shapes the order of tool calls in every turn so that status verification precedes actuation and failures lead to a stop sequence. Effectiveness depends on the model following the instructions; nothing in code checks that a status call preceded a movement. Otherwise the agent may issue motion commands to a robot in an unknown or unsafe state.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "python/08-edge/strands-spot-agent/agent.py",
+          "lines": "97-115",
+          "snippet": "## Operational Protocol\n\n### Before Any Robot Commands:\n1. **Connection Check**: Ensure robot connection is established via connect_to_robot()\n2. **Status Verification**: Check robot status including power, lease, and estop states\n3. **Safety Assessment**: Verify adequate space and safe operating conditions\n4. **User Intent**: Confirm understanding of user's goals and constraints\n\n### During Operations:\n1. **Progressive Commands**: Start with simple, safe commands before complex maneuvers\n2. **Status Monitoring**: Regularly check robot status during extended operations\n3. **Error Handling**: Immediately address any error conditions or unexpected behavior\n4. **User Communication**: Keep user informed of robot actions and status changes\n\n### Emergency Procedures:\n1. **Immediate Stop**: Use robot_stop() for immediate motion cessation\n2. **Emergency Stop**: Use robot_toggle_estop() for complete system lockdown\n3. **Safe Shutdown**: Execute robot_sit() followed by power off for safe shutdown\n4. **Status Assessment**: Check robot_get_status() to understand system state"
+        },
+        {
+          "file": "python/08-edge/strands-spot-agent/spot_mcp_server.py",
+          "lines": "217-223",
+          "snippet": "        # Skip E-stop setup - not needed for basic control and causes warnings\n        # E-stop configuration requires motors to be off, which conflicts when\n        # another client already has control. Basic safety is maintained through\n        # the robot's built-in safety systems.\n        _estop_client = None\n        _estop_endpoint = None\n        LOGGER.info(\"Skipping E-stop setup (not required for basic operation)\")"
+        }
+      ]
+    },
+    {
+      "name": "read-only mode flag for the database MCP server",
+      "what_it_is": "The Aurora DSQL sample starts the awslabs aurora-dsql MCP server via uvx and appends --allow-writes to its arguments unless the CLI flag --ro is passed. With --ro the server is launched without write permission, so the agent's database tools are restricted to reads. The write restriction itself is enforced inside the external MCP server; the sample only selects the flag.",
+      "function_in_system": "Sits at tool construction, before the agent is created, and fixes the scope of the database tools for the whole run. Prevents a misdirected agent from modifying or deleting data when the operator chooses read-only mode. Otherwise every run holds write access to the cluster, and a wrong tool call can alter production data.",
+      "activation": "opt_in",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "python/03-integrate/databases/aurora-dsql/main.py",
+          "lines": "40-42, 61-63",
+          "snippet": "    parser.add_argument(\n        \"--ro\", action=\"store_true\", help=\"Run in read-only mode (no writes allowed)\"\n    )\n...\n    # Add --allow-writes flag if not in read-only mode\n    if not args.ro:\n        mcp_args.append(\"--allow-writes\")"
+        }
+      ]
+    }
+  ]
+}

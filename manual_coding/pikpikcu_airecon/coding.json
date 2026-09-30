@@ -1,0 +1,1601 @@
+{
+  "repo": "pikpikcu/airecon",
+  "commit": "9a21453459",
+  "system_type": "application",
+  "system_type_reason": "End-user autonomous penetration-testing agent with TUI client.",
+  "repo_overview": {
+    "summary": "Autonomous local penetration-testing agent: a self-hosted Ollama LLM drives a RECON -> ANALYSIS -> EXPLOIT -> REPORT pipeline, executing tools inside a Kali Linux Docker sandbox plus browser automation, a custom fuzzer, native Caido proxy integration, Semgrep and a local SQLite knowledge base. A Textual TUI is the client; it talks to a FastAPI proxy server that hosts the AgentLoop. Fully offline, no API keys. The loop runs periodic checkpoints (phase eval every 5, self-eval every 10, context compression every 15 iterations) and persists sessions, memory and learning state to disk.",
+    "components": [
+      {
+        "path": "airecon/__main__.py",
+        "purpose": "CLI entry point (argparse): 'start' launches TUI+proxy, 'proxy' starts the server only, '--list' enumerates saved sessions"
+      },
+      {
+        "path": "airecon/proxy/",
+        "purpose": "FastAPI server (server.py) plus backend services: docker (Kali sandbox), ollama (LLM client), caido_client, fuzzer, browser, semgrep, memory (SQLite), searxng/web_search, mcp, config, correlation, reporting, filesystem"
+      },
+      {
+        "path": "airecon/proxy/agent/",
+        "purpose": "agent core (~50k LOC, ~69 modules): the agentic loop (loop*.py, loop_tool_cycle.py holds the iteration loop), tool executors (executors_*.py), models.py, output_parser.py, planning (chain_planner, pipeline), adaptive_learning, rate_limiter, validators, verification, session*, and the subagent/agent_graph multi-agent machinery"
+      },
+      {
+        "path": "airecon/tui/",
+        "purpose": "Textual TUI frontend: app.py, buddy.py, startup.py and widgets/ (chat, input, workspace, status, file_preview, path_completer)"
+      },
+      {
+        "path": "airecon/containers/",
+        "purpose": "Kali Docker sandbox definition: Dockerfile, docker-entrypoint.sh, caido-setup, settings.yml"
+      },
+      {
+        "path": "airecon/logger.py",
+        "purpose": "logging setup"
+      }
+    ]
+  },
+  "agentic_loop": {
+    "verdict": "agentic",
+    "evidence": [
+      {
+        "file": "airecon/proxy/agent/loop_tool_cycle.py",
+        "lines": "299-300",
+        "snippet": "async def _run_iteration_loop(self, cfg: Any) -> AsyncIterator[AgentEvent]:\n    while self.state.iteration < self.state.max_iterations:"
+      },
+      {
+        "file": "airecon/proxy/agent/loop_tool_cycle.py",
+        "lines": "1478-1481, 1497-1501",
+        "snippet": "if tn == \"browser_action\":\n    s, d, r, o = await self._execute_tool_with_timeout(\n        tn, args, cfg, \"browser_action\"\n    )\n...\nelif tn == \"run_parallel_agents\":\n    s, d, r, o = await self._execute_tool_with_timeout(\n        tn, args, cfg, \"dispatch\"\n    )"
+      },
+      {
+        "file": "airecon/proxy/agent/loop_tool_cycle.py",
+        "lines": "1806",
+        "snippet": "async for _evt in self._finalize_tool_results("
+      }
+    ],
+    "reasoning": {
+      "drives_next_action": "Each iteration streams the LLM response into thinking/content/tool_calls_acc (loop_tool_cycle.py:349-357), then dispatches the model-emitted tool calls via _execute_tool_with_timeout (loop_tool_cycle.py:1478-1508); the LLM's output selects the next tool (execute, browser_action, http_observe, run_parallel_agents, ...).",
+      "consumes_feedback": "Tool results are folded back through _finalize_tool_results (loop_tool_cycle.py:1806) and observation/system messages are appended to self.state.conversation, which is re-sent to Ollama on the next iteration.",
+      "multi_turn_until_termination": "while self.state.iteration < self.state.max_iterations (loop_tool_cycle.py:300) iterates across many turns until an iteration/token limit, a user stop, or a fatal Ollama error emits a 'done' event."
+    }
+  },
+  "topology": {
+    "verdict": "multi-agent",
+    "evidence": [
+      {
+        "file": "airecon/proxy/agent/loop_tool_cycle.py",
+        "lines": "1497-1501",
+        "snippet": "elif tn == \"run_parallel_agents\":\n    s, d, r, o = await self._execute_tool_with_timeout(\n        tn, args, cfg, \"dispatch\"\n    )"
+      },
+      {
+        "file": "airecon/proxy/agent/subagent.py",
+        "lines": "241-249",
+        "snippet": "async def bounded_run(target: str) -> tuple[str, SessionData]:\n    session = SessionData(target=target)\n    coordinator = SubagentCoordinator(\n        ollama=ollama, engine=self.engine, session=session\n    )\n    async with semaphore:"
+      },
+      {
+        "file": "airecon/proxy/agent/subagent.py",
+        "lines": "49-56",
+        "snippet": "graph = create_default_graph(target, prompt, recon_mode=recon_mode)\ngraph.ollama = self.ollama\ngraph.engine = self.engine"
+      }
+    ],
+    "justification": "The parent AgentLoop exposes a run_parallel_agents tool (loop_tool_cycle.py:1497) that spawns a ParallelAgentRunner; each target gets its own SubagentCoordinator (subagent.py:243) running an AgentGraph via create_default_graph with role nodes (AgentRole.SCOUT/EXPLOIT, constants.py:358-365), each subagent driving its own Ollama LLM loop with a restricted toolset (executors_dispatch.py:100). A boss agent delegating to helper agents that each run their own LLM loop is multi-agent even though the delegation is surfaced as a tool.",
+    "verdict_raw": "multi-agent"
+  },
+  "resilience": [
+    {
+      "name": "per-tool execution timeout",
+      "what_it_is": "Every tool invocation is wrapped in asyncio.wait_for with per_tool_timeout_seconds (default 600s; fuzzer tools get their own, longer fuzzer_quick/deep_timeout_seconds). On expiry a TimeoutError is caught and turned into a structured failure result (success=False, timed_out=True, hint to split the task).",
+      "function_in_system": "Sits around every tool call inside a single iteration (loop_tool_cycle.py:139), before the result feeds back into the conversation. Bounds any single tool (docker exec in the Kali sandbox, the fuzzer, browser automation) so a hang becomes a normal failed step and the loop continues. Otherwise one hanging tool freezes the entire autonomous run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "115-125, 139",
+          "snippet": "timeout = float(getattr(cfg, \"per_tool_timeout_seconds\", 600.0))\nif tool_name in {\"quick_fuzz\", \"advanced_fuzz\", \"deep_fuzz\"}:\n    ...\n    timeout = max(timeout, fuzz_timeout)\n...\ns, d, r, o = await asyncio.wait_for(coro, timeout=timeout)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "167-181",
+          "snippet": "except asyncio.TimeoutError:\n    logger.error(\"Tool '%s' timed out after %.0fs (per_tool_timeout_seconds)\", tool_name, timeout)\n    ...\n    return (False, timeout, {\"success\": False, \"error\": f\"Tool '{tool_name}' timed out after {timeout:.0f}s. Consider breaking the task into smaller steps...\", \"timed_out\": True,"
+        }
+      ]
+    },
+    {
+      "name": "Ollama stream chunk-timeout watchdog",
+      "what_it_is": "While consuming the streamed LLM response, the time since the last chunk is tracked; if no chunk arrives for ollama_chunk_timeout seconds the stream is aborted (break) and the surrounding retry logic re-attempts the query.",
+      "function_in_system": "Sits inside the per-iteration streaming read from Ollama (loop_tool_cycle.py:756-769). Detects a silently stalled generation (server wedged, no tokens) and turns it into a retryable stream error. Otherwise a stalled stream blocks the iteration indefinitely with no progress and no error.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "736, 756-769",
+          "snippet": "_CHUNK_TIMEOUT = cfg.ollama_chunk_timeout\n...\nasync for chunk in _stream_gen:\n    _now = time.monotonic()\n    if _now - _last_chunk_time > _CHUNK_TIMEOUT:\n        logger.error(\"OLLAMA STREAM TIMEOUT: no chunk for %.0fs (iter=%d) — aborting\", _CHUNK_TIMEOUT, self.state.iteration)\n        yield AgentEvent(type=\"text\", data={\"content\": f\"[SYSTEM: Ollama stream timeout after {_CHUNK_TIMEOUT}s — retrying]\"})\n        break"
+        }
+      ]
+    },
+    {
+      "name": "tiered LLM-stream retry with progressive backoff",
+      "what_it_is": "A broad except around the stream loop classifies errors and retries with per-class caps and escalating sleeps: connection-refused (waits 10/30/60/120s, up to 4 attempts), timeout (up to 3 attempts), and a generic fallback (waits 5/15/30/60s, up to 4 attempts, incrementing _consecutive_failures). After the caps are exhausted it emits a clear terminal error with remediation.",
+      "function_in_system": "Wraps the whole Ollama query/stream inside one iteration (loop_tool_cycle.py:881-1090). Absorbs transient LLM-infrastructure and network failures so the autonomous run survives an Ollama restart or a flaky tunnel. Otherwise any single connection hiccup crashes the entire multi-hour session.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "986-1010",
+          "snippet": "elif _is_conn_refused and _stream_attempt < 4:\n    _conn_waits = [10, 30, 60, 120]\n    wait_s = _conn_waits[min(_stream_attempt, len(_conn_waits) - 1)]\n    ...\n    await asyncio.sleep(wait_s)\n    ...\n    continue"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "1046-1078",
+          "snippet": "elif _stream_attempt < 4:\n    _backoff_waits = [5, 15, 30, 60]\n    wait_s = _backoff_waits[min(_stream_attempt, len(_backoff_waits) - 1)]\n    self._consecutive_failures += 1\n    ...\n    await asyncio.sleep(wait_s)\n    ...\n    continue"
+        }
+      ]
+    },
+    {
+      "name": "VRAM-crash adaptive context downscaling with recovery mode",
+      "what_it_is": "OOM/runner-crash signatures (HTML error page, 'out of memory', 'llm runner process no longer alive', 'signal: killed', HTTP 500) are detected and answered by progressively degrading: num_ctx small -> /2 -> /4 -> 4096, conversation truncated to 80 -> 50 -> 30 -> 20 messages, num_predict cap reduced, escalating waits (0/5/10/30s), session saved, and a [RECOVERY MODE — TOOL CALL ONLY] system message injected (up to 4 attempts per iteration).",
+      "function_in_system": "Sits in the stream-error handler of each iteration (loop_tool_cycle.py:902-982). Instead of only retrying, it shrinks the model's memory footprint so a resource-exhausted local Ollama can keep running on weak hardware (the project's core use case: 9B on a T4). Otherwise a single VRAM exhaustion kills the run on exactly the low-end setups AIRecon targets.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "883-897, 902-934",
+          "snippet": "_is_vram_crash = (\n    \"invalid character '<'\" in err_str or ... or \"out of memory\" in err_lower or \"llm runner process no longer alive\" in err_lower or \"signal: killed\" in err_lower or \"500 internal server error\" in err_lower ...)\n...\nif _is_vram_crash and _vram_retries_this_iter < 4:\n    self._vram_crash_count += 1\n    if self._vram_crash_count == 1:\n        _new_ctx = cfg.ollama_num_ctx_small; _max_msgs = 80; _wait_s = 0\n    elif ... _new_ctx = max(4096, cfg.ollama_num_ctx_small // 2); _max_msgs = 50; _wait_s = 5"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "951-982",
+          "snippet": "self.state.truncate_conversation(max_messages=_max_msgs)\nrecovery_ctx = self._build_recovery_state_context()\n...\nself.state.conversation.append({\"role\": \"system\", \"content\": (\"[SYSTEM: RECOVERY MODE — TOOL CALL ONLY]\\nA crash occurred. Your next response MUST be a tool call. ...\")})"
+        }
+      ]
+    },
+    {
+      "name": "token-budget hard limit with LLM context compression",
+      "what_it_is": "Each iteration recomputes used tokens; when usage crosses 85% of the adaptive context window it aggressively compresses old tool outputs, rebuilds and pins a findings summary, then runs state.compress_with_llm (LLM-summarized history, keeping 35-55 recent messages). A second call site in the iteration prelude runs the same compression with model-size-aware thresholds (large-qwen models get higher pressure/compress thresholds of 0.45/0.38 vs 0.35/0.30) and keeps 30-40 recent messages; if compress_with_llm raises it falls back to truncating the conversation, and a tiered max-message cap (150/120/100/80 by iteration age) plus critical-findings re-injection bound context further.",
+      "function_in_system": "Runs at the top of each iteration before querying the model (loop_tool_cycle.py:384-416). Keeps the conversation inside the model's context window so it does not overflow and start forgetting or erroring. The compression implementation lives in models.py (state.compress_with_llm); this is the trigger site. Otherwise an ever-growing history silently exceeds num_ctx and the agent loses earlier findings. The prelude call site (loop_cycle_prelude.py:1372-1493) adds a graceful fallback: on compression failure it hard-truncates the history instead of letting the pass crash.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "381-384, 401-416",
+          "snippet": "_ctx_used = self._recompute_used_tokens_from_conversation()\n_budget_hard_limit = int(adaptive_num_ctx * 0.85)  # 85% safety margin\nif adaptive_num_ctx > 0 and _ctx_used > _budget_hard_limit:\n    ...\n    self._compress_old_tool_outputs(aggressive=True)\n    pinned = self._build_compressed_findings_summary()\n    ...\n    await self.state.compress_with_llm(self.ollama, keep_recent=_keep_recent, num_ctx=_compress_ctx, num_predict=1024, ...)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "1372-1397",
+          "snippet": "_presummary_ratio = self.state.token_usage.get(\"used\", 0) / max(\n    self._adaptive_num_ctx or cfg.ollama_num_ctx, 1\n)\n_is_large_qwen = \"qwen\" in _model_name and any(\n    marker in _model_name for marker in (\"122b\", \"120b\", \"72b\")\n)\n_pressure_threshold = 0.45 if _is_large_qwen else 0.35\n_compress_threshold = 0.38 if _is_large_qwen else 0.30\n...\nif _compress_now:\n    self._compress_old_tool_outputs(\n        aggressive=_pressure_compress or self.state.iteration > 50\n    )\n    pinned = self._build_compressed_findings_summary()"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "1441-1462",
+          "snippet": "try:\n    await self.state.compress_with_llm(\n        self.ollama,\n        keep_recent=_keep_recent,\n        num_ctx=_compress_ctx,\n        num_predict=1024,\n        phase=current_phase,\n    )\n    ...\nexcept Exception as compress_err:\n    logger.warning(\n        \"LLM compression failed (%s) — using aggressive truncate\",\n        str(compress_err)[:100],\n    )\n    self.state.conversation = self.state.conversation[:50]"
+        }
+      ]
+    },
+    {
+      "name": "iteration budget cap with approaching-limit warning",
+      "what_it_is": "The main loop runs while state.iteration < state.max_iterations (a hard cap, with a separate _CTF_MAX_ITERATIONS). When is_approaching_limit() becomes true a one-time [SYSTEM: N iterations remaining] message is injected so the model can wrap up.",
+      "function_in_system": "The loop's top-level termination guard (loop_tool_cycle.py:300) plus a budget-awareness nudge (loop_tool_cycle.py:341-348). Bounds cost and wall-clock of an autonomous session and prevents an unbounded loop. Otherwise a stuck agent keeps burning LLM calls and compute indefinitely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "300",
+          "snippet": "while self.state.iteration < self.state.max_iterations:"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "341-348",
+          "snippet": "if self.state.is_approaching_limit() and not self.state.warnings_sent:\n    self.state.warnings_sent = True\n    remaining = self.state.max_iterations - self.state.iteration\n    self.state.conversation.append({\"role\": \"system\", \"content\": f\"[SYSTEM: {remaining} iterations remaining]\"})"
+        }
+      ]
+    },
+    {
+      "name": "post-crash tool-call-only forcing",
+      "what_it_is": "After any stream crash/retry the counter _recovery_force_tool_calls is set (>=1, >=2 for VRAM crashes). While it is positive, downstream inference/context building forces the next responses to be tool calls and suppresses analysis-only text (it is also folded into the _is_struggling signal).",
+      "function_in_system": "Trigger sits in the stream-error handlers (loop_tool_cycle.py:959, 1014, 1041, 1075); the effect is consumed in loop_inference.py:113 and loop_context.py:328. After a crash it steers the model back to concrete action instead of letting it spin on narration. Otherwise a recovered agent can stall producing text-only turns that make no progress.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "959-961",
+          "snippet": "self._recovery_force_tool_calls = max(\n    self._recovery_force_tool_calls, 2\n)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_inference.py",
+          "lines": "111-115",
+          "snippet": "_is_struggling = (\n    self._stagnation_iterations >= stagnation_threshold\n    or self._recovery_force_tool_calls > 0\n    or self._consecutive_failures >= 2\n    or self._no_tool_iterations >= 1"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_context.py",
+          "lines": "328",
+          "snippet": "if self._recovery_force_tool_calls > 0:\n    return \"\""
+        }
+      ]
+    },
+    {
+      "name": "user-input request cooldown (HITL rate limit)",
+      "what_it_is": "The request_user_input tool checks time since the last request against _user_input_cooldown; if called too soon it returns a rate-limited failure (success=False, retry_after seconds) instead of prompting the human.",
+      "function_in_system": "Guards the human-in-the-loop escape hatch inside the tool dispatch (loop_tool_cycle.py:1644-1690). Stops the model from spamming the operator with repeated input prompts, keeping the HITL channel usable. Otherwise a confused model could flood the user with input requests and stall the session on human attention.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "1644-1668",
+          "snippet": "elif tn == \"request_user_input\":\n    # Rate limiting: prevent spamming user with input requests\n    _now = _time_mod.time()\n    if _now - self._last_user_input_time < self._user_input_cooldown:\n        _remaining = self._user_input_cooldown - (_now - self._last_user_input_time)\n        ...\n        s, d, r, o = (False, 0.0, {\"success\": False, \"error\": f\"Rate limited. Please wait {int(_remaining)} seconds ...\", \"retry_after\": int(_remaining)}, None)"
+        }
+      ]
+    },
+    {
+      "name": "periodic multi-channel state checkpointing",
+      "what_it_is": "Within one housekeeping pass, four independent auto-saves fire on their own iteration intervals, each guarded to run once per interval: conversation sync to session (_conversation_save_interval), full session persistence via _save_session_persistence (_session_save_interval), realtime memory write (_memory_save_interval), and a save_session whenever scan work exists (every 5 iterations).",
+      "function_in_system": "Runs inside _run_iteration_housekeeping before each model query (loop_cycle_prelude.py:326-367, 1369-1370). Flushes agent state to disk at several cadences so a long autonomous run keeps a recent recoverable checkpoint. Otherwise a crash mid-run discards every finding and all conversation progress since process start.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "326-341",
+          "snippet": "if (\n    self._session\n    and self.state.iteration % self._conversation_save_interval == 0\n    and self.state.iteration != self._last_conversation_save_iteration\n):\n    self._sync_conversation_to_session()\n    try:\n        self._schedule_token_usage_snapshot_save()\n    ...\n    self._last_conversation_save_iteration = self.state.iteration"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "343-358",
+          "snippet": "if (\n    self._session\n    and self._session.target\n    and self.state.iteration > 0\n    and self.state.iteration % self._session_save_interval == 0\n    and self.state.iteration != self._last_session_save_iteration\n    and hasattr(self, \"_save_session_persistence\")\n):\n    try:\n        await self._save_session_persistence()"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "360-367",
+          "snippet": "if (\n    self._session\n    and self._session.target\n    and self.state.iteration % self._memory_save_interval == 0\n    and self.state.iteration != self._last_memory_save_iteration\n):\n    self._save_to_memory_realtime()\n    self._last_memory_save_iteration = self.state.iteration"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "1369-1370",
+          "snippet": "if self.state.iteration % 5 == 0 and self._has_scan_work():\n    save_session(self._session)"
+        }
+      ]
+    },
+    {
+      "name": "adaptive throttling on slow backend responses",
+      "what_it_is": "A rolling list of inter-request response times is kept; when the average exceeds 30 seconds the loop sleeps min(avg/10, 2.0) seconds before continuing.",
+      "function_in_system": "Runs once per housekeeping pass (loop_cycle_prelude.py:708-727). Adds backpressure when the local Ollama backend is overloaded, spacing out requests so a struggling model server can recover. Otherwise the agent keeps hammering an already-saturated backend and drives response times higher.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "708-727",
+          "snippet": "current_time = time.time()\nif self._last_request_time > 0:\n    response_time = current_time - self._last_request_time\n    self._request_times.append(response_time)\n    avg_response_time = (\n        sum(self._request_times) / len(self._request_times)\n        if self._request_times\n        else 0\n    )\n    if avg_response_time > 30:\n        logger.warning(\n            \"Slow response detected (avg: %.1fs), implementing throttling\",\n            avg_response_time,\n        )\n        await asyncio.sleep(min(avg_response_time / 10, 2.0))"
+        }
+      ]
+    },
+    {
+      "name": "idempotent system-message refresh (dedup before reinject)",
+      "what_it_is": "Every periodic system directive is injected by first filtering the conversation to drop any earlier message whose content starts with the same [SYSTEM: ...] prefix, then appending the freshly built one. The pattern repeats at roughly fifteen injection sites (objective focus, quality scoreboard, learned patterns, execution checkpoint, pinned context, recent executions, caido reminder, exploration/dataset/web-search hints).",
+      "function_in_system": "Applied throughout _run_iteration_housekeeping wherever a recurring hint is (re)injected (loop_cycle_prelude.py:676-685, 738-745, 1030-1036, 1400-1404, 1498-1507, 1536-1540). Keeps exactly one live copy of each recurring directive so repeated injection across hundreds of iterations does not accumulate duplicate or stale system messages. Otherwise every interval appends another copy and the context fills with outdated directives that crowd out real content.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "738-745",
+          "snippet": "self.state.conversation = [\n    msg\n    for msg in self.state.conversation\n    if not (\n        msg.get(\"content\", \"\").startswith(\"[SYSTEM: OBJECTIVE FOCUS\")\n        or msg.get(\"content\", \"\").startswith(\"<objective_focus\")\n    )\n]"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "1030-1036",
+          "snippet": "self.state.conversation = [\n    msg\n    for msg in self.state.conversation\n    if not msg.get(\"content\", \"\").startswith(\n        \"[SYSTEM: EXECUTION CHECKPOINT\"\n    )\n]"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "676-685",
+          "snippet": "self.state.conversation = [\n    m\n    for m in self.state.conversation\n    if not str(m.get(\"content\", \"\")).startswith(\n        \"[SYSTEM: LEARNED PATTERNS\"\n    )\n]"
+        }
+      ]
+    },
+    {
+      "name": "graduated budget-pressure escalation with forced REPORT",
+      "what_it_is": "The ratio iteration/max_iterations drives four escalating pressure levels: L1 at 0.70 (prioritise high-value untested vectors), L2 at 0.85 (consolidate for report), L3 at 0.95 (stop discovery, call report tool), L4 at 1.0 which force-sets PipelinePhase.REPORT and injects a [BUDGET EXHAUSTED] stop-and-report order. Each level fires once via _budget_pressure_level.",
+      "function_in_system": "Runs each housekeeping pass after the persistence block (loop_cycle_prelude.py:553-629). Steers the agent to wind down and produce a final report before the hard iteration cap ends the run. Otherwise the run hits the cap mid-exploration and terminates with no written report of what was found. Complements the hard while-loop cap and single approaching-limit nudge coded in loop_tool_cycle.py.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "553-573",
+          "snippet": "_budget_ratio = self.state.iteration / max(self.state.max_iterations, 1)\nif _budget_ratio >= 1.0 and self._budget_pressure_level < 4:\n    self._budget_pressure_level = 4\n    ...\n    if self.pipeline and current_phase.value != \"REPORT\":\n        self.pipeline.set_phase(PipelinePhase.REPORT)\n    self.state.conversation.append(\n        {\n            \"role\": \"system\",\n            \"content\": (\n                \"[SYSTEM: BUDGET EXHAUSTED] ... call the report tool ...\"\n            ),\n        }\n    )"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "574-592",
+          "snippet": "elif _budget_ratio >= 0.95 and self._budget_pressure_level < 3:\n    self._budget_pressure_level = 3\n    remaining = self.state.max_iterations - self.state.iteration\n    ...\n    \"[SYSTEM: BUDGET CRITICAL — {remaining} iterations left] \"\n    \"STOP all new discovery. You must now: (1) call the report \"\n    \"tool with all confirmed findings, (2) advance to REPORT phase\""
+        }
+      ]
+    },
+    {
+      "name": "dynamic anti-repetition coverage rotation",
+      "what_it_is": "_build_dynamic_anti_loop_rotation builds an anti-loop directive from live session data (tested vuln classes from the evidence log and session vulnerabilities, untested classes from the exploration mixin, recent tools, phase) and rotates through five framings by iteration % 5. It is injected together with the surface-coverage hint on every iteration after iteration 2. Related lighter variants are the mandatory plan revision (agent_plan_revision_interval) and the CTF strategy audit at 33/66 percent of budget.",
+      "function_in_system": "Injected at the top of each housekeeping pass (loop_cycle_prelude.py:225-269, builder 135-217). Pushes the model off already-covered vuln classes toward untested ones so it stops re-running the same tests. Otherwise a local model loops on a handful of familiar checks and burns the iteration budget without widening coverage.",
+      "activation": "default_on",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "225-269",
+          "snippet": "tracker = getattr(self, \"_surface_tracker\", None)\nif tracker is not None and self.state.iteration > 2:\n    ...\n    _full = (\n        _hint\n        + \"\\n\"\n        + _build_dynamic_anti_loop_rotation(\n            tested_vuln_classes=tested,\n            untested_vuln_classes=untested,\n            phase=phase_name,\n            iteration=self.state.iteration,\n            recent_tools=getattr(self, \"_recent_tool_names\", []),\n        )\n    )\n    self.state.conversation.append({\"role\": \"system\", \"content\": _full})"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "159-167",
+          "snippet": "rotation_idx = iteration % 5\nrotations = [\n    (\n        \"[ANTI-REPETITION: Think like a real pentester ...]\\n\"\n        f\"Already tested: {tested_str}\\n\"\n        f\"Still untested: {untested_str}\\n\"\n        \"Do NOT re-test what you already covered. Pick from the untested classes above.\\n\""
+        }
+      ]
+    },
+    {
+      "name": "execution checkpoint forcing a tool call (anti-text-stall)",
+      "what_it_is": "Every 5 iterations an [EXECUTION CHECKPOINT] system message is injected demanding that the next response be a tool call and stating that text or code blocks do nothing. A separate focus trigger fires when _no_tool_iterations reaches 2, refreshing objective focus in the same situation.",
+      "function_in_system": "Runs on the mod-5 checkpoint inside housekeeping (loop_cycle_prelude.py:1037-1050) with the no-tool trigger at 733-737. Breaks the failure mode where the model emits plans or narration instead of executing, which would otherwise stall the loop with no state change while still consuming iterations.",
+      "activation": "default_on",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "1037-1050",
+          "snippet": "self.state.conversation.append(\n    {\n        \"role\": \"system\",\n        \"content\": (\n            f\"[SYSTEM: EXECUTION CHECKPOINT — Itr {self.state.iteration}]\"\n            f\"{session_info}\\n\\n\"\n            f\"{pipeline_prompt}\"\n            \"MANDATORY ACTION: Your NEXT response MUST be a tool call ... \"\n            \"Writing commands as text does nothing. Only tool calls execute. \"\n            \"If all objectives are complete, output [TASK_COMPLETE].\"\n        ),\n    }\n)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "733-737",
+          "snippet": "_focus_trigger = self._no_tool_iterations >= 2 or (\n    not self._ctf_mode\n    and (self.state.iteration == 1 or self.state.iteration % 10 == 0)\n)"
+        }
+      ]
+    },
+    {
+      "name": "LLM recon-validation noise filter with whitelist guard",
+      "what_it_is": "Every 6 iterations in ANALYSIS/EXPLOIT phases, a low-temperature Ollama call is asked to keep only high-signal urls/subdomains/hosts and drop noise, returning strict JSON. The response is passed through _sanitize, which accepts an item only if it exactly matches one already in the input set, so kept assets are whitelisted against the live recon data.",
+      "function_in_system": "Runs in housekeeping when phase is ANALYSIS or EXPLOIT and 6 iterations have passed since the last validation (loop_cycle_prelude.py:390-396, sanitize 488-503). Prunes recon noise so downstream analysis focuses on relevant endpoints, and the whitelist blocks the model from injecting invented urls/hosts into session state. Otherwise a hallucinated or noisy asset list would waste context and steer testing at nonexistent targets.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "390-396",
+          "snippet": "if (\n    phase_name in (\"ANALYSIS\", \"EXPLOIT\")\n    and self._session\n    and hasattr(self, \"ollama\")\n):\n    last_validation = getattr(self._lifecycle, \"last_context_validation\", 0)\n    if self.state.iteration - last_validation >= 6:"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "488-503",
+          "snippet": "def _sanitize(items: Any, allowed: list[str]) -> list[str]:\n    if not isinstance(items, list):\n        return []\n    allowed_set = {str(x) for x in allowed}\n    result: list[str] = []\n    seen: set[str] = set()\n    for item in items:\n        if not isinstance(item, str):\n            continue\n        candidate = item.strip()\n        if not candidate or candidate in seen:\n            continue\n        if candidate in allowed_set:\n            result.append(candidate)\n            seen.add(candidate)\n    return result"
+        }
+      ]
+    },
+    {
+      "name": "output-file manifest to prevent redundant scans",
+      "what_it_is": "At iterations 1 and 3 (non-CTF), the workspace subdirs (output, recon, scan_results, findings, reports, tools) are scanned for existing files and a [OUTPUT FILE MANIFEST] message is injected listing them with an instruction to read existing files before re-running any scan.",
+      "function_in_system": "Runs early in housekeeping (loop_cycle_prelude.py:282-319). Makes prior artifacts visible before the model launches discovery tools so it reads cached results instead of repeating expensive scans. Otherwise the agent re-runs recon it already completed in an earlier phase or resumed session, spending time and iterations on duplicate work.",
+      "activation": "default_on",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "282-309",
+          "snippet": "if self.state.iteration in (1, 3) and self._session and not self._ctf_mode:\n    ...\n    for _subdir in (\n        \"output\", \"recon\", \"scan_results\", \"findings\", \"reports\", \"tools\",\n    ):\n        _d = _workspace / _subdir\n        if _d.is_dir():\n            _files = sorted([f.name for f in _d.iterdir() if f.is_file()])[:15]\n            ...\n    if _manifest_parts:\n        _manifest = (\n            \"[SYSTEM: OUTPUT FILE MANIFEST — these artifacts already exist]\\n\"\n            \"READ existing files with read_file before re-running any scan.\\n\"\n            \"DO NOT re-scan if the information you need is already in these files.\\n\"\n            + \"\\n\".join(f\"  {p}\" for p in _manifest_parts)\n        )"
+        }
+      ]
+    },
+    {
+      "name": "static-asset abuse guard (anti-waste redirect)",
+      "what_it_is": "_detect_static_asset_abuse parses the target URL of execute/quick_fuzz/advanced_fuzz/deep_fuzz calls; if the last path segment ends in a pure static extension (loaded from file_extensions.json) it returns a [STATIC ASSET NOTICE] steering the agent to fuzz the parent directory instead, and if it is a JS/TS file it returns a [JS FILE RECON] block steering it to source analysis (API routes, secrets, source maps).",
+      "function_in_system": "Runs in _finalize_tool_results after each fuzz/execute tool result (loop_cycle_post.py:674-681); the note is prepended to the tool output fed back to the model. Catches the failure mode of the agent wasting iterations fuzzing files that have no attack surface. Otherwise the agent burns time and context brute-forcing static assets and may hallucinate findings from them.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "64-82",
+          "snippet": "parsed = urlparse(target_url)\npath = parsed.path.rstrip(\"/\")\nlast_segment = path.rsplit(\"/\", 1)[-1] if \"/\" in path else path\nif \".\" in last_segment:\n    ext = last_segment.rsplit(\".\", 1)[-1].lower()\n    if ext in _PURE_STATIC_EXTS:\n        parent_dir = target_url.rsplit(\"/\", 1)[0] + \"/\"\n        return (\n            f\"[STATIC ASSET NOTICE] You are testing '{target_url}' which is a \"\n            f\"static asset file (.{ext}). The file itself has ZERO attack surface.\\n\\n\"\n            f\"BUT the directory is fuzzable! Try:\\n\""
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "674-681",
+          "snippet": "if tool_name in (\"execute\", \"quick_fuzz\", \"advanced_fuzz\", \"deep_fuzz\"):\n    _static_guard_note = self._check_static_asset_abuse(\n        tool_name, arguments, success\n    )\n    if _static_guard_note:\n        content_str = _static_guard_note + \"\\n\\n\" + content_str"
+        }
+      ]
+    },
+    {
+      "name": "ephemeral system-context pruning (per-type dedup cap)",
+      "what_it_is": "_prune_stale_system_context, called every 10 iterations, walks the conversation in reverse and keeps only the 2 most recent system messages of each prunable prefix type ([HTTP BASELINE], [HTTP RESPONSE SNAPSHOT], [HYPOTHESIS CHECK], [NEW EVIDENCE], [BEHAVIORAL DIFF], [SCOPE ADVISORY], [VERIFICATION], [SESSION], [RATE LIMIT]); older ones are dropped. Non-matching prefixes (WAF context, target intelligence, skills) are always kept.",
+      "function_in_system": "Runs near the end of each per-result pass in _finalize_tool_results (loop_cycle_post.py:1360). Bounds unbounded growth of the transient advisory cards this module injects on every tool call. Distinct from the prelude token-budget LLM compression: this is a cheap deterministic per-type cap that runs regardless of token usage. Otherwise stale HTTP snapshots and hypothesis cards accumulate turn after turn and crowd out the context window.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "346-378",
+          "snippet": "def _prune_stale_system_context(self) -> None:\n    if self.state.iteration % 10 != 0:\n        return\n    seen: dict[str, int] = {}\n    keep: list[dict] = []\n    for msg in reversed(self.state.conversation):\n        ...\n        count = seen.get(matched_prefix, 0)\n        if count < 2:\n            keep.append(msg)\n            seen[matched_prefix] = count + 1\n        # else: drop — too old to be relevant\n    self.state.conversation = list(reversed(keep))"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "334-344",
+          "snippet": "_PRUNABLE_PREFIXES = (\n    \"[HTTP BASELINE]\",\n    \"[HTTP RESPONSE SNAPSHOT]\",\n    \"[HYPOTHESIS CHECK —\",\n    \"[NEW EVIDENCE —\",\n    \"[BEHAVIORAL DIFF\",\n    \"[SCOPE ADVISORY]\",\n    \"[VERIFICATION —\",\n    \"[SESSION —\",\n    \"[RATE LIMIT —\",\n)"
+        }
+      ]
+    },
+    {
+      "name": "consecutive-failure circuit breaker with alternative-tool suggestion",
+      "what_it_is": "A _consecutive_failures counter is incremented on every failed or invalid tool result and reset to 0 on success. Once it reaches 3, a [SYSTEM: N CONSECUTIVE FAILURES DETECTED] directive is appended to the tool output ordering the agent to abandon the current approach and switch tool/strategy, listing concrete alternatives from _suggest_alternative_tool, and offering [TASK_COMPLETE] as an exit if options are exhausted.",
+      "function_in_system": "Runs per tool result in _finalize_tool_results (loop_cycle_post.py:1265-1279). Breaks the agent out of a rut where it retries the same failing tool/command indefinitely. Otherwise a persistently failing approach consumes the whole iteration budget with no progress.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "659-664",
+          "snippet": "if success:\n    self._consecutive_failures = 0\n    self.state.missing_tool_count = 0\nelse:\n    self._consecutive_failures += 1"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "1265-1279",
+          "snippet": "if not success and self._consecutive_failures >= 3:\n    alt_suggestion = self._suggest_alternative_tool(\n        tool_name, raw_command\n    )\n    content_str += (\n        f\"\\n\\n[SYSTEM: {self._consecutive_failures} CONSECUTIVE FAILURES DETECTED] \"\n        \"MANDATORY: Stop using the current approach. \"\n        \"Switch to a completely different tool or strategy. \"\n        + (\n            f\"SUGGESTED ALTERNATIVES: {alt_suggestion}\\n\"\n            if alt_suggestion\n            else \"\"\n        )\n        + \"If all options are exhausted, document what was tried and emit [TASK_COMPLETE].\"\n    )"
+        }
+      ]
+    },
+    {
+      "name": "mandatory disk-persist of volatile tool results (anti-data-loss)",
+      "what_it_is": "After a successful web_search or browser_action, a [SYSTEM: MANDATORY FILE SAVE] directive is appended forbidding memory-only retention of the results and ordering an immediate create_file into the output/ directory before proceeding.",
+      "function_in_system": "Appended in _finalize_tool_results (loop_cycle_post.py:690-699) to the results of the two tools whose output is large and volatile. Guards against losing search/browser findings when the token-budget compression (loop_cycle_prelude/loop_tool_cycle) later drops old tool outputs from the conversation. Otherwise those findings live only in the transcript and vanish at the next compression, forcing re-execution.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "690-699",
+          "snippet": "if success and tool_name in (\"web_search\", \"browser_action\"):\n    content_str += (\n        \"\\n\\n[SYSTEM: MANDATORY FILE SAVE]\\n\"\n        f\"You just executed `{tool_name}` successfully. \"\n        \"You are STRICTLY FORBIDDEN from keeping these results only in memory. \"\n        \"You MUST immediately use the `create_file` tool to save these findings \"\n        \"(URLs, text content, view_source, or console_logs) into the `output/` directory \"\n        ...\n        \"Do NOT proceed until this data is saved to disk!\"\n    )"
+        }
+      ]
+    },
+    {
+      "name": "post-success anti-redundancy self-check with planned-tool reminder",
+      "what_it_is": "After any successful tool call, a [SYSTEM: SELF-CHECK] block is appended asking the model to confirm before continuing that the tool produced new output not already in output/, that it advances toward exploitation rather than repeating recon, and that the exact command was not already run this session, telling it to skip redundant execution or emit [TASK_COMPLETE] otherwise. If planned_tools remain unexecuted, a [SYSTEM: PLANNED TOOLS NOT EXECUTED!] reminder listing them is also appended.",
+      "function_in_system": "Appended per successful tool result in _finalize_tool_results (loop_cycle_post.py:1281-1309). Counters the failure mode of the agent re-running the same recon commands and stalling in a discovery loop instead of progressing. Otherwise redundant re-execution wastes the iteration budget and never reaches exploitation.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "1281-1299",
+          "snippet": "if success and self.state.tool_counts[\"total\"] >= 1:\n    if self.state.planned_tools:\n        executed_tools = set()\n        for hist in self.state.tool_history:\n            executed_tools.add(hist.tool_name)\n        unexecuted = [\n            t for t in self.state.planned_tools\n            if t not in executed_tools and t != \"execute\"\n        ]\n        if unexecuted:\n            content_str += (\n                f\"\\n\\n[SYSTEM: PLANNED TOOLS NOT EXECUTED!]\\n\"\n                ...\n            )"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "1301-1309",
+          "snippet": "content_str += (\n    \"\\n\\n[SYSTEM: SELF-CHECK] MANDATORY — Answer these BEFORE continuing:\\n\"\n    \"1. Does this tool generate NEW output not already in output/ directory? (Check first!)\\n\"\n    ...\n    \"If answer to Q1=NO or Q2=sufficient or Q3=recon or Q4=YES: \"\n    \"SKIP redundant execution, move to next phase or emit [TASK_COMPLETE].\"\n)"
+        }
+      ]
+    },
+    {
+      "name": "graduated text-only stall recovery (reflector escalation to watchdog auto-execution)",
+      "what_it_is": "On every model turn without a tool call, _no_tool_iterations increments. Attempts 1-2 inject an escalating <reflector> system message that names the missing tool call, suggests a concrete tool, and warns that watchdog auto-execution is imminent (prior reflector messages are stripped first). At attempt >= max(3, agent_missing_tool_retry_limit+1) the watchdog extracts a safe shell command from the model's own text/thinking (command prefixes whitelisted from tools_meta.json watchdog_safe_command_prefixes, has_dangerous_patterns filter, 8000-char cap) and injects it as a forced execute tool call; when no command is found it injects a tool-call-required nudge instead. After 3 forced watchdog calls without recovery the run aborts with an error to escape an infinite loop.",
+      "function_in_system": "Sits at the end of each loop iteration in loop_tool_cycle.py after _analyze_llm_output, active while state.active_target is set. It catches the failure mode where a local model narrates or plans forever without ever calling a tool. Otherwise the loop spins consuming iterations while producing no state change, and on a hard stall never terminates. It attacks the same text-only-stall failure mode as the mod-5 execution checkpoint and the post-crash tool-call forcing, using its own tactic of escalating correction plus an auto-execution fallback.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_supervision.py",
+          "lines": "97-99",
+          "snippet": "if not found_first:\n    if not _WATCHDOG_COMMAND_PREFIX_RE.match(line.lstrip(\"$\")):\n        continue"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_supervision.py",
+          "lines": "201-204",
+          "snippet": "f\"  <escalation_warning>Watchdog auto-execution activates after\"\nf\" {max(3, self._no_tool_iterations + 1)} uncorrected iterations.\"\nf\" Avoid it by calling a tool now.</escalation_warning>\\n\""
+        },
+        {
+          "file": "airecon/proxy/agent/loop_supervision.py",
+          "lines": "328-340",
+          "snippet": "candidate_cmd = self._extract_shell_command_candidate(\n    content_acc=content_acc,\n    thinking_acc=thinking_acc,\n)\nif candidate_cmd:\n    return {\n        \"id\": f\"watchdog_execute_{self.state.iteration}\",\n        \"type\": \"function\",\n        \"function\": {\n            \"name\": \"execute\",\n            \"arguments\": {\"command\": candidate_cmd},\n        },\n    }"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "1198-1199",
+          "snippet": "if not tool_calls_acc:\n    self._no_tool_iterations += 1"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "1228-1234",
+          "snippet": "_reflector_max = 2\nif self._no_tool_iterations <= _reflector_max:\n    reflector_msg = self._build_reflector_message(\n        content_acc=content_acc,\n        attempt=self._no_tool_iterations,\n        phase=current_phase,\n    )"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "1250-1275",
+          "snippet": "elif self._no_tool_iterations >= _max_text_only_retries:\n    watchdog_call = self._build_watchdog_tool_call(\n        content_acc=content_acc,\n        thinking_acc=thinking_acc,\n        phase=current_phase,\n    )\n    if self._watchdog_forced_calls >= 3:\n        msg = (\n            \"Model is stuck in text-only mode and watchdog recovery failed. \"\n            \"Stopping to avoid infinite loop. \"\n            \"Try restarting the model/session and rerun.\"\n        )\n        ...\n        yield AgentEvent(type=\"error\", data={\"message\": msg})\n        yield AgentEvent(type=\"done\", data={})\n        return\n    elif watchdog_call:\n        self._watchdog_forced_calls += 1\n        tool_calls_acc = [watchdog_call]\n        self._no_tool_iterations = 0"
+        }
+      ]
+    },
+    {
+      "name": "post-recovery working-state reconstruction (resume-not-restart)",
+      "what_it_is": "After a crash truncates the conversation, _build_recovery_state_context rebuilds a compact [SYSTEM: RECOVERY STATE] summary from persisted state: phase, iteration and active target, quality scores, pending and completed objectives, the last 5 tool calls with status and argument hints, and recent evidence. It ends with a mandate that the first post-recovery response include a tool call and resume from the last failed/pending step.",
+      "function_in_system": "Built and injected in the VRAM-crash handler directly after truncate_conversation (loop_tool_cycle.py:952-957). It re-primes the model with its own progress after the history was trimmed, so recovery continues the assessment. Otherwise the truncated context makes the model lose track and restart the engagement from scratch, discarding the prior work. The call site sits inside the VRAM downscaling handler; the mechanism itself provides state continuity across the context truncation.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_supervision.py",
+          "lines": "533-538",
+          "snippet": "lines.append(\n    \"MANDATORY: first response after recovery must include at least one tool_call.\"\n)\nlines.append(\n    \"Resume from the last failed/pending step above — do not restart from scratch.\"\n)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_supervision.py",
+          "lines": "509-526",
+          "snippet": "recent_tools = list(reversed(self.state.tool_history))[:5]\nif recent_tools:\n    lines.append(\"Recent tool calls (newest first):\")\n    for entry in recent_tools:\n        status_icon = \"✓\" if entry.status == \"success\" else \"✗\"\n        args_hint = \"\"\n        args = getattr(entry, \"arguments\", None) or {}"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "952-957",
+          "snippet": "self.state.truncate_conversation(max_messages=_max_msgs)\nrecovery_ctx = self._build_recovery_state_context()\nif recovery_ctx:\n    self.state.conversation.append(\n        {\"role\": \"system\", \"content\": recovery_ctx}\n    )"
+        }
+      ]
+    },
+    {
+      "name": "stale auto-loaded skill pruning",
+      "what_it_is": "_prune_stale_skills scans system messages tagged [AUTO-LOADED SKILL: ...] and removes those older than max_age_iterations (default 10). Phase-irrelevant skills are dropped at the age threshold; skills whose category matches the current phase and that the memory manager recommends survive to twice the threshold before removal.",
+      "function_in_system": "Runs during per-iteration housekeeping (loop_cycle_prelude.py:1426), gated on iteration >= 20 and the mod-5/aggressive cadence. It bounds context growth by evicting skill docs no longer needed for the current phase. Otherwise auto-loaded skill text accumulates in the conversation, inflating token cost and crowding out working context on a small local context window.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_supervision.py",
+          "lines": "593-604",
+          "snippet": "skill_iteration = msg.get(\"iteration\", 0)\nage = self.state.iteration - skill_iteration\n\nif age < max_age_iterations:\n    continue\n\nis_phase_relevant = any(\n    (sp.split(\"/\", 1)[0] if \"/\" in sp else \"\") in phase_dirs\n    for sp in skill_paths\n)\nif not is_phase_relevant:\n    skills_to_remove.append((i, 0))\n    continue"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_supervision.py",
+          "lines": "607-613",
+          "snippet": "is_recommended = any(sp in recommended_skills for sp in skill_paths)\nif is_recommended:\n    if age < max_age_iterations * 2:\n        continue\n    skills_to_remove.append((i, 1))\nelse:\n    skills_to_remove.append((i, 0))"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "1424-1426",
+          "snippet": "if self.state.iteration % 5 == 0 or _aggressive:\n    if self.state.iteration >= 20:\n        self._prune_stale_skills(max_age_iterations=10)"
+        }
+      ]
+    },
+    {
+      "name": "resilient LLM compression with circuit breaker and lossless-extraction fallback",
+      "what_it_is": "Inner robustness of compress_with_llm (the implementation that the token-budget compression only triggers). Three guards protect the compression step: a circuit breaker over a sliding window _compress_failures skips the LLM call and keeps the last 5 raw messages of a chunk once 3 of the last 10 compressions failed; the per-chunk summarizer call is wrapped in asyncio.wait_for (20s, 30s for large models) with try/except that falls back to a deterministic extraction summary or the raw tail on timeout or error; and critical data (subdomains, urls, ports, vulns, credentials) is regex-extracted before compression, passed to the summarizer as CRITICAL DATA, then verified present in the returned summary with a [MISSING:...] suffix appended for any items the LLM dropped.",
+      "function_in_system": "Runs inside each compression pass in models.py, driven by the token-budget trigger. It keeps the memory-compression step itself from crashing the run or silently dropping findings when the local summarizer model times out, errors, or omits data. Otherwise a failed or lossy compression aborts the iteration or quietly discards discovered hosts, vulns, and credentials, and the agent loses the very findings compression exists to retain.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "2204-2216",
+          "snippet": "recent_failures = (\n    sum(self._compress_failures[-10:]) if self._compress_failures else 0\n)\nif recent_failures >= 3:\n    logger.warning(\n        \"LLM compression circuit breaker tripped (%d/10 failures) — using fallback\",\n        recent_failures,\n    )\n    if len(chunk) > 5:\n        summaries.extend(chunk[-5:])\n    else:\n        summaries.extend(chunk)\n    continue"
+        },
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "2258-2271",
+          "snippet": "_timeout = 30.0 if \"122b\" in ollama.model.lower() else 20.0\nsummary_text = await asyncio.wait_for(\n    ollama.complete(\n        messages=compression_prompt,\n        options={\n            \"num_ctx\": num_ctx,\n            \"num_predict\": 256,\n            \"temperature\": 0.05,\n        },\n        max_retries=1,\n        operation=\"compression\",\n    ),\n    timeout=_timeout,\n)"
+        },
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "2327-2346",
+          "snippet": "except asyncio.TimeoutError:\n    logger.warning(\n        \"LLM compression timeout (%ds) — using extraction fallback\",\n        _timeout,\n    )\n    self._compress_failures.append(True)\n\n    if context_header:\n        fallback_summary = f\"[{phase}_SUMMARY]: \" + \"; \".join(context_header)\n        self.compression_summary = fallback_summary[:2000]\n        summaries.append(\n            {\n                \"role\": \"system\",\n                \"content\": fallback_summary,\n            }\n        )\n    elif len(chunk) > 5:\n        summaries.extend(chunk[-5:])\n    else:\n        summaries.extend(chunk)"
+        },
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "2277-2286",
+          "snippet": "if extracted_data[\"subdomains\"]:\n    for subdomain in list(extracted_data[\"subdomains\"])[:3]:\n        sub_short = subdomain.split(\".\")[0]\n        if sub_short and sub_short not in summary_lower:\n            missing_critical.append(subdomain)\n\nif extracted_data[\"vulns\"]:\n    for vuln in list(extracted_data[\"vulns\"])[:2]:\n        if vuln.lower().split()[0] not in summary_lower:\n            missing_critical.append(vuln)"
+        },
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "2301-2303",
+          "snippet": "if missing_critical:\n    missing_str = f\" [MISSING:{', '.join(missing_critical)}]\"\n    final_summary += missing_str"
+        }
+      ]
+    },
+    {
+      "name": "tiered context-preserving conversation truncation with tool-pair repair",
+      "what_it_is": "truncate_conversation classifies system messages into protected (RECOVERY STATE, PINNED CONTEXT, STRICT_SCOPE_MODE, MEMORY BRAIN, COMPRESSION SUMMARY; kept, capped at the last 2), ephemeral (workspace/target/reflector/mentor and similar; collapsed to the last one), and core; it compresses long tool results and long assistant text in the compress zone, drops middle assistant-text-only turns, always keeps the first user message, and trims the tail to the message budget while walking the boundary back so a tool result is never split from its assistant tool_calls. _repair_tool_pairs then drops any orphaned tool result and inserts a stub result for any surviving tool_call whose result was trimmed.",
+      "function_in_system": "The shared hard-trim primitive called by the VRAM-crash handler, the compression fallback, and proactive trims (loop_context.py:595, loop_lifecycle.py:351, loop_cycle_prelude.py:1488, loop_tool_cycle.py:578). It bounds the conversation to the context window while keeping recovery and scope state and a tool-call/result structure the API accepts. Otherwise a naive trim splits a tool-call/result pair and the next model call rejects the malformed history, crashing the run on exactly the low-memory setups that force trimming.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "1591-1622",
+          "snippet": "PROTECTED_PREFIXES = (\n    \"[SYSTEM: RECOVERY STATE\",\n    \"[SYSTEM: PINNED CONTEXT\",\n    \"[SYSTEM: STRICT_SCOPE_MODE\",\n    \"[SYSTEM: MEMORY BRAIN\",\n    \"[SYSTEM: RECOVERY MODE\",\n    \"[SYSTEM: COMPRESSION SUMMARY\",\n    \"[SYSTEM: REPORT PHASE —\",\n)\n...\nif ephemeral_system:\n    ephemeral_system = [ephemeral_system[-1]]\n\nif len(protected_system) > 2:\n    protected_system = protected_system[-2:]"
+        },
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "1692-1720",
+          "snippet": "if len(can_trim) > tail_budget:\n    tail = can_trim[-tail_budget:]\n\n    start_idx = len(can_trim) - tail_budget\n    while start_idx > 0:\n        found_orphan = False\n        for i in range(start_idx, len(can_trim)):\n            if can_trim[i].get(\"role\") == \"tool\":\n                for j in range(i - 1, start_idx - 1, -1):\n                    if can_trim[j].get(\"role\") == \"assistant\" and can_trim[\n                        j\n                    ].get(\"tool_calls\"):\n                        break\n                else:\n                    found_orphan = True"
+        },
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "1736-1739",
+          "snippet": "repaired = self._repair_tool_pairs(\n    core_system + ephemeral_system + protected_system + rebuilt\n)\nself.conversation = repaired"
+        },
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "1767-1809",
+          "snippet": "orphaned_results = result_call_ids - surviving_call_ids\nif orphaned_results:\n    messages = [\n        m\n        for m in messages\n        if not (\n            m.get(\"role\") == \"tool\"\n            and m.get(\"tool_call_id\") in orphaned_results\n        )\n    ]\n...\nmissing_results = surviving_call_ids - result_call_ids\nif missing_results:\n    ...\n        patched.append(\n            {\n                \"role\": \"tool\",\n                \"tool_call_id\": cid,\n                \"content\": (\n                    \"[Tool result unavailable — \"\n                    \"earlier context was compressed]\"\n                ),\n            }\n        )"
+        }
+      ]
+    },
+    {
+      "name": "classified failure memory with recovery hints",
+      "what_it_is": "add_failure keyword-classifies each tool failure into network/auth/timeout/not_found/rate_limit/other, attaches a type-specific suggested_action (e.g. network -> SKIP the unreachable target and focus on live hosts; rate_limit -> slow down or change IP/timing), and appends it to failure_log (capped at 50). The log is surfaced back into the model context each iteration and preserved across compression as RECENT MISTAKES. retry_failure defines per-type retry budgets (network 0, auth 2, rate_limit 3) but has no caller in the current code.",
+      "function_in_system": "Recorded at tool-dispatch failure (executors_dispatch.py:862) and read into the prompt via the failure-reminder builder (loop_context.py:131-135). It gives the agent a durable memory of what already failed and the recommended response, so it stops re-running dead approaches. Otherwise the agent re-attempts the same unreachable host or forbidden endpoint on later iterations, spending the budget on known-failing actions.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "779-802",
+          "snippet": "suggested_actions = {\n    \"network\": f\"SKIP: {target or name} is unreachable. Focus on live hosts.\",\n    \"auth\": \"Try different credentials or check for authentication bypass.\",\n    \"timeout\": \"Increase timeout or try a lighter probe (e.g., ping instead of full scan).\",\n    \"not_found\": \"Verify the endpoint exists or search for alternative paths.\",\n    \"rate_limit\": \"Slow down requests or try from different IP/timing.\",\n    \"other\": f\"Investigate root cause: {error_detail[:100]}\",\n}\n\nfailure_id = str(uuid.uuid4())[:8]\nfailure_entry = {\n    \"id\": failure_id,\n    \"type\": failure_category,\n    \"name\": name,\n    \"target\": target,\n    \"error_type\": error_type,\n    \"error_detail\": error_detail[:500],\n    \"retry_count\": 0,\n    \"last_retry_iteration\": self.iteration,\n    \"suggested_action\": suggested_actions.get(\n        error_type, suggested_actions[\"other\"]\n    ),"
+        },
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "814-817",
+          "snippet": "if len(self.failure_log) > 50:\n    dropped = len(self.failure_log) - 50\n    logger.debug(\"failure_log pruned: dropping %d oldest entries\", dropped)\n    self.failure_log = self.failure_log[-50:]"
+        },
+        {
+          "file": "airecon/proxy/agent/executors_dispatch.py",
+          "lines": "862-867",
+          "snippet": "failure_id = self.state.add_failure(\n    name=tool_name,\n    error_detail=error_detail,\n    target=target,\n    failure_category=\"tool\",\n)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_context.py",
+          "lines": "131-135",
+          "snippet": "if not getattr(self.state, \"failure_log\", None):\n    return []\n\nlines: list[str] = []\nfor failure in self.state.failure_log[-max_items:]:"
+        }
+      ]
+    },
+    {
+      "name": "dead-host blocklist with skip directive",
+      "what_it_is": "add_dead_host normalizes a host to its lowercased hostname, dedups it into the dead_hosts list, and caps the list at 500 entries. build_focus_context injects a <dead_hosts> directive that orders the model to never use browser_action, httpx, curl, or any HTTP tool against the recorded unreachable hosts.",
+      "function_in_system": "Hosts are recorded when probes resolve or connect as dead (executors_browser.py:238, executors_dispatch.py:834); the directive is rebuilt into the per-iteration focus context (models.py:1380-1384). It stops the agent spending iterations re-probing hosts already proven unreachable. Otherwise dead targets get hammered on every pass, burning the iteration and time budget on connections that cannot succeed.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "709-716",
+          "snippet": "parsed = urlparse(host if \"://\" in host else f\"http://{host}\")\nnormalised = (parsed.hostname or host).rstrip(\".\").lower()\nif normalised in self.dead_hosts:\n    return False\nself.dead_hosts.append(normalised)\n\nif len(self.dead_hosts) > 500:\n    self.dead_hosts = self.dead_hosts[-500:]"
+        },
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "1380-1384",
+          "snippet": "if self.dead_hosts:\n    dead_list = \", \".join(self.dead_hosts[:20])\n    lines.append(\n        \"  <dead_hosts>NEVER use browser_action, httpx, curl, or any HTTP tool \"\n        f\"against these unreachable hosts: {dead_list}</dead_hosts>\""
+        },
+        {
+          "file": "airecon/proxy/agent/executors_dispatch.py",
+          "lines": "833-834",
+          "snippet": "if _host:\n    added = self.state.add_dead_host(_host)"
+        },
+        {
+          "file": "airecon/proxy/agent/executors_browser.py",
+          "lines": "237-238",
+          "snippet": "if host and hasattr(self, \"state\"):\n    added = self.state.add_dead_host(host)"
+        }
+      ]
+    },
+    {
+      "name": "evidence-store deduplication (exact and semantic)",
+      "what_it_is": "add_evidence rejects duplicate findings before they enter evidence_log: an exact (phase, source_tool, summary, artifact) key match is dropped, and otherwise a Jaccard-similarity check drops near-duplicates (same-phase at the configured similarity threshold; cross-phase only when the new item's confidence >= 0.85 and similarity >= 0.85). The scan runs over a capped window of the most recent evidence entries.",
+      "function_in_system": "Guards every evidence insertion in models.py. It keeps the evidence log, and the context and quality counts it feeds, from filling with restatements of the same finding. Otherwise repeated tool runs pile near-identical evidence, inflating token cost and skewing the quality scoreboard toward apparent progress that is only duplication.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "955-980",
+          "snippet": "dedup_key = (\n    phase_key,\n    source_tool.strip().lower(),\n    clean_summary.lower(),\n    (artifact or \"\").strip().lower(),\n)\n\n_dedup_start = monotonic()\nsummary_lower = clean_summary.lower()\nscan_limit = _get_evidence_dedup_scan_limit()\nrecent_evidence = self.evidence_log[-scan_limit:]\n...\n    if dedup_key == prev_key:\n        return False"
+        },
+        {
+          "file": "airecon/proxy/agent/models.py",
+          "lines": "982-1001",
+          "snippet": "if str(existing.get(\"phase\", \"\")).upper() != phase_key:\n    if confidence >= 0.85:\n        existing_summary = str(existing.get(\"summary\", \"\")).strip().lower()\n        if (\n            self._jaccard_similarity(summary_lower, existing_summary)\n            >= 0.85\n        ):\n            ...\n            return False\n    continue\n\nexisting_summary = str(existing.get(\"summary\", \"\")).strip().lower()\nif (\n    self._jaccard_similarity(summary_lower, existing_summary)\n    >= _get_evidence_similarity_threshold()\n):"
+        }
+      ]
+    },
+    {
+      "name": "Ollama context-pressure monitored reset with cooldown backoff and local fallback",
+      "what_it_is": "A background task polls Ollama /api/ps for the model's live context_length (interval 60s, 30s in CTF) and, when it crosses the reset threshold (_CONTEXT_RESET_THRESHOLD = 65536, or 70% of the small ctx in CTF) with the token estimate also over threshold, triggers _reset_ollama_context. The reset rebuilds the runtime KV cache from a freshly built recon summary plus system prompt via ollama.reset_context, retried up to 3 times with linear backoff. A cooldown gates resets (300s default, 60s CTF) and grows by 120s per prior consecutive reset failure (capped at +600s); server 500 errors disable reset for 15 minutes; a 'runner has unexpectedly stopped' error is flagged fatal. When the reset fails, _apply_local_context_fallback truncates to 40 messages (16 in CTF), re-injects a handoff summary and critical findings, and recomputes token usage.",
+      "function_in_system": "The pressure check is fired from the iteration prelude and message entry and awaited in the tool cycle (loop_cycle_prelude.py:322, loop_message_entry.py:156, loop_tool_cycle.py:706). It keeps the local Ollama KV cache from silently overflowing its context window during a long run by resetting the server-side context while preserving progress in a summary. Otherwise the model's runtime context fills up and generations degrade or error once the backend exceeds its window. The trigger is the backend-reported context length, separate from the token-budget compression and the VRAM-crash downscaling.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_lifecycle.py",
+          "lines": "519-537",
+          "snippet": "for model in ps.get(\"models\", []):\n    if model.get(\"name\") == self.ollama.model or self.ollama.model.split(\":\")[\n        0\n    ] in model.get(\"name\", \"\"):\n        context_len = int(model.get(\"context_length\", 0) or 0)\n        used_estimate = int(self.state.token_usage.get(\"used\", 0) or 0)\n        ...\n        if context_len <= threshold or used_estimate < threshold:\n            return"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_lifecycle.py",
+          "lines": "555-566",
+          "snippet": "_failures = int(getattr(self, \"_context_reset_failures\", 0) or 0)\nif _failures > 0:\n    _RESET_COOLDOWN_SECONDS += min(600.0, _failures * 120.0)\nif now - last_reset < _RESET_COOLDOWN_SECONDS:\n    logger.warning(\n        \"Context reset cooldown active (ctf=%s, used=%d, ps_ctx=%d, remaining=%.0fs)\","
+        },
+        {
+          "file": "airecon/proxy/agent/loop_lifecycle.py",
+          "lines": "279-303",
+          "snippet": "for attempt in range(1, 4):\n    try:\n        success = await self.ollama.reset_context(full_prompt)\n        if success:\n            ...\n            self._context_reset_failures = 0\n            return True\n        status = getattr(self.ollama, \"_last_reset_status\", None)\n        err_text = str(getattr(self.ollama, \"_last_reset_error\", \"\") or \"\").lower()\n        if status == 500 or \"internal server error\" in err_text:\n            last_error = RuntimeError(err_text or \"internal server error\")\n            self._disable_context_reset_until = time.time() + 900.0\n            ...\n            break\n    except Exception as e:\n        last_error = e\n\n    if attempt < 3:\n        await asyncio.sleep(0.25 * attempt)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_lifecycle.py",
+          "lines": "307-335",
+          "snippet": "err_text = str(last_error).lower()\nif \"runner has unexpectedly stopped\" in err_text:\n    self._fatal_ollama_error = str(last_error)\n    ...\nif \"internal server error\" in err_text or \"500\" in err_text:\n    self._disable_context_reset_until = time.time() + 900.0\n    ...\nself._context_reset_failures += 1\ntry:\n    self._apply_local_context_fallback(\n        reason=\"ollama reset failed\",\n        target_messages=40 if not self._ctf_mode else 16,\n    )"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_lifecycle.py",
+          "lines": "346-356",
+          "snippet": "_critical_ctx = self._build_critical_findings_context()\n_handoff_ctx = self._build_handoff_summary()\n\nif target_messages is None:\n    target_messages = 16 if self._ctf_mode else 40\nself.state.truncate_conversation(max_messages=target_messages)\n\nif _handoff_ctx:\n    self.state.conversation.append({\"role\": \"system\", \"content\": _handoff_ctx})\nif _critical_ctx:\n    self.state.conversation.append({\"role\": \"system\", \"content\": _critical_ctx})"
+        }
+      ]
+    },
+    {
+      "name": "staged pre-call character-budget guard",
+      "what_it_is": "_enforce_char_budget runs before each model call. When the conversation's total char count exceeds 35% of the effective input context (num_ctx minus num_predict minus a per-tool overhead), it applies escalating reduction steps, re-checking the budget after each and returning as soon as it fits: (0) dedup old [SYSTEM: CRITICAL FINDINGS] messages to the latest, (1) drop stale tool results, (1.5) dedup old [SYSTEM: AUTO-TRUNCATED] summaries, (2) strip thinking from all but the last 2 assistant messages, (3) aggressively compress old tool outputs, (4) fast truncation that first builds a summary of dropped tools/URLs/vuln refs and re-injects critical findings, (5) emergency truncation to a minimal message count.",
+      "function_in_system": "Called at the top of the tool cycle before querying the model (loop_tool_cycle.py:644). A deterministic, mostly LLM-free guard that keeps the assembled prompt inside the model's input window. Otherwise the request exceeds num_ctx and the local backend truncates or errors on the call itself. It is char-based and pre-call, separate from the token-ratio-triggered LLM compression.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_context.py",
+          "lines": "404-413",
+          "snippet": "effective_input_ctx = max(1024, num_ctx - effective_predict - _tools_overhead)\nbudget = int(effective_input_ctx * 0.35)\ntotal = sum(\n    len(str(m.get(\"content\") or \"\"))\n    + len(str(m.get(\"tool_calls\") or \"\"))\n    + len(str(m.get(\"thinking\") or \"\"))\n    for m in self.state.conversation\n)\nif total <= budget:\n    return"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_context.py",
+          "lines": "425-446",
+          "snippet": "_critical_indices = [\n    i\n    for i, m in enumerate(self.state.conversation)\n    if str(m.get(\"content\", \"\")).startswith(\"[SYSTEM: CRITICAL FINDINGS\")\n]\nif len(_critical_indices) > 1:\n    ...\n    if total <= budget:\n        logger.info(\"Budget satisfied after deduping critical findings\")\n        return"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_context.py",
+          "lines": "448-458",
+          "snippet": "# Step 1: Drop stale tool results (fast, no LLM)\nself._drop_stale_tool_results()\ntotal = sum(\n    len(str(m.get(\"content\") or \"\"))\n    + len(str(m.get(\"tool_calls\") or \"\"))\n    + len(str(m.get(\"thinking\") or \"\"))\n    for m in self.state.conversation\n)\nif total <= budget:\n    logger.info(\"Budget satisfied after dropping stale tool results\")\n    return"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_context.py",
+          "lines": "486-504",
+          "snippet": "assistant_indices = [\n    i\n    for i, m in enumerate(self.state.conversation)\n    if m.get(\"role\") == \"assistant\" and m.get(\"thinking\")\n]\nfor idx in assistant_indices[:-2]:\n    thinking_len = len(str(self.state.conversation[idx].get(\"thinking\", \"\")))\n    self.state.conversation[idx].pop(\"thinking\", None)\n    total -= thinking_len\n    if total <= budget:\n        ...\n        return\n\n# Step 3: Aggressively compress old tool outputs\nself._compress_old_tool_outputs(aggressive=True)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_context.py",
+          "lines": "590-601",
+          "snippet": "# Step 5: Emergency truncation — keep minimal context\n_min_msgs = 8 if self._ctf_mode else 12\ntarget_msgs = max(\n    _min_msgs, len(self.state.conversation) // (3 if self._ctf_mode else 2)\n)\nself.state.truncate_conversation(max_messages=target_msgs)\n# Re-inject critical findings after truncation\n_critical = self._build_critical_findings_context()\nif _critical:\n    self.state.conversation.append(\n        {\"role\": \"system\", \"content\": _critical, \"_bucket\": \"protected_system\"}\n    )"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "644-645",
+          "snippet": "await self._enforce_char_budget("
+        }
+      ]
+    },
+    {
+      "name": "phase-transition context compaction",
+      "what_it_is": "_compact_phase_context compacts the conversation on a phase change: every message older than the last 15 that is not _protected gets its long (>400 char) tool output stubbed to 200 chars with a chars-freed note, and thinking blocks stripped from assistant messages.",
+      "function_in_system": "Called at phase transitions (loop_cycle_prelude.py:977). It reclaims context from a finished phase's verbose tool output before the next phase begins. Otherwise the completed phase's raw output stays in context through the rest of the run, consuming the window on a small local model.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_context.py",
+          "lines": "193-214",
+          "snippet": "for i, msg in enumerate(msgs[:cutoff]):\n    role = msg.get(\"role\")\n    if msg.get(\"_protected\"):\n        continue\n    content = str(msg.get(\"content\", \"\"))\n\n    if role == \"tool\" and len(content) > 400:\n        stub = content[:200].rstrip()\n        freed = len(content) - len(stub)\n        msg[\"content\"] = (\n            stub\n            + f\" ...[{from_phase} phase output compacted — {freed} chars freed]\"\n        )\n        chars_freed += freed\n        compacted_tools += 1\n\n    elif role == \"assistant\" and msg.get(\"thinking\"):\n        thinking_len = len(str(msg[\"thinking\"]))\n        msg.pop(\"thinking\", None)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "977-979",
+          "snippet": "self._compact_phase_context(\n    _prev_phase.value if _prev_phase else \"RECON\"\n)"
+        }
+      ]
+    },
+    {
+      "name": "adaptive per-tool-result output cap",
+      "what_it_is": "Every tool result is passed through _cap_tool_result before it enters the conversation. The cap from _get_tool_result_cap starts at max(3000, min(_MAX_TOOL_RESULT_CHARS, int(ctx * 0.08 * 3))) (1500 in CTF) and shrinks in tiers as the token-usage ratio climbs (base//2 at 0.30, //3 at 0.45, //6 at 0.60, //10 at 0.75, //16 at 0.90). When a result exceeds the cap it is kept as head 70% plus tail 10% with an omitted-chars marker in between.",
+      "function_in_system": "Applied in _append_tool_result (loop_context.py:615) on every tool output. It is the first line of defense against a single massive tool result, such as a large scan dump, flooding the context, and it tightens automatically as the window fills. Otherwise one verbose tool output can blow the context budget in a single append.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_context.py",
+          "lines": "255-269",
+          "snippet": "base_cap = max(3_000, min(self._MAX_TOOL_RESULT_CHARS, int(ctx * 0.08 * 3)))\n\nused = self.state.token_usage.get(\"used\", 0)\nratio = used / max(ctx, 1)\nif ratio >= 0.90:\n    return max(1_000, base_cap // 16)\nif ratio >= 0.75:\n    return max(1_500, base_cap // 10)\nif ratio >= 0.60:\n    return max(2_000, base_cap // 6)\nif ratio >= 0.45:\n    return max(3_000, base_cap // 3)\nif ratio >= 0.30:\n    return max(4_000, base_cap // 2)\nreturn base_cap"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_context.py",
+          "lines": "272-278",
+          "snippet": "cap = self._get_tool_result_cap()\nif len(content) <= cap:\n    return content\nhead = int(cap * 0.70)\ntail = int(cap * 0.10)\nomitted = len(content) - head - tail\nreturn content[:head] + f\"\\n...[{omitted} chars omitted]...\\n\" + content[-tail:]"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_context.py",
+          "lines": "614-615",
+          "snippet": "cfg = get_config()\ncontent_str = self._cap_tool_result(content_str)"
+        }
+      ]
+    },
+    {
+      "name": "context-pressure-adaptive generation budget",
+      "what_it_is": "Before each call the output-token budget is bounded two ways. _get_iteration_num_predict shrinks the requested num_predict as the token-usage ratio rises (cap 8192 at 0.50, 4096 at 0.65, 2048 at 0.75). _fit_num_predict_to_ctx then clamps it to reserve prompt space (a 1024-token reserve, and at most 40% of num_ctx), and _fit_num_keep_to_ctx clamps the retained-prefix count so num_keep plus num_predict stay inside num_ctx.",
+      "function_in_system": "Computes the generation parameters for every model call. It keeps the model's requested output length from starving the prompt or pushing the request past num_ctx, and frees budget for input as context fills. Otherwise a large fixed num_predict on a small local window leaves no room for the prompt, and the backend truncates the input or errors.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_inference.py",
+          "lines": "59-65",
+          "snippet": "def _fit_num_predict_to_ctx(num_predict: int, num_ctx: int) -> int:\n    _ctx = max(1024, int(num_ctx))\n    _requested = max(256, int(num_predict))\n    _prompt_reserve = 1024 if _ctx >= 4096 else max(256, _ctx // 4)\n    _max_by_prompt = max(256, _ctx - _prompt_reserve)\n    _max_by_ratio = max(512, int(_ctx * 0.40))\n    return max(256, min(_requested, _max_by_prompt, _max_by_ratio))"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_inference.py",
+          "lines": "68-74",
+          "snippet": "_ctx = max(1024, int(num_ctx))\n_predict = max(0, int(num_predict))\n_requested = max(0, int(num_keep))\n_max_by_ctx = max(0, _ctx - 256)\n_max_by_predict = max(0, _ctx - _predict - 256)\nreturn min(_requested, _max_by_ctx, _max_by_predict)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_inference.py",
+          "lines": "84-93",
+          "snippet": "_used = self.state.token_usage.get(\"used\", 0)\n_pressure = _used / max(num_ctx, 1)\nif _pressure >= 0.75:\n    _requested = min(_requested, 2048)\nelif _pressure >= 0.65:\n    _requested = min(_requested, 4096)\nelif _pressure >= 0.50:\n    _requested = min(_requested, 8192)\n\nreturn self._fit_num_predict_to_ctx(_requested, num_ctx)"
+        }
+      ]
+    },
+    {
+      "name": "anti-stagnation inference adaptation",
+      "what_it_is": "A shared struggle signal (stagnation_iterations >= threshold, consecutive_failures >= 2, no_tool_iterations >= 1, recovery_force_tool_calls, watchdog_forced_calls) drives three coordinated inference changes to break the agent out of a rut: _get_iteration_temperature raises temperature to the exploration value (0.35), _get_adaptive_num_predict raises the output-length cap (up to 16384, or 8192 in CTF), and _should_use_thinking forces thinking on. A counter-guard disables thinking after agent_max_consecutive_thinking (5) consecutive thinking iterations.",
+      "function_in_system": "Feeds the per-iteration temperature, num_predict, and thinking flag. When the agent stalls or repeatedly fails, it widens exploration and reasoning to escape the loop, while the consecutive-thinking cap stops the opposite failure of endless thinking without action. Otherwise a stuck agent keeps sampling the same low-temperature deterministic path and never breaks out.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_inference.py",
+          "lines": "110-117",
+          "snippet": "stagnation_threshold = self._cfg_int(cfg, \"agent_stagnation_threshold\", 2)\n_is_struggling = (\n    self._stagnation_iterations >= stagnation_threshold\n    or self._recovery_force_tool_calls > 0\n    or self._consecutive_failures >= 2\n    or self._no_tool_iterations >= 1\n    or self._watchdog_forced_calls > 0\n)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_inference.py",
+          "lines": "122-135",
+          "snippet": "if (\n    getattr(self, \"_consecutive_thinking_iterations\", 0)\n    >= _max_consecutive_thinking\n):\n    ...\n    return False\n\nif _is_struggling:\n    ...\n    return True"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_inference.py",
+          "lines": "219-224",
+          "snippet": "if (\n    self._stagnation_iterations >= stagnation_threshold\n    or phase in (\"ANALYSIS\", \"EXPLOIT\", \"REPORT\")\n    or last_tool in _DEEP_TOOLS\n):\n    return min(base, 16384)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_inference.py",
+          "lines": "242-247",
+          "snippet": "if (\n    self._stagnation_iterations >= stagnation_threshold\n    or self._consecutive_failures >= 2\n    or self._no_tool_iterations >= 1\n):\n    return max(base_temp, exploration_temp)"
+        }
+      ]
+    },
+    {
+      "name": "scope-integrity guard (anchor restoration, drift lock, soft out-of-scope advisory)",
+      "what_it_is": "Combines a hard and a soft guard around the authorized target. Hard (_enforce_scope_target_integrity): keeps a _scope_anchor_target, restores active_target when it goes missing, restores the anchor on subdomain drift, and on cross-domain drift when _scope_lock_active. Soft: the validator records out-of-declared-scope URLs it lets through when scope lock is not strict into _pending_scope_advisories, and _drain_scope_advisories surfaces them to the model as a [SCOPE ADVISORY] asking it to justify each pivot as target-owned or pivot back in-scope.",
+      "function_in_system": "The hard guard runs in the iteration prelude (loop_cycle_prelude.py:324); the advisory drains into tool output (loop_cycle_post.py:1343). It keeps the agent testing the authorized target and its owned assets. Otherwise scope drift silently redirects the agent onto unrelated third-party hosts, an authorization failure, or the run loses its active target entirely.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_state.py",
+          "lines": "344-367",
+          "snippet": "if not anchor:\n    anchor = active or session_target\n    if anchor:\n        self._scope_anchor_target = anchor\n\nif not active and anchor:\n    self.state.active_target = anchor\n    logger.warning(\n        \"Scope guard restored missing active_target -> %s\",\n        anchor,\n    )\n    return\n\nif not active or not anchor or active == anchor:\n    return\n\nif should_preserve_active_target_for_subdomain(active, anchor) or should_preserve_active_target_for_subdomain(anchor, active):\n    ...\n    self.state.active_target = anchor\n    return"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_state.py",
+          "lines": "369-375",
+          "snippet": "if getattr(self, \"_scope_lock_active\", False):\n    logger.warning(\n        \"Scope lock prevented cross-domain drift (%s -> %s) — restoring anchor\",\n        anchor,\n        active,\n    )\n    self.state.active_target = anchor"
+        },
+        {
+          "file": "airecon/proxy/agent/validators.py",
+          "lines": "995-1012",
+          "snippet": "if lock_strict:\n    # User explicitly opted into strict scope lock.\n    return False, err\n# Default: soft advisory. LLM decides ...\nadvisories = getattr(self, \"_pending_scope_advisories\", None)\nif advisories is None:\n    advisories = []\n    self._pending_scope_advisories = advisories  # type: ignore[attr-defined]\nadvisories.append(\n    {\n        \"url\": candidate,\n        \"declared_scope\": scope_target,\n        \"tool\": tool_name,\n    }\n)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "413-423",
+          "snippet": "lines.append(\n    \"These URLs sit outside the declared apex. Before continuing, \"\n    \"confirm each one is target-owned (bucket, CDN, SaaS tenant, \"\n    \"subsidiary) or a legitimate 3rd-party used for read-only \"\n    \"validation. If you cannot justify it as target-owned or \"\n    \"validation-related, stop testing it and pivot back in-scope.\"\n)\nreturn \"\\n\".join(lines)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "1343-1345",
+          "snippet": "_scope_adv = self._drain_scope_advisories()\nif _scope_adv:\n    content_str += \"\\n\\n\" + _scope_adv"
+        }
+      ]
+    },
+    {
+      "name": "memory-brain health monitor with graceful degradation",
+      "what_it_is": "_check_memory_brain_health polls the long-term memory backend's health_snapshot each iteration. On a healthy-to-unhealthy transition it injects [SYSTEM: MEMORY BRAIN DEGRADED] telling the agent to keep critical findings in session context and continue safely; on recovery it injects [SYSTEM: MEMORY BRAIN RECOVERED]. The snapshot call is wrapped so an exception becomes an unhealthy status rather than propagating.",
+      "function_in_system": "Runs in the iteration prelude (loop_cycle_prelude.py:380). It lets the run continue when the cross-session memory backend fails and tells the model to fall back to session context. Otherwise a failing memory backend crashes reads or silently strips the historical intel the agent was told to rely on.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_state.py",
+          "lines": "392-415",
+          "snippet": "previous = dict(getattr(self, \"_memory_health_status\", {}) or {})\ntry:\n    snapshot = self._memory_manager.health_snapshot(self._session.target)\nexcept Exception as exc:\n    snapshot = {\"ok\": False, \"error\": str(exc)}\n\nself._memory_health_status = snapshot\nif not snapshot.get(\"ok\", False):\n    ...\n    if previous.get(\"ok\", True):\n        self.state.conversation.append(\n            {\n                \"role\": \"system\",\n                \"content\": (\n                    \"[SYSTEM: MEMORY BRAIN DEGRADED] \"\n                    \"Long-term memory backend is unhealthy. Keep critical findings in session context and continue safely.\"\n                ),\n            }\n        )\n    return"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_state.py",
+          "lines": "425-434",
+          "snippet": "if previous and not previous.get(\"ok\", True):\n    self.state.conversation.append(\n        {\n            \"role\": \"system\",\n            \"content\": (\n                \"[SYSTEM: MEMORY BRAIN RECOVERED] \"\n                \"Long-term memory backend is healthy again. You can continue using historical patterns and target intel.\"\n            ),\n        }\n    )"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "380",
+          "snippet": "self._check_memory_brain_health()"
+        }
+      ]
+    },
+    {
+      "name": "cross-session prior-findings merge (resume, avoid rediscovery)",
+      "what_it_is": "On a fresh session (scan_count 0 and not yet merged) find_prior_session locates a previous scan of the same target and merge_prior_findings pre-loads its subdomains, URLs, and injection points into the new session, then injects a [PRIOR SESSION MEMORY] note telling the model the data is already present and to focus on new coverage. When the session already has scan work, session_to_context and phase/objective sync restore the run instead.",
+      "function_in_system": "Runs in _prepare_message_context at message entry (loop_message_entry.py:194-220). It resumes a target across separate runs so a restarted or follow-up session does not redo recon from zero. Otherwise every new session re-scans a target already mapped, spending the iteration budget rediscovering known assets.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_message_entry.py",
+          "lines": "194-220",
+          "snippet": "if (\n    self._session\n    and self._session.scan_count == 0\n    and not getattr(self._session, \"_prior_merged\", False)\n):\n    prior = find_prior_session(self.state.active_target)\n    if prior and prior.session_id != self._session.session_id:\n        merge_prior_findings(self._session, prior)\n\n        _prior_ctx = (\n            f\"[PRIOR SESSION MEMORY] Loaded {len(prior.subdomains)} subdomains, \"\n            f\"{len(prior.urls)} URLs, {len(prior.injection_points)} injection points \"\n            f\"from previous scan of {self.state.active_target} \"\n            ...\n        )\n        self.state.conversation.append(\n            {\"role\": \"system\", \"content\": _prior_ctx}\n        )\n    ...\n    self._session._prior_merged = True"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_message_entry.py",
+          "lines": "222-229",
+          "snippet": "if self._session and self._session.scan_count > 0:\n    session_ctx = session_to_context(self._session)\n    self.state.conversation.append(\n        {\n            \"role\": \"system\",\n            \"content\": session_ctx,\n        }\n    )"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_message_entry.py",
+          "lines": "270-273",
+          "snippet": "if self.pipeline:\n    _resumed_phase = self.pipeline.get_current_phase()\n    self._sync_phase_objectives(_resumed_phase)\n    self._update_objectives_from_session(_resumed_phase)"
+        }
+      ]
+    },
+    {
+      "name": "message-entry context overflow cap (soft warn, hard emergency truncation)",
+      "what_it_is": "At message entry, used tokens are compared to soft (65%) and hard (80%) fractions of the context limit. Over the hard cap, an emergency truncation keeps all system messages plus the most recent 20% of non-system messages (minimum 6) and recomputes token usage; over the soft cap it logs an approaching-limit warning.",
+      "function_in_system": "Runs before the new user turn is appended (loop_message_entry.py:351-389), the only overflow guard fired at the start of a user turn. It clears a session that returned already near-full so the next run starts with headroom. Otherwise a resumed or long-lived session begins a new turn already over budget and the first model call truncates or errors.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_message_entry.py",
+          "lines": "346-368",
+          "snippet": "_SOFT_CTX_RATIO = 0.65\n_HARD_CTX_RATIO = 0.80\n_ctx_soft_cap = int(_ctx_limit * _SOFT_CTX_RATIO)\n_ctx_hard_cap = int(_ctx_limit * _HARD_CTX_RATIO)\n\nif _ctx_used > _ctx_hard_cap:\n    ...\n    _system_msgs = [\n        m for m in self.state.conversation if m.get(\"role\") == \"system\"\n    ]\n    _non_system = [\n        m for m in self.state.conversation if m.get(\"role\") != \"system\"\n    ]\n    _keep_recent = max(int(len(_non_system) * 0.20), 6)\n    _recent_msgs = _non_system[-_keep_recent:]\n    _prev_total = len(self.state.conversation)\n    self.state.conversation = _system_msgs + _recent_msgs"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_message_entry.py",
+          "lines": "383-389",
+          "snippet": "elif _ctx_used > _ctx_soft_cap:\n    logger.warning(\n        \"Context tokens (%d) approaching soft cap (%d, num_ctx=%d) — will truncate soon\",\n        _ctx_used,\n        _ctx_soft_cap,\n        _ctx_limit,\n    )"
+        }
+      ]
+    },
+    {
+      "name": "pre-dispatch tool-argument validation with corrective feedback",
+      "what_it_is": "_validate_tool_args checks each tool call's arguments against per-tool preconditions before dispatch: execute requires a non-empty command under 20000 chars, browser_action requires a known action plus its per-action fields (url, coordinate, text, tab_id, key, or js_code with a boolean parallel flag), read_file requires offset >= 0 and limit between 1 and 5000, caido_send_request and caido_automate require a non-empty host, and create_file, read_file and web_search require their string arguments. A failed check returns (False, error_message).",
+      "function_in_system": "Runs inside _run_single_tool between the duplicate check and execution (loop_tool_cycle.py:1464). When a call is invalid the post-cycle skips execution, increments _consecutive_failures, and appends 'ARGUMENT VALIDATION FAILED: {error}\\nFix the arguments and retry.' into the tool output (loop_cycle_post.py:581, 609-613), so the model corrects the call on the next turn. The same increment feeds the consecutive-failure counter that trips the circuit breaker (loop_cycle_post.py:659). Otherwise a malformed tool call reaches the executor and raises, or runs with unusable arguments.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/validators.py",
+          "lines": "984-986",
+          "snippet": "    def _validate_tool_args(\n        self, tool_name: str, arguments: dict[str, Any]\n    ) -> tuple[bool, str | None]:"
+        },
+        {
+          "file": "airecon/proxy/agent/validators.py",
+          "lines": "1020-1024",
+          "snippet": "        if tool_name == \"execute\":\n            cmd = self._str_arg(arguments, \"command\")\n            if not cmd.strip():\n                return False, \"'command' must be a non-empty string.\"\n            if len(cmd) > 20_000:"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_tool_cycle.py",
+          "lines": "1464-1465",
+          "snippet": "                valid, arg_err = self._validate_tool_args(tn, args)\n                if not valid:"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "581-582, 608-613",
+          "snippet": "            if not was_valid:\n                arg_error = result.get(\"error\", \"Unknown validation error\")\n                ...\n                self._consecutive_failures += 1\n                self._append_tool_result(\n                    tool_name,\n                    f\"ARGUMENT VALIDATION FAILED: {arg_error}\\nFix the arguments and retry.\","
+        }
+      ]
+    },
+    {
+      "name": "destructive shell-command guard (blocklist and SUID/SGID check)",
+      "what_it_is": "has_dangerous_patterns matches a command against DANGEROUS_PATTERNS (rm -rf /, dd writing to /dev, a fork bomb, pkill -9, redirection to a disk device) and _has_dangerous_chmod_mode flags a chmod that sets a SUID or SGID bit. A match returns (True, description).",
+      "function_in_system": "Consulted at the two live points that run a shell command. The execute branch of _validate_tool_args rejects a destructive command the model emitted (validators.py:1029), and the stall-recovery watchdog's _safe filter drops a candidate command parsed out of model text before it is auto-executed (loop_supervision.py:78). It protects the agent's own Kali Linux Docker runtime. Otherwise a hallucinated or mis-formed command wipes the workspace or disables the container mid-run.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/validators.py",
+          "lines": "442-448",
+          "snippet": "DANGEROUS_PATTERNS: list[tuple[str, str]] = [\n    (r\"rm\\s+-rf\\s+/\", \"Dangerous: rm -rf / detected\"),\n    (r\"dd\\s+if=.*of=/dev\", \"Dangerous: writing to /dev\"),\n    (r\":\\s*\\(\\s*\\)\\s*\\{.*:\\s*\\|.*:\\s*&\", \"Dangerous: fork bomb detected\"),\n    (r\"pkill\\s+-9\", \"Dangerous: killing critical processes\"),\n    (r\">\\s*/dev/sd[a-z]\", \"Dangerous: writing to disk device\"),\n]"
+        },
+        {
+          "file": "airecon/proxy/agent/validators.py",
+          "lines": "484-490",
+          "snippet": "def has_dangerous_patterns(command: str) -> tuple[bool, str]:\n    for pattern, description in DANGEROUS_PATTERNS:\n        if re.search(pattern, command, re.IGNORECASE):\n            return True, description\n    if _has_dangerous_chmod_mode(command):\n        return True, \"Dangerous: SUID/SGID bit change detected\"\n    return False, \"\""
+        },
+        {
+          "file": "airecon/proxy/agent/validators.py",
+          "lines": "1029-1031",
+          "snippet": "            has_danger, danger_msg = has_dangerous_patterns(cmd)\n            if has_danger:\n                return False, f\"Command rejected: {danger_msg}\""
+        },
+        {
+          "file": "airecon/proxy/agent/loop_supervision.py",
+          "lines": "78-80",
+          "snippet": "            has_danger, _ = has_dangerous_patterns(cleaned)\n            if has_danger:\n                return None"
+        }
+      ]
+    },
+    {
+      "name": "WAF detection with feedback-ranked adaptation reinjection",
+      "what_it_is": "After a successful http_observe or execute action, detect_waf_from_response confidence-scores a WAF from block-status codes, response-header signatures, and body signatures; merge_waf_profiles folds the result into a per-host profile stored in session.waf_profiles and persisted across sessions. Per-strategy attempt and success counts are updated using whether the response status escaped the block set (403, 406, 412, 429, 501, 999); rank_bypass_strategies reorders the top 8 by that success history; build_waf_bypass_context renders a <waf_bypass> system message that is reinjected into the conversation after the prior message for that host is removed.",
+      "function_in_system": "Runs in the post-tool cycle after target-facing actions. It addresses the failure mode where a target WAF blocks the agent's recon and scan traffic and the agent stalls by repeating requests that keep getting blocked. It detects the block, tracks which adaptations reduce the block rate, and reinjects ranked guidance so the next turn changes approach. Otherwise the agent spends its iteration budget hammering an obstacle it cannot perceive.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/waf_detector.py",
+          "lines": "100-129",
+          "snippet": "    if status_code in _BLOCK_STATUS_CODES:\n        _record_signal(\n            \"Generic WAF\",\n            _STATUS_CODE_CONFIDENCE,\n            f\"Block status code: {status_code}\",\n        )\n\n    headers_lower = {k.lower(): v for k, v in headers.items()}\n    for header_name, sigs in _HEADER_SIG_INDEX.items():\n        if header_name not in headers_lower:\n            continue\n        header_val = headers_lower[header_name].lower()\n        for sig in sigs:\n            pat = str(sig.get(\"pattern\", \"\"))\n\n            if not pat or pat in header_val:\n                sig_conf = float(sig.get(\"confidence\", 0.40))\n                waf = str(sig.get(\"waf\", \"Generic WAF\"))\n                _record_signal(\n                    waf,\n                    sig_conf,\n                    f\"Header {header_name}: {waf} (conf={sig_conf:.0%})\",\n                )\n                break\n\n    body_check = body_excerpt[:3000]\n    for body_re, waf, sig_conf in _BODY_SIGS:\n        if body_re.search(body_check):\n            _record_signal(\n                waf,"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "1124-1137",
+          "snippet": "                        _waf_profile = detect_waf_from_response(\n                            host=_waf_host,\n                            status_code=_waf_status,\n                            headers=_waf_headers,\n                            body_excerpt=_waf_body,\n                            iteration=self.state.iteration,\n                        )\n                        _existing = self._session.waf_profiles.get(_waf_host)\n                        _merged = merge_waf_profiles(\n                            _existing,\n                            _waf_profile,\n                            host=_waf_host,\n                            status_code=_waf_status,\n                            iteration=self.state.iteration,"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "1199-1212",
+          "snippet": "                                    _stat[\"attempts\"] = (\n                                        int(_stat.get(\"attempts\", 0)) + 1\n                                    )\n                                    if _waf_status and _waf_status not in (\n                                        403,\n                                        406,\n                                        412,\n                                        429,\n                                        501,\n                                        999,\n                                    ):\n                                        _stat[\"successes\"] = (\n                                            int(_stat.get(\"successes\", 0)) + 1\n                                        )"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "1213-1216",
+          "snippet": "                            _ranked = rank_bypass_strategies(_merged, _old_stats)[\n                                :8\n                            ]\n                            _merged.bypass_strategies = _ranked"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_post.py",
+          "lines": "1241-1255",
+          "snippet": "                            _waf_ctx = build_waf_bypass_context(_merged)\n                            if _waf_ctx:\n                                self.state.conversation = [\n                                    m\n                                    for m in self.state.conversation\n                                    if not m.get(\"content\", \"\").startswith(\n                                        f'<waf_bypass host=\"{_waf_host}\"'\n                                    )\n                                ]\n                                self.state.conversation.append(\n                                    {\n                                        \"role\": \"system\",\n                                        \"content\": _waf_ctx,\n                                    }\n                                )"
+        }
+      ]
+    },
+    {
+      "name": "adaptive per-domain rate limiting with congestion-aware backoff and storm abort",
+      "what_it_is": "AdaptiveRateLimiter wraps outbound HTTP with per-domain delay state behind an asyncio lock. It honors Retry-After, applies exponential backoff on 429 and 503 scaled by EWMA response latency with jitter, and maintains an EWMA-latency-versus-baseline congestion signal. A slow-start probe lowers the domain delay by 20% after 5 consecutive clean responses when congestion stays below 0.3, and 429 or timeout responses raise a congestion penalty. When a domain returns the configured number of consecutive 429s or 5 consecutive connection errors it is added to aborted_domains and all further requests to it short-circuit to None.",
+      "function_in_system": "Wraps every HTTP request the fuzzer issues (fuzzer.py:482, 602, 637, 1072). It addresses two failure modes: hammering a target trips rate limits or bans and corrupts the scan, and a congested or dead domain wastes the time budget. It paces per domain, self-tunes toward the fastest safe rate, and bails out of a domain that keeps banning or refusing connections. Otherwise the fuzzer gets 429-throttled into useless results or loops on an unreachable host.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/rate_limiter.py",
+          "lines": "103-130",
+          "snippet": "        for attempt in range(self.max_retries):\n            try:\n                await self._apply_rate_limit(domain)\n\n                loop = asyncio.get_running_loop()\n                request_started = loop.time()\n                response = await self.client.request(method, url, **kwargs)\n                request_elapsed_ms = (loop.time() - request_started) * 1000.0\n                response.extensions[\"airecon_request_ms\"] = request_elapsed_ms\n\n                self.last_request_time[domain] = loop.time()\n                self._record_response(domain, response.status_code, request_elapsed_ms)\n\n                if response.status_code == 429:\n                    logger.warning(\"Rate limit hit (429) on %s\", domain)\n                    await self._handle_rate_limit(response, domain)\n                    continue\n\n                if response.status_code == 503:\n                    logger.warning(\"Service unavailable (503) on %s\", domain)\n                    await self._handle_503(response, domain)\n                    continue\n\n                # Success — reset consecutive failure counters\n                self.consecutive_rate_limits[domain] = 0\n                self.consecutive_connect_errors[domain] = 0\n\n                return response"
+        },
+        {
+          "file": "airecon/proxy/agent/rate_limiter.py",
+          "lines": "211-235",
+          "snippet": "        retry_after = response.headers.get(\"Retry-After\")\n        if retry_after:\n            try:\n                delay = float(retry_after)\n                logger.info(\"Retry-After header: %.1fs\", delay)\n            except ValueError:\n                delay = self.base_delay * (2 ** consecutive)\n        else:\n            hit_count = self.rate_limit_hits.get(domain, 0) + 1\n            self.rate_limit_hits[domain] = hit_count\n\n            ewma = self._response_latency_ewma.get(domain, 100.0)\n            latency_factor = max(1.0, ewma / 200.0)  # scale to ~200ms baseline\n            delay = min(\n                self.base_delay * (2 ** hit_count) * latency_factor,\n                self.max_delay,\n            )\n\n        jitter = rng.uniform(0.8, 1.4)\n        delay *= jitter\n\n        self._slow_start_done[domain] = True\n\n        logger.info(\"Rate limit delay: %.2fs for %s (consecutive=%d)\", delay, domain, consecutive)\n        await asyncio.sleep(delay)"
+        },
+        {
+          "file": "airecon/proxy/agent/rate_limiter.py",
+          "lines": "275-295",
+          "snippet": "        if is_success:\n            consec = self._consecutive_successes.get(domain, 0) + 1\n            self._consecutive_successes[domain] = consec\n\n            if consec >= 5:\n                congestion = self._congestion_signal.get(domain, 0.0)\n                if congestion < 0.3:\n                    current_delay = self.domain_delays.get(domain, self.base_delay)\n                    new_delay = max(current_delay * 0.8, self.base_delay * 0.5)\n                    self.domain_delays[domain] = new_delay\n                    self._consecutive_successes[domain] = 0\n                    logger.debug(\n                        \"Rate probe: lowered delay for %s to %.2fs (congestion=%.2f)\",\n                        domain,\n                        new_delay,\n                        congestion,\n                    )\n        else:\n            self._consecutive_successes[domain] = 0\n            if status_code == 429:\n                self._apply_congestion_penalty(domain, factor=2.0)"
+        },
+        {
+          "file": "airecon/proxy/agent/rate_limiter.py",
+          "lines": "97-101",
+          "snippet": "        if domain in self.aborted_domains:\n            logger.warning(\n                \"Skipping request to aborted domain %s (rate limit storm)\", domain\n            )\n            return None"
+        },
+        {
+          "file": "airecon/proxy/agent/rate_limiter.py",
+          "lines": "140-151",
+          "snippet": "            except httpx.ConnectError:\n                self._record_error(domain)\n                conn_errors = self.consecutive_connect_errors.get(domain, 0) + 1\n                self.consecutive_connect_errors[domain] = conn_errors\n                if conn_errors >= self._CONNECT_ERROR_ABORT_THRESHOLD:\n                    self.aborted_domains.add(domain)\n                    logger.error(\n                        \"Domain %s aborted: %d consecutive connection failures \"\n                        \"(DNS resolution failed). Skipping further requests.\",\n                        domain, conn_errors,\n                    )\n                    return None"
+        },
+        {
+          "file": "airecon/proxy/agent/rate_limiter.py",
+          "lines": "200-209",
+          "snippet": "        if consecutive >= self.rate_limit_abort_threshold:\n            self.aborted_domains.add(domain)\n            logger.error(\n                \"Domain %s aborted: %d consecutive rate limits (threshold: %d). \"\n                \"Skipping further requests to prevent stuck state.\",\n                domain,\n                consecutive,\n                self.rate_limit_abort_threshold,\n            )\n            return"
+        }
+      ]
+    },
+    {
+      "name": "bounded session-state collections",
+      "what_it_is": "Every large SessionData collection is a BoundedList with a per-field cap (_MAX_SUBDOMAINS=10000, _MAX_URLS=50000, _MAX_VULNERABILITIES=1000, conversation maxlen=1000, ...). BoundedList._trim deletes the oldest entries on every append/extend/insert/iadd/setitem once length exceeds maxlen. prune_old_data re-applies all caps in __post_init__, on load, and before every save, and also trims the auth_tokens dict to _MAX_AUTH_TOKENS.",
+      "function_in_system": "Bounds the persisted session structures that grow across a long autonomous run: recon lists, tested-endpoint lists, the vulnerability list, and the stored conversation copy. Keeps process memory bounded and caps the size and write cost of every periodic checkpoint. Otherwise these collections grow without limit, bloating memory and inflating each serialized checkpoint written by the periodic multi-channel state checkpointing.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/session.py",
+          "lines": "30-44",
+          "snippet": "_MAX_SUBDOMAINS = 10000\n_MAX_LIVE_HOSTS = 5000\n_MAX_URLS = 50000\n_MAX_VULNERABILITIES = 1000\n_MAX_ATTACK_CHAINS = 100\n_MAX_INJECTION_POINTS = 5000\n_MAX_AUTH_COOKIES = 100\n_MAX_AUTH_TOKENS = 50\n_MAX_TESTED_ENDPOINTS = 500\n_MAX_TOOLS_RUN = 1000\n_MAX_CORRELATION_SUGGESTIONS = 200\n_MAX_COMPLETED_PHASES = 10\n_MAX_VALIDATED_URLS = 15000\n_MAX_VALIDATED_SUBDOMAINS = 8000\n_MAX_VALIDATED_HOSTS = 5000"
+        },
+        {
+          "file": "airecon/proxy/agent/session.py",
+          "lines": "57-59",
+          "snippet": "    def _trim(self) -> None:\n        if self.maxlen is not None and self.maxlen >= 0 and len(self) > self.maxlen:\n            del self[: len(self) - self.maxlen]"
+        },
+        {
+          "file": "airecon/proxy/agent/session.py",
+          "lines": "1253-1255",
+          "snippet": "    conversation: list[dict[str, Any]] = field(\n        default_factory=lambda: BoundedList(maxlen=1000)\n    )"
+        },
+        {
+          "file": "airecon/proxy/agent/session.py",
+          "lines": "1300-1302",
+          "snippet": "    def prune_old_data(self) -> None:\n        self.subdomains = _coerce_sequence_field(\n            self.subdomains, field_name=\"subdomains\", maxlen=_MAX_SUBDOMAINS"
+        },
+        {
+          "file": "airecon/proxy/agent/session.py",
+          "lines": "1369-1375",
+          "snippet": "        if (\n            isinstance(self.auth_tokens, dict)\n            and len(self.auth_tokens) > _MAX_AUTH_TOKENS\n        ):\n            keys = list(self.auth_tokens.keys())\n            for k in keys[:-_MAX_AUTH_TOKENS]:\n                del self.auth_tokens[k]"
+        }
+      ]
+    },
+    {
+      "name": "fault-tolerant session load (schema-tolerant deserialization)",
+      "what_it_is": "load_session degrades field by field when reading a persisted session: an empty file returns a fresh default SessionData, non-dict JSON returns None, each collection passes through _coerce_sequence_field which parses legacy deque(...)-serialized strings and resets a single unparseable field to empty and keeps loading the rest, integers pass through _coerce_non_negative_int, app_model and causal_state get defensive deserializers, waf_profiles is type-guarded, and a top-level try/except returns None on total failure before prune_old_data runs.",
+      "function_in_system": "The read half of resume, feeding the sessions that post-recovery working-state reconstruction and cross-session prior-findings merge consume. It survives corrupt, partial, or legacy-format session files so a resume keeps every well-formed field when one field is malformed. Otherwise one bad field or an outdated on-disk format aborts the whole load and the engagement restarts from zero.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/session.py",
+          "lines": "1406-1410",
+          "snippet": "            if not content.strip():\n                logger.warning(\n                    \"Session file %s is empty, creating default session\", session_id\n                )\n                return SessionData(session_id=session_id, target=\"\")"
+        },
+        {
+          "file": "airecon/proxy/agent/session.py",
+          "lines": "1413-1417",
+          "snippet": "        if not isinstance(data, dict):\n            logger.error(\n                \"Session file %s contains invalid JSON (not an object)\", filepath\n            )\n            return None"
+        },
+        {
+          "file": "airecon/proxy/agent/session.py",
+          "lines": "100-117",
+          "snippet": "    if isinstance(value, str):\n        text = value.strip()\n        m = _DEQUE_SERIALIZED_RE.match(text)\n        if m:\n            text = m.group(1)\n        try:\n            parsed = ast.literal_eval(text)\n            if isinstance(parsed, list):\n                return BoundedList(parsed, maxlen=maxlen)\n            if isinstance(parsed, tuple):\n                return BoundedList(list(parsed), maxlen=maxlen)\n        except Exception as e:\n            logger.warning(\"Operation failed: %s\", e)\n            logger.warning(\n                \"Failed to parse legacy %s field value; resetting to empty.\",\n                field_name,\n            )\n        return BoundedList(maxlen=maxlen)"
+        },
+        {
+          "file": "airecon/proxy/agent/session.py",
+          "lines": "1547-1549",
+          "snippet": "    except Exception as e:\n        logger.warning(\"Failed to load session %s: %s\", session_id, e)\n        return None"
+        }
+      ]
+    },
+    {
+      "name": "inline no-tool-turn tool-forcing (output-signal triggered)",
+      "what_it_is": "_analyze_llm_output inspects each model turn that emitted no structured tool call. Hallucination phrases (i have found, let me run, the scan shows, ...) or a fake command block (_FAKE_CMD_BLOCK_RE / _FAKE_PLAIN_CMD_RE) trigger a graduated system directive: a fake command block yields [SYSTEM: TOOL CALL REQUIRED] and clears content_acc, a post-vulnerability context (vulns present and exploit phase or iteration>15) yields [SYSTEM: MANDATORY TOOL CALL - EXPLOIT PHASE], and a met nudge threshold yields [SYSTEM: HALLUCINATION WARNING]. A separate branch fires when there is still no tool call, the content carries planning or analysis keywords, and _no_tool_iterations reaches 1 (active target) or 2: it discards the content and injects [SYSTEM: TEXT-ONLY RESPONSES NOT ALLOWED].",
+      "function_in_system": "Runs inside output analysis in the tool cycle (loop_tool_cycle.py:1190 calls _analyze_llm_output). It catches turns that narrate or claim results without executing a tool, deterministically discards the fabricated narration, and injects a directive that forces a concrete tool call on the next turn. Otherwise the model asserts findings it never verified and the loop advances on hallucinated state while consuming iterations.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_llm.py",
+          "lines": "618-644",
+          "snippet": "            combined_lower = combined_response.lower()\n            has_hallucination_risk = any(\n                signal in combined_lower for signal in hallucination_signals\n            )\n\n            has_fake_cmd_block = (\n                bool(self._FAKE_CMD_BLOCK_RE.search(content_acc))\n                or bool(self._FAKE_PLAIN_CMD_RE.search(content_acc))\n            ) if not tool_calls_acc else False\n\n            # Self-consistency check for critical LLM decisions\n            if content_acc and not self._is_text_only_response(content_acc):\n                self._check_critical_decision_consistency(content_acc, tool_calls_acc)\n\n            is_exploit_phase = self.pipeline and self.pipeline.get_current_phase(\n            ) == PipelinePhase.EXPLOIT\n            has_vulns = self._session and len(\n                self._session.vulnerabilities) > 0\n            is_post_vuln_context = has_vulns and (\n                is_exploit_phase or self.state.iteration > 15)\n\n            _in_active_session = bool(self.state.active_target)\n            _nudge_threshold_met = (\n                is_post_vuln_context\n                or (_in_active_session and self._no_tool_iterations >= 1)\n                or self._no_tool_iterations >= 2\n            )"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_llm.py",
+          "lines": "645-666",
+          "snippet": "            if (has_hallucination_risk or has_fake_cmd_block) and not tool_calls_acc:\n                if has_fake_cmd_block:\n\n                    logger.warning(\n                        \"Bash code block detected in text response (iteration=%d) — \"\n                        \"LLM wrote a command instead of calling execute{}\",\n                        self.state.iteration,\n                    )\n                    self.state.conversation.append({\n                        \"role\": \"system\",\n                        \"content\": (\n                            \"[SYSTEM: TOOL CALL REQUIRED — DO NOT WRITE COMMANDS AS TEXT]\\n\"\n                            \"You wrote a shell command in a code block instead of calling a tool.\\n\"\n                            \"Writing ```bash ... ``` does NOT execute the command.\\n\"\n                            \"You MUST call the execute tool to run commands:\\n\"\n                            \"  execute({\\\"command\\\": \\\"your_command_here\\\"})\\n\"\n                            \"Call the tool NOW. Do not repeat the code block.\"\n                        ),\n                    })\n                    content_acc = \"\"\n                elif is_post_vuln_context:\n"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_llm.py",
+          "lines": "716-757",
+          "snippet": "            _text_only_threshold = 1 if _in_active_session else 2\n            if not tool_calls_acc and content_acc.strip() and self._no_tool_iterations >= _text_only_threshold:\n\n                _planning_keywords = [\n                    \"i will\", \"i'll\", \"let me\", \"next step\",\n                    \"i should\", \"i need to\", \"i'm going to\",\n                    \"first, i\", \"to do this\", \"i would\",\n                ]\n                _analysis_keywords = [\n                    \"analysis\", \"shows\", \"found\", \"detected\",\n                    \"i have\", \"based on\", \"my analysis\", \"the results\",\n                    \"might\", \"could be\", \"appears\", \"potentially\",\n                ]\n                _all_no_tool_keywords = _planning_keywords + _analysis_keywords\n                content_lower = content_acc.lower()\n                is_no_tool_text = any(\n                    kw in content_lower for kw in _all_no_tool_keywords\n                )\n                current_phase_name = (\n                    self.pipeline.get_current_phase().value\n                    if self.pipeline else \"UNKNOWN\"\n                )\n                if is_no_tool_text:\n                    logger.warning(\n                        \"Text-only response for %d consecutive iterations \"\n                        \"in %s phase — discarding and forcing tool call.\",\n                        self._no_tool_iterations,\n                        current_phase_name,\n                    )\n                    self.state.conversation.append({\n                        \"role\": \"system\",\n                        \"content\": (\n                            f\"[SYSTEM: TEXT-ONLY RESPONSES NOT ALLOWED]\\n\"\n                            f\"You have provided {self._no_tool_iterations} consecutive \"\n                            f\"responses without calling any tool.\\n\"\n                            f\"Current phase: {current_phase_name}\\n\"\n                            f\"You MUST call a tool NOW. Do NOT plan or describe — EXECUTE.\"\n                        ),\n                    })\n\n                    tool_calls_acc = []\n                    content_acc = \"\""
+        }
+      ]
+    },
+    {
+      "name": "confident vuln-claim evidence-grounding guard",
+      "what_it_is": "In _analyze_llm_output, when the assistant content is confident (contains none of the hedge words might/could/possibly/appears/...) and matches a vuln-claim regex (sql injection|xss|ssrf|idor|rce|lfi|rfi|xxe|command injection followed by in/at/on and an endpoint), the code checks the extracted vuln_type plus endpoint against session.vulnerabilities and against whether a vulnerability-scanning or fuzzing tool was called for that endpoint in the same turn. When neither holds it injects [SYSTEM: HALLUCINATION WARNING] naming the claim and demanding the model either call the scanner, hedge, or supply the confirming tool output.",
+      "function_in_system": "Runs after the assistant message is added to state. It grounds a confident vulnerability assertion in either stored evidence or an actual scanner run for that endpoint. Otherwise the agent records fabricated vulnerabilities as confirmed findings that then drive the exploit phase and the final report.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_llm.py",
+          "lines": "785-795",
+          "snippet": "                hedge_words = [\n                    \"might\", \"could\", \"possibly\", \"appears\", \"suggests\",\n                    \"may\", \"potentially\", \"likely\", \"probable\", \"seems\",\n                ]\n                is_confident = not any(hedge in content_acc.lower() for hedge in hedge_words)\n\n                if is_confident:\n\n                    vuln_claim_patterns = [\n                        r\"(sql\\s*(injection)?|xss|ssrf|idor|rce|lfi|rfi|xxe|command\\s+injection)\\s+(in|at|on|found\\s+in|detected\\s+at)\\s+([^\\s,.!?]+)\",\n                    ]"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_llm.py",
+          "lines": "844-858",
+          "snippet": "                            if not has_session_evidence and not has_tool_evidence:\n                                logger.warning(\n                                    \"HALLUCINATION DETECTED: Claimed '%s' but no tool called and no session evidence\",\n                                    claim_text,\n                                )\n\n                                self.state.conversation.append({\n                                    \"role\": \"system\",\n                                    \"content\": (\n                                        f\"[SYSTEM: HALLUCINATION WARNING] You claimed '{claim_text}' \"\n                                        f\"but no scanner tool (sqlmap/nuclei/ffuf) was called for this endpoint \"\n                                        f\"and it's not in confirmed vulnerabilities. \"\n                                        f\"Either: (1) call the appropriate scanner tool first, \"\n                                        f\"(2) use hedged language ('might be', 'appears to'), or \"\n                                        f\"(3) provide the tool output that confirms this finding.\""
+        }
+      ]
+    },
+    {
+      "name": "periodic self-consistency check on critical claims",
+      "what_it_is": "_check_critical_decision_consistency increments _consistency_counter on each call and acts only every eighth invocation. On that cadence, if the content matches a critical-claim regex (vulnerabilities found/detected/discovered/confirmed, a severity term, or sqli/xss/ssrf/idor/rce/lfi/xxe with in/at/on/found) and MetaReasoningEngine.needs_consistency_check passes, it appends a <self_consistency_check> system message telling the model to re-verify its reasoning from a different angle, confirm its certainty, and pick a safer verification step if uncertain. It is fire-and-forget so the next model call consumes it with no extra API call.",
+      "function_in_system": "Called from _analyze_llm_output (loop_cycle_llm.py:630) on turns whose content is not text-only. It periodically pushes the model to second-guess a confident security conclusion before that conclusion drives the next actions. Otherwise a single confident but wrong classification flows downstream unchallenged.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_llm.py",
+          "lines": "899-911",
+          "snippet": "        # Only check occasionally (every 8 iterations)\n        if not hasattr(self, \"_consistency_counter\"):\n            self._consistency_counter = 0\n        self._consistency_counter += 1\n        if self._consistency_counter % 8 != 0:\n            return\n\n        import re as _re\n        critical_patterns = [\n            _re.compile(r\"(?:vulnerabilities?\\s+(?:found|detected|discovered|confirmed))\", _re.I),\n            _re.compile(r\"(?:critical|high|medium|low)\\s+(?:severity|vulnerab|issue)\", _re.I),\n            _re.compile(r\"(?:sql\\s*injection|xss|ssrf|idor|rce|lfi|xxe)\\s+(?:in|at|on|found)\", _re.I),\n        ]"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_llm.py",
+          "lines": "945-957",
+          "snippet": "        self.state.conversation.append({\n            \"role\": \"system\",\n            \"content\": (\n                f\"<self_consistency_check>\\n\"\n                f\"Your previous response was: {text[:200]}\\n\"\n                f\"Self-verify: Consider if your reasoning holds up from a different angle. \"\n                f\"Are you certain? Is there an alternative explanation? \"\n                f\"Do you have sufficient evidence?\\n\"\n                f\"If confident, continue with tool execution as planned.\\n\"\n                f\"If uncertain, choose a safer verification step.\\n\"\n                f\"</self_consistency_check>\"\n            ),\n        })"
+        }
+      ]
+    },
+    {
+      "name": "text-embedded tool-call extraction (fallback promotion)",
+      "what_it_is": "When a turn produced no structured tool_calls, _extract_tool_calls_from_text (loop.py:993) recovers them from the text: first via _TOOL_CALL_RE matches, then by a brace-depth scan that isolates balanced {...} objects containing a name key. Each candidate is parsed by _parse_tool_call_json (_try_parse_json also strips // and /* */ comments before retrying) and accepted only if its name is a registered tool. _analyze_llm_output promotes any extracted calls into tool_calls_acc and strips them from content_acc.",
+      "function_in_system": "Runs in _analyze_llm_output when tool_calls_acc is empty. It recovers a tool call that a local model wrote as text or raw JSON when the structured tool-calling interface was expected, so a formatting slip still executes. Otherwise a correctly intended tool call written as text is lost and the turn counts as a no-tool stall turn.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_cycle_llm.py",
+          "lines": "703-714",
+          "snippet": "            if not tool_calls_acc:\n                _registered = {\n                    t[\"function\"][\"name\"] for t in (self._tools_ollama or [])\n                }\n                _search_text = content_acc + \"\\n\" + thinking_acc\n                extracted = self._extract_tool_calls_from_text(\n                    _search_text, _registered\n                )\n                if extracted:\n                    tool_calls_acc.extend(extracted)\n                    content_acc = self._TOOL_CALL_RE.sub(\n                        \"\", content_acc).strip()"
+        },
+        {
+          "file": "airecon/proxy/agent/loop.py",
+          "lines": "998-1023",
+          "snippet": "        for raw_json in self._TOOL_CALL_RE.findall(text):\n            tc = self._parse_tool_call_json(raw_json, registered_tools)\n            if tc:\n                tool_calls.append(tc)\n\n        if tool_calls:\n            return tool_calls\n\n        brace_depth = 0\n        start_idx = None\n        for i, ch in enumerate(text):\n            if ch == \"{\":\n                if brace_depth == 0:\n                    start_idx = i\n                brace_depth += 1\n            elif ch == \"}\":\n                brace_depth -= 1\n                if brace_depth == 0 and start_idx is not None:\n                    candidate = text[start_idx : i + 1]\n\n                    if '\"name\"' in candidate or \"'name'\" in candidate:\n                        tc = self._parse_tool_call_json(candidate, registered_tools)\n                        if tc:\n                            tool_calls.append(tc)\n                    start_idx = None\n"
+        },
+        {
+          "file": "airecon/proxy/agent/loop.py",
+          "lines": "1041-1044",
+          "snippet": "        if tc_name and tc_name in registered_tools:\n            logger.info(\"[fallback] Extracted tool_call: %s\", tc_name)\n            return {\"function\": {\"name\": tc_name, \"arguments\": tc_args}}\n        return None"
+        }
+      ]
+    },
+    {
+      "name": "repeat tool-call blocking (normalized-arg dedup)",
+      "what_it_is": "_normalize_args_for_dedup builds a dedup key by stripping output-file flags (-oA/-oN/-oX/-oG/-oJ/-o, --output), shell redirections, cookie-jar flags, and timestamp suffixes from an execute command, then JSON-serializing the args sorted. _execute_tool_and_record counts each key in _executed_tool_counts. Before running, _is_recon_phase_repeat_blocked blocks a repeated recon command with a pivot-to-a-new-recon-vector error, and any key whose count reaches agent_repeat_tool_call_limit is blocked with a 'Duplicate tool execution prevented (already ran Nx)' error. MCP list_tools and search_tools discovery calls are exempt. The count increments only when a call actually executes.",
+      "function_in_system": "Sits at the top of the tool-execution path before dispatch. It detects semantically identical repeat calls and blocks them so the agent reuses prior results and pivots. Otherwise a local model loops on the same command variant, for example the same scan pointed at a fresh timestamped output file, and burns the iteration budget redoing work already done.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/executors_dispatch.py",
+          "lines": "352-366",
+          "snippet": "    def _normalize_args_for_dedup(\n        self, tool_name: str, arguments: dict[str, Any]\n    ) -> tuple[str, str]:\n        args_copy = dict(arguments)\n        if tool_name == \"execute\" and \"command\" in args_copy:\n            cmd = args_copy[\"command\"]\n            cmd = re.sub(r\"(\\s+-(oA|oN|oX|oG|oJ|o)\\s+[^\\s]+)\", \"\", cmd)\n            cmd = re.sub(r\"(\\s+--output\\s*=?\\s*[^\\s]+)\", \"\", cmd)\n            cmd = re.sub(r\"(\\s*>\\s*[^\\s]+(\\s+2>&1)?)\", \"\", cmd)\n            cmd = re.sub(r\"(\\s+-[bc]\\s+output/cookies\\.txt)\", \"\", cmd)\n            cmd = re.sub(r\"(\\s+--cookie(?:-jar)?\\s+[^\\s]+)\", \"\", cmd)\n            cmd = re.sub(r\"_[0-9]{8}_[0-9]{6}\\.\", \".\", cmd)\n            args_copy[\"command\"] = cmd.strip()\n\n        return tool_name, json.dumps(args_copy, sort_keys=True, default=str)"
+        },
+        {
+          "file": "airecon/proxy/agent/executors_dispatch.py",
+          "lines": "449-484",
+          "snippet": "        args_key = self._normalize_args_for_dedup(tool_name, arguments)\n        count = self._executed_tool_counts.get(args_key, 0)\n        limit = get_config().agent_repeat_tool_call_limit\n\n        # MCP meta-operations (list_tools, search_tools) are read-only discovery\n        # calls — they must never be blocked by dedup. Only call_tool with the\n        # same tool+args combination is subject to repeat limits.\n        _mcp_meta_action = (\n            tool_name.startswith(\"mcp_\")\n            and str(arguments.get(\"action\", \"\")).strip().lower()\n            in (\"list_tools\", \"search_tools\")\n        )\n\n        if not _mcp_meta_action:\n            if self._is_recon_phase_repeat_blocked(tool_name, arguments, count):\n                binary = self._extract_command_binary(arguments.get(\"command\", \"\"))\n                return (\n                    False,\n                    0.0,\n                    {\n                        \"success\": False,\n                        \"error\": (\n                            f\"Duplicate recon execution blocked for '{binary}'. \"\n                            \"Use previous results and pivot to a new recon vector.\"\n                        ),\n                    },\n                    None,\n                )\n\n            if count >= limit:\n                return (\n                    False,\n                    0.0,\n                    {\n                        \"success\": False,\n                        \"error\": f\"Duplicate tool execution prevented (already ran {count}x).\","
+        },
+        {
+          "file": "airecon/proxy/agent/executors_dispatch.py",
+          "lines": "941-944",
+          "snippet": "        if success:\n            self._executed_tool_counts[args_key] = (\n                self._executed_tool_counts.get(args_key, 0) + 1\n            )"
+        }
+      ]
+    },
+    {
+      "name": "post-failure error-signature hint enrichment",
+      "what_it_is": "When a tool result is a failure, _execute_tool_and_record matches the error or stderr text against known signatures and appends a targeted [SYSTEM HINT] to the returned error: a bash single-quote EOF error gets quote-escaping guidance, int() argument or invalid literal for int gets a numeric-field hint, a missing 'required argument' error gets a re-read-the-tool-definition hint, and a NoneType attribute error gets a non-null and correct-type hint.",
+      "function_in_system": "Runs after execution when success is false, before the result returns to the loop. It translates an opaque runtime error into an actionable correction the model can apply on the next turn. Otherwise the model sees a raw error string and retries the same malformed call.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/executors_dispatch.py",
+          "lines": "882-918",
+          "snippet": "        if not success:\n            err_msg = str(result.get(\"error\") or result.get(\"stderr\") or \"\")\n            if \"unexpected EOF while looking for matching `''\" in err_msg:\n                hint = (\n                    \"\\n\\n[SYSTEM HINT]: Bash syntax error! You cannot escape a single quote inside a single-quoted string \"\n                    \"(e.g., 'don\\\\'t' is invalid). To use a single quote inside a single-quoted string, close the quote, \"\n                    \"insert an escaped quote, and reopen it: 'don'\\\\''t'. Alternatively, wrap your entire command/regex in double \"\n                    \"quotes if it contains single quotes.\"\n                )\n                if \"error\" in result and result[\"error\"]:\n                    result[\"error\"] = str(result[\"error\"]) + hint\n                if \"stderr\" in result and result[\"stderr\"]:\n                    result[\"stderr\"] = str(result[\"stderr\"]) + hint\n\n            elif \"int() argument\" in err_msg or \"invalid literal for int\" in err_msg:\n                result[\"error\"] = (\n                    err_msg\n                    + \"\\n[SYSTEM HINT]: A numeric argument was given a non-numeric value. \"\n                    \"Check that integer fields (e.g. port, limit, count) are actual numbers, not strings.\"\n                )\n\n            elif \"required\" in err_msg.lower() and \"argument\" in err_msg.lower():\n                result[\"error\"] = (\n                    err_msg\n                    + f\"\\n[SYSTEM HINT]: The tool '{tool_name}' is missing a required argument. \"\n                    \"Re-read the tool definition and include all required fields.\"\n                )\n\n            elif (\n                \"NoneType\" in err_msg or \"'NoneType' object has no attribute\" in err_msg\n            ):\n                result[\"error\"] = (\n                    err_msg\n                    + f\"\\n[SYSTEM HINT]: A None value was passed where a string/dict was expected for tool '{tool_name}'. \"\n                    \"Check that all arguments are non-null and the correct type.\"\n                )\n"
+        }
+      ]
+    },
+    {
+      "name": "tool-history record truncation with disk pointer",
+      "what_it_is": "After a successful call whose serialized result exceeds _RESULT_TRUNCATION_THRESHOLD and was already written to an output_file by _save_tool_output, the entry appended to state.tool_history is replaced with a compact placeholder {success, result: '<Result truncated. Full output in {output_file}>', truncated: True}, while the full result still returns to the caller.",
+      "function_in_system": "Runs just before appending the ToolExecution to tool_history. It keeps the persisted tool-history record small when the live output is large but already on disk. Otherwise tool_history accumulates full large outputs, bloating process memory and every serialized checkpoint that includes it.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/executors_dispatch.py",
+          "lines": "744-744",
+          "snippet": "            success = result.get(\"success\", False)"
+        },
+        {
+          "file": "airecon/proxy/agent/executors_dispatch.py",
+          "lines": "921-927",
+          "snippet": "        history_result = result\n        if success and output_file and len(str(result)) > _RESULT_TRUNCATION_THRESHOLD:\n            history_result = {\n                \"success\": True,\n                \"result\": f\"<Result truncated. Full output in {output_file}>\",\n                \"truncated\": True,\n            }"
+        }
+      ]
+    },
+    {
+      "name": "per-phase per-tool call budget (hit-rate adjusted)",
+      "what_it_is": "_check_tool_budget tracks each tool's call count and hit-rate per phase (state.get_tool_effectiveness, get_phase_tool_count) against _PHASE_TOOL_BUDGETS and thresholds loaded from data/validation_config.json. EXPLOIT phase gets a higher call allowance (_BUDGET_EXPLOIT_MIN_CALLS) and a lower hit-rate floor. After at least 4 calls the effective budget is scaled to 0.80x for a low-yield tool and 1.20x for a productive one (hit-rate >= 0.55), and an evidence-growth exemption suppresses low-yield warnings while evidence_log keeps growing. It returns graduated [TOOL BUDGET] advisories: low-yield, not-recommended-in-phase, exhausted, and at 80 percent of budget.",
+      "function_in_system": "Runs after each tool result (loop_cycle_post.py:1091) and returns a note injected into the tool output. It steers the agent off a tool that burns calls without producing evidence in the current phase. Otherwise the agent keeps spending its iteration budget on a low-yield or phase-inappropriate tool.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_objectives.py",
+          "lines": "1444-1506",
+          "snippet": "    def _check_tool_budget(self, tool_name: str, phase: str) -> str:\n        \"\"\"Emit advisory messages when a tool is over-budget or consistently low-yield.\n\n        Thresholds are loaded from data/validation_config.json (tool_budget section)\n        and are phase-aware: EXPLOIT phase gets a higher call allowance and lower\n        hit-rate floor to accommodate WAF bypass and iterative probing scenarios.\n        An evidence-growth exemption prevents false pivots when the agent is actively\n        making progress (evidence_log growing) despite a low per-tool hit-rate.\n        \"\"\"\n        is_exploit = phase.upper() == \"EXPLOIT\"\n        _min_calls    = _BUDGET_EXPLOIT_MIN_CALLS  if is_exploit else _BUDGET_DEFAULT_MIN_CALLS\n        _warn_thresh  = _BUDGET_EXPLOIT_THRESHOLD   if is_exploit else _BUDGET_DEFAULT_THRESHOLD\n\n        eff = self.state.get_tool_effectiveness(phase, tool_name)\n        calls    = int(eff.get(\"calls\", 0.0))\n        hit_rate = float(eff.get(\"hit_rate\", 0.0))\n\n        # Evidence-growth exemption: if the evidence log has grown recently,\n        # the agent is making progress — suppress low-yield warnings regardless\n        # of the per-tool hit-rate so iterative probing is not cut short.\n        recent_evidence = len(self.state.evidence_log)\n        evidence_exemption = recent_evidence >= _BUDGET_EVIDENCE_EXEMPTION\n\n        budget = _PHASE_TOOL_BUDGETS.get(phase, {}).get(tool_name)\n\n        if budget is None:\n            # Unconstrained tool — only warn when clearly unproductive.\n            if calls >= _min_calls and hit_rate < _warn_thresh and not evidence_exemption:\n                return (\n                    f\"[TOOL BUDGET] '{tool_name}' is low-yield in {phase} \"\n                    f\"(hit-rate={hit_rate:.0%}, calls={calls}/{_min_calls} min). \"\n                    \"Consider pivoting to a different tool or vector.\"\n                )\n            return \"\"\n\n        usage = self.state.get_phase_tool_count(phase, tool_name)\n\n        # Adjust effective budget by hit-rate: reward productive tools, warn on waste.\n        # Only apply adjustment after enough calls for a meaningful sample.\n        effective_budget = budget\n        if calls >= 4:\n            if hit_rate < _warn_thresh and not evidence_exemption:\n                effective_budget = max(1, int(budget * 0.80))\n            elif hit_rate >= 0.55:\n                effective_budget = int(budget * 1.20)\n\n        if budget == 0 and usage >= 1:\n            return (\n                f\"[TOOL BUDGET] '{tool_name}' is not recommended in {phase} phase \"\n                f\"(used {usage}×). Switch to a phase-appropriate tool.\"\n            )\n        if usage >= effective_budget:\n            return (\n                f\"[TOOL BUDGET] '{tool_name}' has exhausted its {phase} phase budget \"\n                f\"({usage}/{effective_budget}, base={budget}, hit-rate={hit_rate:.0%}). \"\n                \"Switch approach or tool family.\"\n            )\n        if effective_budget > 0 and usage >= int(effective_budget * 0.80):\n            return (\n                f\"[TOOL BUDGET] '{tool_name}' is at {usage}/{effective_budget} of {phase} budget \"\n                f\"(base={budget}, hit-rate={hit_rate:.0%}). Plan remaining calls carefully.\"\n            )\n        return \"\""
+        }
+      ]
+    },
+    {
+      "name": "cross-tool corroboration verification",
+      "what_it_is": "Two checks that require at least two independent tool sources. _check_evidence_corroboration groups recent evidence tags by source_tool and, when the same non-generic tag came from 2+ different tools, records a high-confidence (0.88) CORROBORATED evidence entry tagged corroborated and multi-source. _verify_confirmed_hypotheses promotes a hypothesis from the LLM-declared status confirmed to verified only when at least two independent tools (evidence confidence >= 0.65, tag or keyword overlap with the claim) back it, marks hyp['verified'] with the supporting tools, and returns the newly promoted ids so the caller surfaces a [VERIFICATION] note.",
+      "function_in_system": "_check_evidence_corroboration runs during evidence recording (loop_objectives.py:1004) and _verify_confirmed_hypotheses after tool cycles (loop_cycle_post.py:1349). Together they gate a finding on independent multi-source agreement before it counts as high-confidence or verified. Otherwise a single-source or LLM-self-declared finding is trusted as confirmed and drives the exploit phase and the final report.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_objectives.py",
+          "lines": "1013-1046",
+          "snippet": "        if not self.state or len(self.state.evidence_log) < 2:\n            return\n\n        # Build: tag → set of tools that produced it\n        tag_tools: dict[str, set[str]] = {}\n        for ev in self.state.evidence_log[-40:]:  # scan recent 40 entries\n            src = str(ev.get(\"source_tool\", \"\")).strip()\n            for tag in ev.get(\"tags\", []):\n                tag_str = str(tag).strip().lower()\n                if tag_str and len(tag_str) >= 4 and tag_str not in (\n                    \"artifact\", \"file\", \"error\", \"recon\", \"trace\", \"network\",\n                    \"signal\", \"url\", \"endpoint\", \"execution\",\n                ):\n                    tag_tools.setdefault(tag_str, set()).add(src)\n\n        # Tags corroborated by 2+ different tools\n        _already_noted: set[str] = getattr(self, \"_corroborated_tags\", set())\n        for tag, tools in tag_tools.items():\n            if len(tools) >= 2 and tag not in _already_noted:\n                _already_noted.add(tag)\n                _tools_str = \", \".join(sorted(tools)[:3])\n                self.state.add_evidence(\n                    phase=phase,\n                    source_tool=current_tool,\n                    summary=(\n                        f\"CORROBORATED: '{tag}' signal independently seen from \"\n                        f\"{len(tools)} different tool(s): {_tools_str}\"\n                    ),\n                    confidence=0.88,\n                    tags=[tag, \"corroborated\", \"multi-source\"],\n                    severity=3,\n                )\n                logger.info(\n                    \"Evidence corroboration: tag=%r across tools=%s\","
+        },
+        {
+          "file": "airecon/proxy/agent/loop_objectives.py",
+          "lines": "1101-1126",
+          "snippet": "                if float(ev.get(\"confidence\", 0.0)) < 0.65:\n                    continue\n                ev_summary = str(ev.get(\"summary\", \"\")).lower()\n                ev_tags = {str(t).lower() for t in ev.get(\"tags\", [])}\n                ev_tool = str(ev.get(\"source_tool\", \"\")).strip().lower()\n                if not ev_tool or ev_tool == \"corroborated\":\n                    continue\n\n                tag_overlap = bool(claim_keywords & {t for t in ev_tags if len(t) >= 4})\n                tag_shared = bool(hyp_tags & ev_tags)\n                keyword_overlap = (\n                    len(claim_keywords & set(ev_summary.split())) >= 2\n                )\n                if tag_overlap or tag_shared or keyword_overlap:\n                    supporting_tools.add(ev_tool)\n\n            if len(supporting_tools) >= 2:\n                hyp[\"verified\"] = True\n                hyp[\"verified_by\"] = sorted(supporting_tools)[:5]\n                newly_verified.append(hid)\n                _already.add(hid)\n                logger.info(\n                    \"Hypothesis %s verified by %d independent tools: %s\",\n                    hid,\n                    len(supporting_tools),\n                    \", \".join(sorted(supporting_tools)),"
+        }
+      ]
+    },
+    {
+      "name": "stagnation-triggered aggressive-exploration directive with tool and approach blocking",
+      "what_it_is": "_build_exploration_directive derives stagnation and same-tool thresholds from _calculate_adaptive_threshold and flags is_stagnating from _stagnation_iterations, _consecutive_failures, _no_tool_iterations, _get_same_tool_streak (the run length of the last tool in _recent_tool_names), and _consecutive_same_approach. When stagnating (or in ANALYSIS/EXPLOIT phase) it injects an [AGGRESSIVE EXPLORATION MODE] directive with mandatory-pivot rules and tested versus untested vuln classes, adds a [TOOL BLOCK] when the same-tool streak reaches max_same_streak, an [APPROACH BLOCK] at consecutive_same >= 2, and a [STRATEGY ADJUSTMENT] from _self_correcting_strategy. Scope lock replaces the whole directive with a STRICT_SCOPE_MODE disable.",
+      "function_in_system": "Built each iteration in the prelude (loop_cycle_prelude.py:875) and injected as context. It detects when the agent is stuck repeating a tool or approach and forces a pivot to an untested vector. Otherwise a local model loops on one tool or vuln class and consumes the iteration budget without new coverage.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/loop_exploration.py",
+          "lines": "147-157",
+          "snippet": "    def _get_same_tool_streak(self) -> int:\n        if not self._recent_tool_names:\n            return 0\n        streak = 1\n        last = self._recent_tool_names[-1]\n        for tn in reversed(self._recent_tool_names[:-1]):\n            if tn != last:\n                break\n            streak += 1\n        return streak\n"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_exploration.py",
+          "lines": "218-237",
+          "snippet": "        stagnation_threshold, max_same_streak = _calculate_adaptive_threshold(\n            phase,\n            self.state.iteration,\n            len(self.state.evidence_log),\n            self._consecutive_failures,\n        )\n\n        same_tool_streak = self._get_same_tool_streak()\n        window = max(3, self._cfg_int(cfg, \"agent_tool_diversity_window\", 8))\n        recent = self._recent_tool_names[-window:]\n        unique_recent = len(set(recent)) if recent else 0\n        consecutive_same = getattr(self, \"_consecutive_same_approach\", 0)\n\n        is_stagnating = (\n            self._stagnation_iterations >= stagnation_threshold\n            or self._consecutive_failures >= 2\n            or self._no_tool_iterations >= 1\n            or same_tool_streak >= max_same_streak\n            or consecutive_same >= 2\n        )"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_exploration.py",
+          "lines": "303-322",
+          "snippet": "            if same_tool_streak >= max_same_streak:\n                lines.append(\n                    f\"\\n[TOOL BLOCK] You used '{recent[-1] if recent else 'unknown'}' {same_tool_streak}x consecutively. \"\n                    f\"You are BLOCKED from using this tool family this iteration. Pick a completely different approach.\"\n                )\n            if consecutive_same >= 2:\n                lines.append(\n                    \"\\n[APPROACH BLOCK] Your last 2+ iterations used the same approach pattern. \"\n                    \"You MUST switch to a fundamentally different attack class now.\"\n                )\n            if self._no_tool_iterations >= 1:\n                lines.append(\"MANDATORY: reply with tool_call, not planning text.\")\n            lines.append(\n                \"Keep tests in-scope and non-destructive unless explicitly authorized.\"\n            )\n\n        strategy_hint = self._self_correcting_strategy(phase, recent, same_tool_streak)\n        if strategy_hint:\n            lines.append(f\"\\n[STRATEGY ADJUSTMENT] {strategy_hint}\")\n"
+        }
+      ]
+    },
+    {
+      "name": "zero-FP finding-verification pipeline",
+      "what_it_is": "VerificationEngine.verify_finding runs every fuzzer finding through five stages: false-positive detection (dynamic-content diffing, WAF/CDN signature match, honeypot indicators, reflection-only and header-only reflection checks), negative testing with known-clean payloads, replay verification that re-requests the target with independent per-vuln-type payloads and counts confirmations, cross-tool validation requiring 2+ independent signals, and a ConfidenceEscalator that assigns a tier (unverified, replay, cross-tool, certified) and a recomputed confidence. The fuzzer keeps a finding only when verified_confidence >= verification_min_report_confidence (default 0.75).",
+      "function_in_system": "Sits in the fuzzer between raw fuzz results and the reported findings (fuzzer._verify_findings, run at the end of the fuzz batch). It re-tests each candidate vulnerability out-of-band and drops or downgrades ones that fail confirmation. Otherwise raw fuzzer heuristics surface false positives (encoded reflections, WAF blocks, dynamic content, honeypots) as real vulnerabilities and the agent acts on and reports fabricated findings.",
+      "activation": "default_on",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/config.py",
+          "lines": "617-619",
+          "snippet": "    \"verification_enabled\": (\n        True,\n        \"Enable zero-FP verification engine. When True, all findings go through multi-stage verification.\","
+        },
+        {
+          "file": "airecon/proxy/agent/verification.py",
+          "lines": "621-629",
+          "snippet": "        \"\"\"Run full verification pipeline on a finding.\n\n        Pipeline:\n        1. FP Detection (dynamic content, WAF, honeypot, reflection-only)\n        2. Negative Testing (clean payloads)\n        3. Replay Verification (independent payloads)\n        4. Cross-Tool Validation (multiple signals)\n        5. Confidence Escalation (final tier calculation)\n        \"\"\""
+        },
+        {
+          "file": "airecon/proxy/agent/verification.py",
+          "lines": "537-542",
+          "snippet": "        if fp_detected:\n            return (\n                self.TIER_UNVERIFIED,\n                max(0.05, confidence * 0.2),\n                \"BLOCKED: False positive detected\",\n            )"
+        },
+        {
+          "file": "airecon/proxy/fuzzer.py",
+          "lines": "940, 962, 974-976",
+          "snippet": "        min_report_conf = cfg.verification_min_report_confidence\n            if verification.verified_confidence >= min_report_conf:\n            else:\n                logger.info(\n                    f\"  FILTERED {finding.vuln_type} on '{finding.parameter}': \""
+        }
+      ]
+    },
+    {
+      "name": "adaptive parser selection for unknown tools (quality-scored, hint-learning)",
+      "what_it_is": "When detect_tool finds no dedicated parser or the dedicated parser raises, parse_tool_output calls _adaptive_unknown_parse. It derives candidate generic parsers from output signatures (_signature_candidates_for_unknown), prepends any previously learned hint for that binary, runs each candidate plus _parse_generic_smart, scores every result with _score_parsed_quality (coverage, item uniqueness, structural ratio, summary quality, raw-fallback penalty), and picks the highest-scoring output. When the winner beats generic with score >= 0.45 it stores the binary to parser mapping via _remember_adaptive_tool_hint for reuse. result.parse_quality is tagged known, adaptive, or fallback.",
+      "function_in_system": "Sits at the tool-output parsing entry (parse_tool_output, called from loop_cycle_post and formatters after each tool run) that turns raw stdout into structured items for the model. It structures output from tools the system has no dedicated parser for and reuses the best strategy next time. Otherwise unrecognized tool output falls straight to a raw text dump, inflating context with unstructured text and leaving the model to parse findings itself.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/output_parser.py",
+          "lines": "406-436",
+          "snippet": "def _adaptive_unknown_parse(\n    command: str,\n    stdout: str,\n    *,\n    detected_binary: str,\n    max_items: int,\n) -> tuple[ParsedOutput, str, float]:\n    candidates = _signature_candidates_for_unknown(command, stdout)\n    hinted_parser = _ADAPTIVE_TOOL_HINTS.get(detected_binary.lower())\n    if hinted_parser in _PARSERS and hinted_parser not in candidates:\n        candidates.insert(0, hinted_parser)\n    attempts: list[tuple[ParsedOutput, str, float]] = []\n\n    for parser_name in candidates:\n        parser_fn = _PARSERS.get(parser_name)\n        if not parser_fn:\n            continue\n        try:\n            parsed = parser_fn(stdout, max_items=max_items)\n            score = _score_parsed_quality(parsed, stdout)\n            attempts.append((parsed, parser_name, score))\n        except Exception as exc:\n            logger.debug(\"Adaptive parser candidate failed (%s): %s\", parser_name, exc)\n\n    generic = _parse_generic_smart(stdout, max_items=max_items)\n    generic_score = _score_parsed_quality(generic, stdout)\n    attempts.append((generic, \"generic\", generic_score))\n\n    best_parsed, best_parser, best_score = max(attempts, key=lambda item: item[2])\n    if best_parser != \"generic\" and best_score >= 0.45 and detected_binary:\n        _remember_adaptive_tool_hint(detected_binary, best_parser)"
+        },
+        {
+          "file": "airecon/proxy/agent/output_parser.py",
+          "lines": "396-403",
+          "snippet": "    score = (\n        (coverage * 0.30)\n        + (uniqueness * 0.20)\n        + (structure_ratio * 0.30)\n        + (summary_quality * 0.20)\n        - raw_fallback_penalty\n    )\n    return max(0.0, min(1.0, score))"
+        },
+        {
+          "file": "airecon/proxy/agent/output_parser.py",
+          "lines": "749-754, 783",
+          "snippet": "        result, chosen_parser, quality_score = _adaptive_unknown_parse(\n            command,\n            stdout,\n            detected_binary=detected,\n            max_items=max_items,\n        )\n        result.parse_quality = \"fallback\" if chosen_parser == \"generic\" else \"adaptive\""
+        }
+      ]
+    },
+    {
+      "name": "phase-graduated parsed-item cap",
+      "what_it_is": "Each parser truncates its structured items to max_items, resolved per phase from _MAX_ITEMS_BY_PHASE (RECON 200, ANALYSIS 150, EXPLOIT 50, REPORT 25; DEFAULT_MAX_ITEMS 100 for an unknown phase). parse_tool_output looks up the cap by the current phase and passes it into whichever parser runs. Raw fallback text is separately bounded to MAX_RAW_FALLBACK (3000 chars).",
+      "function_in_system": "Sits in parse_tool_output before any parser runs, bounding how many parsed items from one tool result enter the conversation, tighter in later phases where breadth matters less. Otherwise a large scan result (hundreds of hosts or URLs) floods the context window with low-value items and crowds out room the model needs for exploitation and reporting.",
+      "activation": "default_on",
+      "enforcement": "config",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/output_parser.py",
+          "lines": "35-51",
+          "snippet": "def _get_max_items_by_phase() -> dict[str, int]:\n    from ..config import get_config as _get_config\n\n    cfg = _get_config()\n    return {\n        \"RECON\": getattr(cfg, \"pipeline_output_parser_max_items_recon\", 200),\n        \"ANALYSIS\": getattr(cfg, \"pipeline_output_parser_max_items_analysis\", 150),\n        \"EXPLOIT\": getattr(cfg, \"pipeline_output_parser_max_items_exploit\", 50),\n        \"REPORT\": getattr(cfg, \"pipeline_output_parser_max_items_report\", 25),\n    }\n\n\n_MAX_ITEMS_BY_PHASE: dict[str, int] = _get_max_items_by_phase()\n\nDEFAULT_MAX_ITEMS = 100\n\nMAX_RAW_FALLBACK = 3000"
+        },
+        {
+          "file": "airecon/proxy/agent/output_parser.py",
+          "lines": "729",
+          "snippet": "    max_items = _MAX_ITEMS_BY_PHASE.get(phase.upper(), DEFAULT_MAX_ITEMS)"
+        }
+      ]
+    },
+    {
+      "name": "periodic meta-reasoning self-reflection injection",
+      "what_it_is": "_inject_meta_reflection_context runs in the per-cycle context-injection stage and, when MetaReasoningEngine.should_reflect reports that reflection_interval iterations (default 15) have elapsed since the last reflection, injects a META-REASONING REFLECTION system message built by build_reflection_prompt. The prompt reports the phase, iteration count, vulnerabilities found, consecutive failures and a summary of the last 20 tool actions, then asks the model whether it is stuck in a repetitive pattern, using the right tools for the phase, and holding wrong assumptions, and demands one concrete high-impact action for the next iterations. last_reflection_iteration is reset to the current iteration and a hint capturing iteration, phase, failures and recent tools is stored via record_reflection_hint.",
+      "function_in_system": "Sits in the LLM loop's context-injection stage (loop_cycle_llm.py:395), gated to a fixed iteration cadence. On that schedule it forces the agent to audit its own recent trajectory and commit to a concrete redirect. Otherwise the agent keeps following an unproductive line, repeating the same tools and acting on stale assumptions, with nothing prompting it to notice and correct course while no hard failure signal has fired.",
+      "activation": "always",
+      "enforcement": "prompt",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/meta_reasoning.py",
+          "lines": "40-44",
+          "snippet": "    def should_reflect(self, current_iteration: int) -> bool:\n        return (\n            current_iteration - self.last_reflection_iteration\n            >= self.reflection_interval\n        )"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_llm.py",
+          "lines": "394-395",
+          "snippet": "        # Inject meta-reasoning self-reflection every N iterations\n        self._inject_meta_reflection_context(current_phase)"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_llm.py",
+          "lines": "547-549",
+          "snippet": "        engine = self._meta_reasoning_engine\n        if not engine.should_reflect(self.state.iteration):\n            return"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_llm.py",
+          "lines": "574-578",
+          "snippet": "        self.state.conversation.append({\n            \"role\": \"system\",\n            \"content\": prompt,\n        })\n        engine.last_reflection_iteration = self.state.iteration"
+        },
+        {
+          "file": "airecon/proxy/agent/meta_reasoning.py",
+          "lines": "84-91",
+          "snippet": "            \"Questions to answer:\\n\"\n            \"1. Are you stuck in a repetitive pattern?\\n\"\n            \"2. Are you using the right tools for this phase?\\n\"\n            \"3. What assumptions have you made that might be wrong?\\n\"\n            \"4. What DIFFERENT approach should you try?\\n\"\n            \"5. What is the most HIGH-IMPACT action for next 5 iterations?\\n\"\n            f\"{lateral_questions}\\n\"\n            \"Answer concisely. Provide ONE concrete action to take next.\""
+        }
+      ]
+    },
+    {
+      "name": "evidence-gated phase-transition confidence gate",
+      "what_it_is": "should_transition advances a phase only after passing graduated gates: a dynamic minimum-iteration floor from _calculate_dynamic_min_iterations (RECON 10 if data is present, 20 if none, ANALYSIS 3, EXPLOIT 2, else 5), then for RECON a strong-signal count over _evaluate_criteria (subdomains, live_hosts, urls, ports, artifacts; needs at least pipeline_recon_strong_signals_threshold, default 2) with a mandatory live_hosts_validated criterion before an early soft-timeout transition, and for the other phases a _phase_transition_confidence score compared against _PHASE_CONFIDENCE_THRESHOLDS (default 0.50). CTF mode blocks all transitions.",
+      "function_in_system": "Runs each cycle before a transition (loop_cycle_prelude.py:970). It holds the agent in the current phase until enough evidence and iterations accumulate. Otherwise the pipeline advances to EXPLOIT or REPORT on a thin or empty picture, so the agent exploits and reports before it has mapped the attack surface.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/pipeline.py",
+          "lines": "826-836",
+          "snippet": "        # Dynamic minimum: based on evidence collected, not just iteration count\n        min_iterations = self._calculate_dynamic_min_iterations(current)\n        if iterations_in_phase < min_iterations:\n            logger.debug(\n                \"[Pipeline] Phase %s: %d iterations < dynamic min %d (based on evidence collected) — continue\",\n                current.value,\n                iterations_in_phase,\n                min_iterations,\n            )\n            return False\n"
+        },
+        {
+          "file": "airecon/proxy/agent/pipeline.py",
+          "lines": "896-902",
+          "snippet": "            strong_signals = sum(\n                [has_subs, has_live, has_urls, has_ports, has_artifacts]\n            )\n            _recon_strong_signals_threshold = _get_phase_setting(\n                \"pipeline_recon_strong_signals_threshold\", 2\n            )\n            if strong_signals >= _recon_strong_signals_threshold:"
+        },
+        {
+          "file": "airecon/proxy/agent/pipeline.py",
+          "lines": "940-941",
+          "snippet": "        threshold = _PHASE_CONFIDENCE_THRESHOLDS.get(current, 0.50)\n        decision = confidence >= threshold"
+        },
+        {
+          "file": "airecon/proxy/agent/pipeline.py",
+          "lines": "952-968",
+          "snippet": "    def _calculate_dynamic_min_iterations(self, phase: PipelinePhase) -> int:\n        \"\"\"Calculate minimum iterations based on evidence collected, not just time.\"\"\"\n        if phase == PipelinePhase.RECON:\n            # If we have some data, min 10 iter (cooldown); if nothing, min 20 iter\n            has_data = bool(\n                getattr(self.session, \"urls\", [])\n                or getattr(self.session, \"open_ports\", {})\n                or getattr(self.session, \"subdomains\", [])\n            )\n            return 10 if has_data else 20\n        elif phase == PipelinePhase.ANALYSIS:\n            # Min 3 iterations to analyze\n            return 3\n        elif phase == PipelinePhase.EXPLOIT:\n            # Min 2 iterations\n            return 2\n        return 5"
+        },
+        {
+          "file": "airecon/proxy/agent/loop_cycle_prelude.py",
+          "lines": "970-975",
+          "snippet": "                    and self.pipeline.should_transition()\n                ):\n                    _prev_phase = self.pipeline.get_current_phase()\n                    new_phase = self.pipeline.transition()\n                    if new_phase:\n                        pipeline_prompt = self.pipeline.get_transition_prompt(new_phase)"
+        }
+      ]
+    },
+    {
+      "name": "phase stagnation escape with adaptive re-routing",
+      "what_it_is": "transition() forces a phase change when the phase is stuck, overriding the confidence gate. A per-phase iteration ceiling (_recon/_analysis/_exploit_max_iterations) sets _stagnation_trigger; in EXPLOIT it also fires when pipeline_stagnation_vuln_baseline_iterations (default 30) pass with no new vulnerabilities over the phase-entry baseline; should_transition additionally hard-caps any phase at pipeline_max_iterations_cap (default 350). On escape _resolve_next_phase picks the next phase adaptively: RECON or ANALYSIS jump forward to EXPLOIT when an actionable exploit signal exists, ANALYSIS falls back to RECON when _surface_needs_more_recon reports gaps, and EXPLOIT falls back to ANALYSIS on stagnation or advances to REPORT when findings are reportable.",
+      "function_in_system": "Runs each cycle at the transition point (loop_cycle_prelude.py:973). It breaks the agent out of a phase that stopped producing progress and sends it to the most useful next phase, including backward to recon or analysis. Otherwise the agent burns its whole budget looping in one phase (for example EXPLOIT with no new findings) and never reaches reporting.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/pipeline.py",
+          "lines": "838-847",
+          "snippet": "        _max_cap = _get_phase_setting(\"pipeline_max_iterations_cap\", 350)\n        MAX_PHASE_ITERATIONS = _max_cap\n        if iterations_in_phase > MAX_PHASE_ITERATIONS:\n            logger.warning(\n                \"Phase %s has run for %d iterations (limit=%d) - forcing transition to prevent stagnation\",\n                current.value,\n                iterations_in_phase,\n                MAX_PHASE_ITERATIONS,\n            )\n            return True"
+        },
+        {
+          "file": "airecon/proxy/agent/pipeline.py",
+          "lines": "1405-1427",
+          "snippet": "        _stagnation_max = {\n            PipelinePhase.RECON: self._recon_max_iterations,\n            PipelinePhase.ANALYSIS: self._analysis_max_iterations,\n            PipelinePhase.EXPLOIT: self._exploit_max_iterations,\n        }.get(current, 999999)\n        _stagnation_trigger = iterations_in_phase >= _stagnation_max\n\n        # Also trigger if no new vulns appeared in last X iterations (from config)\n        _stag_vuln_iters = _get_phase_setting(\n            \"pipeline_stagnation_vuln_baseline_iterations\", 30\n        )\n        if current == PipelinePhase.EXPLOIT and not _stagnation_trigger:\n            _vuln_new = current_vulns - self._phase_vuln_baseline\n            if iterations_in_phase >= _stag_vuln_iters and _vuln_new <= 0:\n                _stagnation_trigger = True\n                logger.info(\n                    \"[Pipeline] EXPLOIT stagnation: %d iters, no new vulns \"\n                    \"(baseline=%d, current=%d) — forcing transition\",\n                    iterations_in_phase,\n                    self._phase_vuln_baseline,\n                    current_vulns,\n                )\n"
+        },
+        {
+          "file": "airecon/proxy/agent/pipeline.py",
+          "lines": "1367-1395",
+          "snippet": "    def _resolve_next_phase(\n        self,\n        current: PipelinePhase,\n        *,\n        stagnation_trigger: bool = False,\n    ) -> PipelinePhase:\n        catalog_next = self._next_phase_from_catalog(current)\n\n        if current == PipelinePhase.RECON:\n            if self._has_actionable_exploit_signal():\n                return PipelinePhase.EXPLOIT\n            return catalog_next\n\n        if current == PipelinePhase.ANALYSIS:\n            if self._has_actionable_exploit_signal():\n                return PipelinePhase.EXPLOIT\n            if self._surface_needs_more_recon():\n                return PipelinePhase.RECON\n            return catalog_next\n\n        if current == PipelinePhase.EXPLOIT:\n            if self._has_reportable_findings():\n                return PipelinePhase.REPORT\n            if stagnation_trigger:\n                return PipelinePhase.ANALYSIS\n            return catalog_next\n\n        return catalog_next\n"
+        },
+        {
+          "file": "airecon/proxy/agent/pipeline.py",
+          "lines": "1353-1366",
+          "snippet": "    def _surface_needs_more_recon(self) -> bool:\n        subdomains = getattr(self.session, \"subdomains\", []) or []\n        live_hosts = getattr(self.session, \"live_hosts\", []) or []\n        urls = getattr(self.session, \"urls\", []) or []\n        technologies = getattr(self.session, \"technologies\", {}) or {}\n\n        if subdomains and not live_hosts:\n            return True\n        if live_hosts and not urls:\n            return True\n        if urls and not technologies and not self._has_actionable_exploit_signal():\n            return True\n        return False\n"
+        }
+      ]
+    },
+    {
+      "name": "concurrency-bounded parallel subagent execution",
+      "what_it_is": "ParallelAgentRunner.run_parallel guards subagent execution with asyncio.Semaphore(self.max_concurrent) (default 3). Every target runs inside bounded_run, which acquires the semaphore before starting its SubagentCoordinator, so at most max_concurrent subagent graphs run at once while the remaining targets wait for a slot. All target tasks are created up front and collected together with asyncio.gather.",
+      "function_in_system": "Sits in the run_parallel_agents tool path (executors_dispatch.py:285) that fans a target list out into per-target recon subagents. It caps how many subagent graphs, each with its own Ollama loop, run concurrently. Otherwise spawning one agent per target at once floods the Ollama backend and the target hosts, exhausting memory and connections and degrading every agent together.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/subagent.py",
+          "lines": "159",
+          "snippet": "        semaphore = asyncio.Semaphore(self.max_concurrent)"
+        },
+        {
+          "file": "airecon/proxy/agent/subagent.py",
+          "lines": "241-248",
+          "snippet": "        async def bounded_run(target: str) -> tuple[str, SessionData]:\n            session = SessionData(target=target)\n            coordinator = SubagentCoordinator(\n                ollama=ollama, engine=self.engine, session=session\n            )\n            async with semaphore:\n                try:\n                    return await run_single(target, coordinator)"
+        },
+        {
+          "file": "airecon/proxy/agent/subagent.py",
+          "lines": "262-268",
+          "snippet": "        tasks = [asyncio.create_task(bounded_run(t)) for t in targets]\n        self._active_tasks = tasks\n\n        for t in targets:\n            self._report_progress(t, \"⏳ Waiting for slot...\")\n\n        results = await asyncio.gather(*tasks, return_exceptions=True)"
+        },
+        {
+          "file": "airecon/proxy/agent/executors_dispatch.py",
+          "lines": "254",
+          "snippet": "            runner = ParallelAgentRunner(engine=self.engine)"
+        }
+      ]
+    },
+    {
+      "name": "parallel-subagent fault isolation with graceful batch teardown",
+      "what_it_is": "run_parallel tolerates individual subagent failures. Each subagent runs in bounded_run under try/except: asyncio.CancelledError reports Cancelled and re-raises, any other Exception reports the failure and sets the shared _cancel_event so sibling agents wind down. Running agents poll _cancel_event.is_set() and call coordinator.stop() to break their event stream. asyncio.gather runs with return_exceptions=True and the result loop skips BaseException results while collecting every successful (target, session) tuple, so surviving agents' findings are kept and a completed/failed tally is reported. SubagentCoordinator.start_recon separately wraps its graph stream in try/except, logging the error and still saving the session and yielding task_complete.",
+      "function_in_system": "Sits in the parallel subagent runner (run_parallel_agents tool). It contains a single subagent's crash so it neither loses sibling results nor aborts the orchestrator, and it winds remaining agents down once one has failed hard. Otherwise one subagent raising an unhandled exception propagates through asyncio.gather and discards the entire parallel batch, including agents that already produced findings.",
+      "activation": "always",
+      "enforcement": "code",
+      "evidence": [
+        {
+          "file": "airecon/proxy/agent/subagent.py",
+          "lines": "241-260",
+          "snippet": "        async def bounded_run(target: str) -> tuple[str, SessionData]:\n            session = SessionData(target=target)\n            coordinator = SubagentCoordinator(\n                ollama=ollama, engine=self.engine, session=session\n            )\n            async with semaphore:\n                try:\n                    return await run_single(target, coordinator)\n                except asyncio.CancelledError:\n                    self._report_progress(target, \"❌ Cancelled\")\n                    raise\n                except Exception as exc:\n                    self._report_progress(target, f\"❌ Failed: {exc}\")\n                    logger.error(\n                        \"Agent for %s failed: %s — setting cancel event for siblings\",\n                        target,\n                        exc,\n                    )\n                    self._cancel_event.set()\n                    raise"
+        },
+        {
+          "file": "airecon/proxy/agent/subagent.py",
+          "lines": "180-182",
+          "snippet": "                if self._cancel_event.is_set():\n                    coordinator.stop()\n                    break"
+        },
+        {
+          "file": "airecon/proxy/agent/subagent.py",
+          "lines": "268-281",
+          "snippet": "        results = await asyncio.gather(*tasks, return_exceptions=True)\n        self._active_tasks.clear()\n\n        completed = 0\n        failed = 0\n        for result in results:\n            if isinstance(result, BaseException):\n                logger.error(\"Subagent task raised exception: %s\", result)\n                failed += 1\n                continue\n            if isinstance(result, tuple):\n                target, session = result\n                self._results[target] = session\n                completed += 1"
+        },
+        {
+          "file": "airecon/proxy/agent/subagent.py",
+          "lines": "61-70",
+          "snippet": "        try:\n            async for event in self._stream_graph_events(graph):\n                if self._stop_requested:\n                    break\n                if getattr(event, \"type\", None) == \"done\":\n                    continue\n                yield event\n        except Exception as e:\n            logger.error(\"AgentGraph execution failed on %s: %s\", target, e)\n        save_session(self.session)"
+        }
+      ]
+    }
+  ]
+}
